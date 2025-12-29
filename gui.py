@@ -521,6 +521,38 @@ class BoardGUI:
             text_x = pixel_cx - text_rect.width / 2
             text_y = rect_top + rect_height + 2
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
+            
+            # Draw HP bar below name only when health < 100
+            health = char.get('health', 100)
+            if health < 100:
+                hp_bar_y = int(text_y + text_rect.height + 2)
+                hp_bar_width = rect_width
+                hp_bar_height = max(3, int(4 * self.zoom))
+                hp_bar_x = int(pixel_cx - hp_bar_width / 2)
+                
+                # Background (dark red)
+                pygame.draw.rect(self.screen, (80, 0, 0),
+                               (hp_bar_x, hp_bar_y, hp_bar_width, hp_bar_height))
+                
+                # Foreground (green to red based on health)
+                hp_ratio = max(0, health) / 100.0
+                fill_width = int(hp_bar_width * hp_ratio)
+                if fill_width > 0:
+                    # Color gradient: green (high health) -> yellow -> red (low health)
+                    if hp_ratio > 0.5:
+                        # Green to yellow
+                        r = int(255 * (1 - hp_ratio) * 2)
+                        g = 255
+                    else:
+                        # Yellow to red
+                        r = 255
+                        g = int(255 * hp_ratio * 2)
+                    pygame.draw.rect(self.screen, (r, g, 0),
+                                   (hp_bar_x, hp_bar_y, fill_width, hp_bar_height))
+                
+                # Border
+                pygame.draw.rect(self.screen, (0, 0, 0),
+                               (hp_bar_x, hp_bar_y, hp_bar_width, hp_bar_height), 1)
     
     def _draw_sword_swing(self, char, cx, cy, rect_width, rect_height):
         """Draw sword swing animation arc if character is attacking."""

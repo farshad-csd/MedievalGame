@@ -3347,8 +3347,8 @@ class GameLogic:
         player['attack_animation_start'] = time.time()
         player['attack_direction'] = self._facing_to_attack_direction(facing)
         
-        # Calculate attack hitbox based on facing direction (1 cell range)
-        attack_range = 1.0
+        # Calculate attack hitbox based on facing direction
+        attack_range = COMBAT_RANGE
         targets_hit = []
         
         # Get attack direction vector
@@ -3383,19 +3383,20 @@ class GameLogic:
                 target['health'] -= damage
                 self.state.log_action(f"{name} ATTACKS {target_name} for {damage}! HP: {target['health']}")
                 
-                # Mark player as aggressor if target wasn't hostile
-                if not target.get('is_aggressor') and not target.get('is_murderer') and not target.get('is_thief'):
+                # Check if target was already a criminal before this attack
+                target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
+                
+                # If attacking an innocent, mark as aggressor and alert witnesses
+                if not target_was_criminal and not player.get('is_aggressor'):
                     player['is_aggressor'] = True
+                    self.witness_murder(player, target)
                 
                 if target['health'] <= 0:
-                    target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
-                    
                     if target_was_criminal:
                         self.state.log_action(f"{name} KILLED {target_name} (justified)!")
                     else:
                         player['is_murderer'] = True
                         self.state.log_action(f"{name} KILLED {target_name}!")
-                        self.witness_murder(player, target)
                     
                     # Transfer items
                     self.state.transfer_all_items(target, player)
