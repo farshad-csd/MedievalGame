@@ -101,7 +101,7 @@ FARM_REPLANT_TIME = 5 * TICK_MULTIPLIER  # 5 seconds worth of ticks
 # =============================================================================
 FOOD_PRICE_PER_UNIT = 5  # 5 gold per food
 FARMER_PERSONAL_RESERVE = 10  # Food needed to feed self for a year (~3 food/day × 3 days)
-TRADE_COOLDOWN = 30 * TICK_MULTIPLIER  # 30 seconds worth of ticks
+TRADE_COOLDOWN = 3 * TICK_MULTIPLIER  # 3 seconds worth of ticks (quick trading)
 
 # =============================================================================
 # VENDOR SYSTEM
@@ -202,22 +202,34 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL
 MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
 
 # =============================================================================
-# SMOOTH MOVEMENT (RPG-style real-time movement)
+# ALTTP-STYLE MOVEMENT (Float-based continuous movement)
 # =============================================================================
-# Player movement: milliseconds between moves while key is held
-PLAYER_MOVE_INTERVAL_MS = 480  # ~2.08 cells per second (25% faster than 600)
+# Movement speed in cells per second (ALTTP Link moves ~1.5 tiles/sec)
+MOVEMENT_SPEED = 3.0  # cells per second (doubled for snappier feel)
 
-# NPC movement: milliseconds to animate between cells
-# LONGER than move interval so next move interrupts mid-animation = continuous motion
-NPC_MOVE_DURATION_MS = 960  # Adjusted for 25% faster movement
+# Character hitbox dimensions (in cells, not pixels)
+# ALTTP Link is roughly 16x22 in a 16x16 world (1.0 x 1.375 cells)
+# Characters are taller than wide, allowing them to weave between obstacles
+CHARACTER_WIDTH = 0.7   # 70% of a cell wide
+CHARACTER_HEIGHT = 0.9  # 90% of a cell tall
 
-# Player movement: milliseconds for slide animation  
-# LONGER than move interval so it feels continuous while holding key
-PLAYER_MOVE_DURATION_MS = 720  # Adjusted for 25% faster movement
+# Collision radius - how close before characters "bump" each other
+# Set VERY small to allow characters to squeeze past each other like in ALTTP
+# Characters can overlap significantly - this just prevents standing on exact same spot
+CHARACTER_COLLISION_RADIUS = 0.15  # Tiny - only blocks when nearly on top of each other
 
-# NPC movement rate: move every N ticks (lower = faster walking)
-# With TICK_MULTIPLIER=10, setting this to 6 means ~1.67 moves/second (25% faster than 8)
-NPC_MOVE_TICK_INTERVAL = 6  # NPCs move every 6 ticks = ~1.67 cells/second
+# Adjacency threshold - how close characters need to be for interactions
+# Generous range so characters don't need to be perfectly aligned to trade/talk
+ADJACENCY_DISTANCE = 1.3  # Within 1.8 cells - can interact from reasonable distance
+
+# Combat range - need to be closer for attacks
+COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
+
+# Legacy constants for compatibility (no longer used for actual movement)
+PLAYER_MOVE_INTERVAL_MS = 480  # Kept for reference
+NPC_MOVE_DURATION_MS = 960
+PLAYER_MOVE_DURATION_MS = 720
+NPC_MOVE_TICK_INTERVAL = 6
 
 # =============================================================================
 # SLEEP SETTINGS

@@ -5,10 +5,12 @@ It is purely a data container - no game logic, no rendering.
 """
 
 import random
+import math
 from constants import (
     SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL,
     INVENTORY_SLOTS, FOOD_STACK_SIZE, BARREL_SLOTS, BARREL_FOOD_STACK_SIZE,
-    SKILLS
+    SKILLS, CELL_SIZE,
+    CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
 from scenario_world import AREAS, BARRELS, BEDS
 from scenario_characters import CHARACTER_TEMPLATES
@@ -205,9 +207,18 @@ class GameState:
             # Identity
             'name': name,
             
-            # Position
-            'x': x,
-            'y': y,
+            # Position (float-based for smooth ALTTP-style movement)
+            # Characters spawn at the CENTER of their starting cell
+            'x': float(x) + 0.5,
+            'y': float(y) + 0.5,
+            
+            # Velocity for continuous movement (cells per second)
+            'vx': 0.0,
+            'vy': 0.0,
+            
+            # Hitbox dimensions (can be customized per character later)
+            'width': CHARACTER_WIDTH,
+            'height': CHARACTER_HEIGHT,
             
             # Core stats (mutable)
             'age': template['starting_age'],
@@ -299,9 +310,11 @@ class GameState:
         return [c for c in self.characters if c.get('job') == job]
     
     def get_area_at(self, x, y):
-        """Get the area name at a position"""
-        if 0 <= x < SIZE and 0 <= y < SIZE:
-            return self.area_map[y][x]
+        """Get the area name at a position. Works with float positions."""
+        cell_x = int(x)
+        cell_y = int(y)
+        if 0 <= cell_x < SIZE and 0 <= cell_y < SIZE:
+            return self.area_map[cell_y][cell_x]
         return None
     
     def get_area_by_role(self, role):
@@ -323,26 +336,88 @@ class GameState:
         return None
     
     def is_position_valid(self, x, y):
-        """Check if position is within bounds"""
+        """Check if position is within bounds (works with float positions)"""
         return 0 <= x < SIZE and 0 <= y < SIZE
     
-    def is_occupied(self, x, y):
-        """Check if a cell is occupied by any character"""
+    def is_position_blocked(self, x, y, exclude_char=None):
+        """Check if a position would hard-collide with any character.
+        Uses a small collision radius to allow characters to squeeze past each other
+        like in ALTTP - characters can overlap significantly but can't stand on same spot.
+        
+        Args:
+            x, y: Position to check (float)
+            exclude_char: Character to exclude from check (for self-collision)
+        """
         for char in self.characters:
-            if char['x'] == x and char['y'] == y:
+            if char is exclude_char:
+                continue
+            # Use small collision radius - characters can squeeze past each other
+            dx = abs(char['x'] - x)
+            dy = abs(char['y'] - y)
+            # Only block if centers are VERY close (within 2x collision radius)
+            collision_dist = CHARACTER_COLLISION_RADIUS * 2
+            if dx < collision_dist and dy < collision_dist:
+                # Use circular distance for smoother collision
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist < collision_dist:
+                    return True
+        return False
+    
+    def is_occupied(self, x, y):
+        """Check if a cell is occupied by any character (for grid-based queries).
+        Converts float position to cell and checks if any character's center is in that cell.
+        """
+        cell_x = int(x)
+        cell_y = int(y)
+        for char in self.characters:
+            char_cell_x = int(char['x'])
+            char_cell_y = int(char['y'])
+            if char_cell_x == cell_x and char_cell_y == cell_y:
                 return True
         return False
     
     def get_character_at(self, x, y):
-        """Get character at position, if any"""
+        """Get character whose center is in the cell at position (x, y)."""
+        cell_x = int(x)
+        cell_y = int(y)
         for char in self.characters:
-            if char['x'] == x and char['y'] == y:
+            char_cell_x = int(char['x'])
+            char_cell_y = int(char['y'])
+            if char_cell_x == cell_x and char_cell_y == cell_y:
                 return char
         return None
     
+    def get_character_near(self, x, y, radius=None):
+        """Get the closest character within radius of position (x, y).
+        Uses float-based distance calculation.
+        
+        Args:
+            x, y: Position to check (float)
+            radius: Maximum distance (default: ADJACENCY_DISTANCE)
+        """
+        if radius is None:
+            radius = ADJACENCY_DISTANCE
+        
+        closest = None
+        closest_dist = float('inf')
+        
+        for char in self.characters:
+            dist = math.sqrt((char['x'] - x) ** 2 + (char['y'] - y) ** 2)
+            if dist < radius and dist < closest_dist:
+                closest = char
+                closest_dist = dist
+        
+        return closest
+    
     def is_in_village(self, x, y):
-        """Check if position is in the village area (including sub-areas)"""
-        area = self.area_map[y][x] if self.is_position_valid(x, y) else None
+        """Check if position is in the village area (including sub-areas).
+        Works with float positions - uses the cell containing the point.
+        """
+        cell_x = int(x)
+        cell_y = int(y)
+        if not (0 <= cell_x < SIZE and 0 <= cell_y < SIZE):
+            return False
+        area = self.area_map[cell_y][cell_x]
         # Check against AREAS config for is_village_part
         for area_def in AREAS:
             if area_def["name"] == area and area_def.get("is_village_part"):
@@ -398,11 +473,13 @@ class GameState:
         return perimeter
     
     def get_farm_cell_state(self, x, y):
-        """Get the state of a farm cell"""
-        return self.farm_cells.get((x, y))
+        """Get the state of a farm cell. Works with float positions."""
+        cell_x = int(x)
+        cell_y = int(y)
+        return self.farm_cells.get((cell_x, cell_y))
     
     def get_area_allegiance(self, x, y):
-        """Get the allegiance of the area at a position"""
+        """Get the allegiance of the area at a position. Works with float positions."""
         area_name = self.get_area_at(x, y)
         if area_name:
             for area_def in AREAS:
@@ -411,8 +488,10 @@ class GameState:
         return None
     
     def get_farm_cell_allegiance(self, x, y):
-        """Get the allegiance of a farm cell"""
-        cell = self.farm_cells.get((x, y))
+        """Get the allegiance of a farm cell. Works with float positions."""
+        cell_x = int(x)
+        cell_y = int(y)
+        cell = self.farm_cells.get((cell_x, cell_y))
         if cell:
             return cell.get('allegiance')
         return None
@@ -648,14 +727,19 @@ class GameState:
         return None
     
     def is_adjacent_to_barrel(self, char, barrel):
-        """Check if character is adjacent to the barrel"""
+        """Check if character is adjacent to the barrel. Works with float positions.
+        Character is adjacent if their center is within ADJACENCY_DISTANCE of barrel center.
+        """
         pos = self.get_barrel_position(barrel)
         if not pos:
             return False
+        # Barrel center is at (bx + 0.5, by + 0.5)
         bx, by = pos
-        dx = abs(char['x'] - bx)
-        dy = abs(char['y'] - by)
-        return (dx == 1 and dy == 0) or (dx == 0 and dy == 1) or (dx == 0 and dy == 0)
+        barrel_cx = bx + 0.5
+        barrel_cy = by + 0.5
+        # Calculate distance from character center to barrel center
+        dist = math.sqrt((char['x'] - barrel_cx) ** 2 + (char['y'] - barrel_cy) ** 2)
+        return dist <= ADJACENCY_DISTANCE
     
     def can_use_barrel(self, char, barrel):
         """Check if character can use (take from) this barrel.

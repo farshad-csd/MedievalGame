@@ -16,7 +16,7 @@ from constants import (
     FARM_CELL_COLORS, JOB_COLORS, SKILLS,
     BG_COLOR, GRID_COLOR, TEXT_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
-    PLAYER_MOVE_INTERVAL_MS, NPC_MOVE_DURATION_MS, PLAYER_MOVE_DURATION_MS
+    MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
 from scenario_characters import CHARACTER_TEMPLATES
@@ -102,31 +102,15 @@ class BoardGUI:
         # Timing
         self.clock = pygame.time.Clock()
         self.last_tick_time = pygame.time.get_ticks()
+        self.last_frame_time = pygame.time.get_ticks()  # For delta time calculation
         
-        # Smooth movement interpolation - using REAL TIME, not game ticks
-        # Each character tracks: previous position, current position, and when movement started
-        self.char_anim = {}  # name -> {'prev_x', 'prev_y', 'curr_x', 'curr_y', 'move_start_time'}
-        self._init_char_positions()
-        
-        # Player continuous movement
-        self.last_player_move_time = 0
+        # Player movement state - which keys are currently held
+        self.player_moving = False
         
         # Running state
         self.running = True
     
-    def _init_char_positions(self):
-        """Initialize character position tracking for smooth interpolation"""
-        current_time = pygame.time.get_ticks()
-        for char in self.state.characters:
-            self.char_anim[char['name']] = {
-                'prev_x': float(char['x']),
-                'prev_y': float(char['y']),
-                'curr_x': float(char['x']),
-                'curr_y': float(char['y']),
-                'move_start_time': current_time,
-                'is_player': self.logic.is_player(char)
-            }
-    
+
     def _setup_buttons(self):
         """Setup button positions and sizes"""
         button_y = self.info_bar_height + 10
@@ -172,16 +156,7 @@ class BoardGUI:
         self._handle_continuous_movement()
     
     def _handle_continuous_movement(self):
-        """Handle continuous player movement while keys are held"""
-        current_time = pygame.time.get_ticks()
-        
-        # Scale movement interval with game speed (faster game = can move more frequently)
-        move_interval = PLAYER_MOVE_INTERVAL_MS / self.state.game_speed
-        
-        # Only move if enough time has passed since last move
-        if current_time - self.last_player_move_time < move_interval:
-            return
-        
+        """Handle continuous player movement while keys are held - ALTTP style"""
         keys = pygame.key.get_pressed()
         
         # Calculate movement direction
@@ -201,34 +176,14 @@ class BoardGUI:
             dx = 1
         
         if dx != 0 or dy != 0:
-            if self._do_player_move(dx, dy):
-                self.last_player_move_time = current_time
-    
-    def _do_player_move(self, dx, dy):
-        """Execute player movement and trigger animation"""
-        player = self.state.player
-        if not player:
-            return False
-        
-        # Get current visual position before move (for seamless animation)
-        vis_x, vis_y = self._get_interpolated_position(player)
-        
-        # Try to move
-        moved = self.logic.move_player(dx, dy)
-        
-        if moved:
-            # Update animation tracking - start from VISUAL position, not grid
-            name = player['name']
-            current_time = pygame.time.get_ticks()
-            
-            if name in self.char_anim:
-                self.char_anim[name]['prev_x'] = vis_x
-                self.char_anim[name]['prev_y'] = vis_y
-                self.char_anim[name]['curr_x'] = float(player['x'])
-                self.char_anim[name]['curr_y'] = float(player['y'])
-                self.char_anim[name]['move_start_time'] = current_time
-        
-        return moved
+            # Set player velocity (logic handles normalization for diagonal)
+            self.logic.move_player(dx, dy)
+            self.player_moving = True
+        else:
+            # No movement keys held - stop player
+            if self.player_moving:
+                self.logic.stop_player()
+                self.player_moving = False
     
     def _handle_keydown(self, event):
         """Handle keyboard input (non-movement actions)"""
@@ -281,9 +236,6 @@ class BoardGUI:
         for _ in range(TICKS_PER_YEAR):
             self.logic.process_tick()
         
-        # Reset position tracking after skip
-        self._init_char_positions()
-        
         self.state.log_action("=== SKIP COMPLETE ===")
     
     # =========================================================================
@@ -291,96 +243,31 @@ class BoardGUI:
     # =========================================================================
     
     def _game_loop(self):
-        """Main game loop - called every frame, processes ticks as needed"""
+        """Main game loop - called every frame, processes ticks and updates positions"""
         current_time = pygame.time.get_ticks()
+        
+        # Calculate delta time for smooth movement (in seconds)
+        dt = (current_time - self.last_frame_time) / 1000.0
+        self.last_frame_time = current_time
+        
+        # Cap delta time to prevent huge jumps
+        dt = min(dt, 0.1)  # Max 100ms per frame
+        
+        # Scale dt by game speed for player movement
+        scaled_dt = dt * self.state.game_speed
+        
+        # Update player and NPC positions based on velocity (every frame for smooth movement)
+        if not self.state.paused:
+            self.logic.update_player_position(scaled_dt)
+            self.logic.update_npc_positions(scaled_dt)
+        
+        # Process game ticks at the correct interval
         interval = UPDATE_INTERVAL // self.state.game_speed
         
         if not self.state.paused and current_time - self.last_tick_time >= interval:
-            # Snapshot NPC positions before processing tick
-            npc_positions_before = {}
-            for char in self.state.characters:
-                if not self.logic.is_player(char):
-                    npc_positions_before[char['name']] = (char['x'], char['y'])
-            
-            # Process game logic
+            # Process game logic (NPC movement, actions, etc.)
             self.logic.process_tick()
             self.last_tick_time = current_time
-            
-            # Check for NPC movement and update animation
-            self._update_npc_animations(npc_positions_before, current_time)
-    
-    def _update_npc_animations(self, positions_before, current_time):
-        """Update NPC animation state after a game tick"""
-        for char in self.state.characters:
-            name = char['name']
-            if self.logic.is_player(char):
-                continue  # Player handled separately
-            
-            # Ensure animation entry exists
-            if name not in self.char_anim:
-                self.char_anim[name] = {
-                    'prev_x': float(char['x']),
-                    'prev_y': float(char['y']),
-                    'curr_x': float(char['x']),
-                    'curr_y': float(char['y']),
-                    'move_start_time': current_time,
-                    'is_player': False
-                }
-                continue
-            
-            # Check if NPC moved
-            old_pos = positions_before.get(name)
-            if old_pos:
-                old_x, old_y = old_pos
-                new_x, new_y = char['x'], char['y']
-                
-                if old_x != new_x or old_y != new_y:
-                    # NPC moved - start animation from CURRENT VISUAL position (not grid)
-                    # This creates seamless motion when interrupting mid-animation
-                    vis_x, vis_y = self._get_interpolated_position(char)
-                    self.char_anim[name]['prev_x'] = vis_x
-                    self.char_anim[name]['prev_y'] = vis_y
-                    self.char_anim[name]['curr_x'] = float(new_x)
-                    self.char_anim[name]['curr_y'] = float(new_y)
-                    self.char_anim[name]['move_start_time'] = current_time
-        
-        # Clean up removed characters
-        active_names = {char['name'] for char in self.state.characters}
-        to_remove = [name for name in self.char_anim if name not in active_names]
-        for name in to_remove:
-            del self.char_anim[name]
-    
-    def _get_interpolated_position(self, char):
-        """Get smoothly interpolated position for rendering using real time"""
-        name = char['name']
-        current_time = pygame.time.get_ticks()
-        
-        if name not in self.char_anim:
-            return float(char['x']), float(char['y'])
-        
-        anim = self.char_anim[name]
-        
-        # Check for teleportation (large distance) - no interpolation
-        dx = anim['curr_x'] - anim['prev_x']
-        dy = anim['curr_y'] - anim['prev_y']
-        if abs(dx) > 2 or abs(dy) > 2:
-            return anim['curr_x'], anim['curr_y']
-        
-        # Calculate interpolation based on real elapsed time
-        elapsed = current_time - anim['move_start_time']
-        base_duration = PLAYER_MOVE_DURATION_MS if anim.get('is_player', False) else NPC_MOVE_DURATION_MS
-        
-        # Scale animation duration with game speed (faster speed = faster animation)
-        duration = base_duration / self.state.game_speed
-        
-        # Calculate progress (0.0 to 1.0) - LINEAR for constant speed
-        t = min(1.0, elapsed / duration) if duration > 0 else 1.0
-        
-        # Interpolate between previous and current
-        x = anim['prev_x'] + (anim['curr_x'] - anim['prev_x']) * t
-        y = anim['prev_y'] + (anim['curr_y'] - anim['prev_y']) * t
-        
-        return x, y
     
     # =========================================================================
     # RENDERING
@@ -415,7 +302,7 @@ class BoardGUI:
         if player:
             player_food = self.state.get_food(player)
             player_money = self.state.get_money(player)
-            player_info = f"Pos:({player['x']},{player['y']}) Food:{player_food} ${player_money} HP:{player['health']}"
+            player_info = f"Pos:({player['x']:.1f},{player['y']:.1f}) Food:{player_food} ${player_money} HP:{player['health']}"
         else:
             player_info = "No player"
         
@@ -546,24 +433,27 @@ class BoardGUI:
                                    (bedroll_x - 3, fire_cy - 6, 8, 12))
     
     def _draw_characters(self, canvas_x, canvas_y):
-        """Draw all characters with smooth interpolated positions"""
+        """Draw all characters at their float positions (ALTTP-style)"""
         for char in self.state.characters:
-            # Get interpolated position for smooth movement
-            vis_x, vis_y = self._get_interpolated_position(char)
+            # Use float position directly - positions are already continuous
+            vis_x = char['x']
+            vis_y = char['y']
             
             color = self._get_character_color(char)
             color_rgb = hex_to_rgb(color)
             
-            # Calculate pixel position from interpolated grid position
-            cell_x = canvas_x + vis_x * CELL_SIZE
-            cell_y = canvas_y + vis_y * CELL_SIZE
+            # Calculate pixel position from float grid position
+            # Character is drawn centered at their position
+            # Subtract 0.5 because character positions are at center, not top-left corner
+            pixel_x = canvas_x + (vis_x - 0.5) * CELL_SIZE
+            pixel_y = canvas_y + (vis_y - 0.5) * CELL_SIZE
             
             # Circle bounds (leaving room for name below)
             padding = 3
-            circle_top = cell_y + padding
-            circle_bottom = cell_y + CELL_SIZE - padding - 8
-            circle_left = cell_x + padding
-            circle_right = cell_x + CELL_SIZE - padding
+            circle_top = pixel_y + padding
+            circle_bottom = pixel_y + CELL_SIZE - padding - 8
+            circle_left = pixel_x + padding
+            circle_right = pixel_x + CELL_SIZE - padding
             circle_cx = int((circle_left + circle_right) / 2)
             circle_cy = int((circle_top + circle_bottom) / 2)
             
@@ -579,8 +469,8 @@ class BoardGUI:
             # Draw first name below circle
             first_name = char['name'].split()[0]
             text_surface, text_rect = self.font_tiny.render(first_name, (0, 0, 0))
-            text_x = cell_x + CELL_SIZE / 2 - text_rect.width / 2
-            text_y = cell_y + CELL_SIZE - 12
+            text_x = pixel_x + CELL_SIZE / 2 - text_rect.width / 2
+            text_y = pixel_y + CELL_SIZE - 12
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
     
     def _draw_character_eyes(self, char, cx, cy):

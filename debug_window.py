@@ -170,8 +170,8 @@ class DebugWindow:
         
         for char in self.state.characters:
             name = char['name']
-            # Get position
-            pos = f"({char['x']},{char['y']})"
+            # Get position - show as float
+            pos = f"({char['x']:.1f},{char['y']:.1f})"
             home = char.get('home', '-') or '-'
             job = char.get('job', '-') or '-'
             

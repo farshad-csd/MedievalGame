@@ -21,7 +21,9 @@ from constants import (
     ALLEGIANCE_FOOD_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
     CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
     SLEEP_START_FRACTION, PRIMARY_ALLEGIANCE,
-    NPC_MOVE_TICK_INTERVAL,
+    MOVEMENT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
+    CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
+    UPDATE_INTERVAL, TICK_MULTIPLIER,
     VENDOR_GOODS, GOODS_PRICES, GOODS_STACK_SIZES, VENDOR_PERSONAL_RESERVE
 )
 from scenario_characters import CHARACTER_TEMPLATES
@@ -69,25 +71,29 @@ class GameLogic:
         return template.get(trait_name, 0)
     
     def is_adjacent(self, char1, char2):
-        """Check if two characters are adjacent (including diagonally)"""
-        dx = abs(char1['x'] - char2['x'])
-        dy = abs(char1['y'] - char2['y'])
-        # Adjacent if within 1 cell in both directions (but not same cell)
-        return dx <= 1 and dy <= 1 and (dx > 0 or dy > 0)
+        """Check if two characters are adjacent (close enough to interact).
+        Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
+        """
+        dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
+        return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
+    
+    def is_in_combat_range(self, char1, char2):
+        """Check if two characters are close enough to attack each other.
+        Uses COMBAT_RANGE which is tighter than ADJACENCY_DISTANCE.
+        """
+        dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
+        return dist <= COMBAT_RANGE
     
     def get_adjacent_character(self, char):
-        """Get any character adjacent to the given character"""
-        for dx, dy in DIRECTIONS:
-            nx = char['x'] + dx
-            ny = char['y'] + dy
-            other = self.state.get_character_at(nx, ny)
-            if other and other != char:
+        """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
+        for other in self.state.characters:
+            if other != char and self.is_adjacent(char, other):
                 return other
         return None
     
     def get_distance(self, char1, char2):
-        """Manhattan distance between two characters"""
-        return abs(char1['x'] - char2['x']) + abs(char1['y'] - char2['y'])
+        """Euclidean distance between two characters (float-based)."""
+        return math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
     
     def _update_facing(self, char, dx, dy):
         """Update character's facing direction based on movement delta"""
@@ -138,27 +144,32 @@ class GameLogic:
     
     def can_make_camp_at(self, x, y):
         """Check if a camp can be made at this position.
+        Works with float positions - checks the cell containing the point.
         Cannot make camp on village grounds or on any farm.
         """
-        if not self.state.is_position_valid(x, y):
+        cell_x = int(x)
+        cell_y = int(y)
+        if not self.state.is_position_valid(cell_x, cell_y):
             return False
         # Cannot camp in village areas
-        if self.state.is_in_village(x, y):
+        if self.state.is_in_village(cell_x, cell_y):
             return False
         # Cannot camp on farm cells
-        if (x, y) in self.state.farm_cells:
+        if (cell_x, cell_y) in self.state.farm_cells:
             return False
         return True
     
     def make_camp(self, char):
         """Make a camp at the character's current position if possible.
-        Returns True if camp was made.
+        Returns True if camp was made. Stores camp position as cell coordinates.
         """
-        x, y = char['x'], char['y']
-        if self.can_make_camp_at(x, y):
-            char['camp_position'] = (x, y)
+        # Get the cell the character is in
+        cell_x = int(char['x'])
+        cell_y = int(char['y'])
+        if self.can_make_camp_at(cell_x, cell_y):
+            char['camp_position'] = (cell_x, cell_y)
             name = self.get_display_name(char)
-            self.state.log_action(f"{name} made a camp at ({x}, {y})")
+            self.state.log_action(f"{name} made a camp at ({cell_x}, {cell_y})")
             return True
         return False
 
@@ -267,12 +278,10 @@ class GameLogic:
     # =========================================================================
     
     def find_adjacent_farmer(self, char):
-        """Find a farmer adjacent to this character"""
-        for dx, dy in DIRECTIONS:
-            nx = char['x'] + dx
-            ny = char['y'] + dy
-            for other in self.state.characters:
-                if other['x'] == nx and other['y'] == ny and other.get('job') == 'Farmer':
+        """Find a farmer adjacent to this character (within ADJACENCY_DISTANCE)"""
+        for other in self.state.characters:
+            if other != char and other.get('job') == 'Farmer':
+                if self.is_adjacent(char, other):
                     return other
         return None
     
@@ -520,14 +529,11 @@ class GameLogic:
         return best_vendor
     
     def find_adjacent_vendor(self, char, goods_type):
-        """Find an adjacent vendor selling a specific goods type"""
-        for dx, dy in DIRECTIONS:
-            nx = char['x'] + dx
-            ny = char['y'] + dy
-            for vendor in self.state.characters:
-                if vendor['x'] == nx and vendor['y'] == ny:
-                    if self.is_vendor_of(vendor, goods_type):
-                        return vendor
+        """Find an adjacent vendor selling a specific goods type (within ADJACENCY_DISTANCE)"""
+        for vendor in self.state.characters:
+            if vendor != char and self.is_vendor_of(vendor, goods_type):
+                if self.is_adjacent(char, vendor):
+                    return vendor
         return None
     
     def find_willing_vendor(self, char, goods_type):
@@ -1225,8 +1231,10 @@ class GameLogic:
             self.state.log_action(f"{name} abandoned theft - crop already taken")
             return False
         
-        # If standing on the cell, steal immediately - THIS IS THE CRIME
-        if char['x'] == cx and char['y'] == cy:
+        # If standing on the cell (character's cell position matches), steal immediately
+        # Convert float position to cell coordinates
+        char_cell = (int(char['x']), int(char['y']))
+        if char_cell == cell:
             # Check if has inventory space
             if not self.can_add_food(char, FARM_CELL_YIELD):
                 char['theft_target'] = None
@@ -1573,93 +1581,170 @@ class GameLogic:
     def _process_npc_movement(self):
         """
         Process all NPC movement for this tick.
-        Uses swap detection to prevent oscillation.
-        Movement happens every NPC_MOVE_TICK_INTERVAL ticks for smooth walking.
+        Updates velocities based on goals. Position updates happen every frame via update_npc_positions().
         """
-        # NPCs move every few ticks for smooth walking animation
-        is_movement_tick = (self.state.ticks % NPC_MOVE_TICK_INTERVAL) == 0
-        
         npcs = [c for c in self.state.characters if not self.is_player(c)]
         
-        if is_movement_tick:
-            # Step 1: Calculate desired moves for ALL NPCs
-            desired = {}  # id(char) -> (x, y) or None
-            for char in npcs:
-                if char.get('is_frozen'):
-                    desired[id(char)] = None
-                else:
-                    desired[id(char)] = self._get_desired_step(char)
+        # Update velocities based on goals (decision-making happens per tick)
+        for char in npcs:
+            if char.get('is_frozen'):
+                char['vx'] = 0.0
+                char['vy'] = 0.0
+                continue
             
-            # Step 2: Detect and execute swaps (but NEVER for characters in combat)
-            swapped = set()
-            for char in npcs:
-                if id(char) in swapped:
-                    continue
-                dest = desired.get(id(char))
-                if not dest:
-                    continue
+            goal = self._get_goal(char)
+            if goal:
+                # Calculate direction to goal
+                dx = goal[0] - char['x']
+                dy = goal[1] - char['y']
+                dist = math.sqrt(dx * dx + dy * dy)
                 
-                # Is there someone at our destination who wants our spot?
-                other = self.state.get_character_at(dest[0], dest[1])
-                if other and other in npcs and id(other) not in swapped:
-                    other_dest = desired.get(id(other))
-                    if other_dest == (char['x'], char['y']):
-                        # Check if either character is in combat - if so, NO SWAP
-                        char_in_combat = (char.get('robbery_target') is not None or 
-                                          self.get_attacker(char) is not None)
-                        other_in_combat = (other.get('robbery_target') is not None or 
-                                           self.get_attacker(other) is not None)
-                        if char_in_combat or other_in_combat:
-                            continue  # Don't swap characters in combat
-                        
-                        # SWAP positions - update facing for both
-                        old_x, old_y = char['x'], char['y']
-                        char['x'], char['y'] = other['x'], other['y']
-                        other['x'], other['y'] = old_x, old_y
-                        # Update facing based on movement direction
-                        self._update_facing(char, other['x'] - old_x, other['y'] - old_y)
-                        self._update_facing(other, old_x - other['x'], old_y - other['y'])
-                        swapped.add(id(char))
-                        swapped.add(id(other))
-            
-            # Step 3: Execute non-swap moves
-            for char in npcs:
-                if id(char) in swapped:
-                    continue
-                dest = desired.get(id(char))
-                if dest and not self.state.is_occupied(dest[0], dest[1]):
-                    # Update facing based on movement direction
-                    dx = dest[0] - char['x']
-                    dy = dest[1] - char['y']
-                    self._update_facing(char, dx, dy)
-                    char['x'] = dest[0]
-                    char['y'] = dest[1]
+                if dist < 0.35:  # Close enough to goal - larger threshold prevents overshoot jitter
+                    char['vx'] = 0.0
+                    char['vy'] = 0.0
+                else:
+                    # Normalize and apply speed
+                    char['vx'] = (dx / dist) * MOVEMENT_SPEED
+                    char['vy'] = (dy / dist) * MOVEMENT_SPEED
+                    # Update facing direction
+                    self._update_facing_from_velocity(char)
+            else:
+                char['vx'] = 0.0
+                char['vy'] = 0.0
         
-        # Step 4: Run actions (combat, trading, eating, etc.) - happens every tick
+        # Run actions (combat, trading, eating, etc.)
         for char in npcs:
             if char not in self.state.characters:
                 continue  # Skip dead characters
             self._do_npc_actions(char)
         
-        # Step 5: Report crimes to nearby soldiers - happens every tick
+        # Report crimes to nearby soldiers
         for char in self.state.characters:
             self.try_report_crimes_to_soldier(char)
     
+    def update_npc_positions(self, dt):
+        """Update NPC positions based on velocity. Called every frame for smooth movement."""
+        npcs = [c for c in self.state.characters if not self.is_player(c)]
+        
+        for char in npcs:
+            vx = char.get('vx', 0.0)
+            vy = char.get('vy', 0.0)
+            
+            if vx == 0.0 and vy == 0.0:
+                continue
+            
+            # Calculate new position
+            new_x = char['x'] + vx * dt
+            new_y = char['y'] + vy * dt
+            
+            # Keep within bounds
+            half_width = char.get('width', CHARACTER_WIDTH) / 2
+            half_height = char.get('height', CHARACTER_HEIGHT) / 2
+            new_x = max(half_width, min(SIZE - half_width, new_x))
+            new_y = max(half_height, min(SIZE - half_height, new_y))
+            
+            # Check for collision with other characters
+            if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
+                char['x'] = new_x
+                char['y'] = new_y
+            else:
+                # Blocked - try to jostle around (ALTTP style bumping)
+                moved = False
+                
+                # Try sliding along primary axis first
+                if abs(vx) > abs(vy):
+                    # Moving mostly horizontal - try X first, then Y
+                    if not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
+                        char['x'] = new_x
+                        moved = True
+                    elif not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
+                        char['y'] = new_y
+                        moved = True
+                else:
+                    # Moving mostly vertical - try Y first, then X
+                    if not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
+                        char['y'] = new_y
+                        moved = True
+                    elif not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
+                        char['x'] = new_x
+                        moved = True
+                
+                # If still blocked, try perpendicular jostling (small sideways movement)
+                if not moved:
+                    jostle_amount = MOVEMENT_SPEED * dt * 0.5  # Half-speed jostle
+                    # Try jostling perpendicular to movement direction
+                    if abs(vx) > abs(vy):
+                        # Moving horizontal, jostle vertical
+                        for jostle_dir in [1, -1]:
+                            jostle_y = char['y'] + jostle_dir * jostle_amount
+                            if not self.state.is_position_blocked(char['x'], jostle_y, exclude_char=char):
+                                char['y'] = jostle_y
+                                break
+                    else:
+                        # Moving vertical, jostle horizontal
+                        for jostle_dir in [1, -1]:
+                            jostle_x = char['x'] + jostle_dir * jostle_amount
+                            if not self.state.is_position_blocked(jostle_x, char['y'], exclude_char=char):
+                                char['x'] = jostle_x
+                                break
+    
+    def _update_facing_from_velocity(self, char):
+        """Update character's facing direction based on velocity."""
+        vx = char.get('vx', 0.0)
+        vy = char.get('vy', 0.0)
+        
+        if abs(vx) < 0.01 and abs(vy) < 0.01:
+            return  # Not moving
+        
+        # Determine primary direction
+        if abs(vx) > abs(vy) * 2:
+            # Mostly horizontal
+            char['facing'] = 'right' if vx > 0 else 'left'
+        elif abs(vy) > abs(vx) * 2:
+            # Mostly vertical
+            char['facing'] = 'down' if vy > 0 else 'up'
+        else:
+            # Diagonal
+            if vx > 0 and vy < 0:
+                char['facing'] = 'up-right'
+            elif vx > 0 and vy > 0:
+                char['facing'] = 'down-right'
+            elif vx < 0 and vy < 0:
+                char['facing'] = 'up-left'
+            else:
+                char['facing'] = 'down-left'
+    
     def _get_desired_step(self, char):
-        """Calculate the single cell this NPC wants to move to."""
-        goal = self._get_goal(char)
-        if not goal:
-            return None
-        return self._step_toward(char, goal[0], goal[1])
+        """Calculate the position this NPC wants to move toward.
+        Returns the goal position or None if no goal.
+        """
+        return self._get_goal(char)
     
     def _get_goal(self, char):
-        """Get the position this character is trying to reach."""
+        """Get the position this character is trying to reach.
+        Returns float position (x, y) or None if no goal.
+        """
+        # Helper to convert cell position to center point
+        def cell_to_center(pos):
+            if pos is None:
+                return None
+            return (pos[0] + 0.5, pos[1] + 0.5)
+        
+        # Helper to check if character is at a position (within threshold)
+        def at_position(char, pos, threshold=0.15):
+            if pos is None:
+                return False
+            dx = char['x'] - pos[0]
+            dy = char['y'] - pos[1]
+            return (dx * dx + dy * dy) < threshold * threshold
+        
         # Priority 0: Sleep time - go to bed or camp
         if self.is_sleep_time():
             sleep_pos = self.get_sleep_position(char)
             if sleep_pos:
+                sleep_center = cell_to_center(sleep_pos)
                 # Have a bed or camp
-                if (char['x'], char['y']) == sleep_pos:
+                if at_position(char, sleep_center):
                     # Already at sleep position - stay still and sleep
                     if not char.get('is_sleeping'):
                         char['is_sleeping'] = True
@@ -1672,7 +1757,7 @@ class GameLogic:
                     return None
                 else:
                     # Move toward sleep position
-                    return sleep_pos
+                    return sleep_center
             else:
                 # No bed or camp - need to find a place to make camp
                 if self.can_make_camp_at(char['x'], char['y']):
@@ -1740,7 +1825,7 @@ class GameLogic:
             # Check if cell is still ready
             data = self.state.farm_cells.get(theft_target)
             if data and data['state'] == 'ready':
-                return theft_target
+                return cell_to_center(theft_target)
             else:
                 # Cell no longer available, clear target
                 char['theft_target'] = None
@@ -1835,17 +1920,25 @@ class GameLogic:
         return self._get_random_neighbor(char)
     
     def _get_flee_goal(self, char, threat):
-        """Get a position away from the threat."""
+        """Get a position away from the threat. Returns float position."""
         dx = char['x'] - threat['x']
         dy = char['y'] - threat['y']
-        if dx != 0: dx = dx // abs(dx)
-        if dy != 0: dy = dy // abs(dy)
-        if dx == 0 and dy == 0:
-            dx, dy = random.choice(DIRECTIONS)
-        return (char['x'] + dx * 5, char['y'] + dy * 5)
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist > 0.01:
+            # Normalize and extend
+            dx = dx / dist
+            dy = dy / dist
+        else:
+            # Pick random direction if on top of threat
+            angle = random.random() * 2 * math.pi
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+        return (char['x'] + dx * 5.0, char['y'] + dy * 5.0)
     
     def _find_camp_spot(self, char):
-        """Find a nearby position where the character can make a camp (outside village)."""
+        """Find a nearby position where the character can make a camp (outside village).
+        Returns float position (center of cell).
+        """
         # Try to find nearest valid camp spot
         best_spot = None
         best_dist = float('inf')
@@ -1853,15 +1946,17 @@ class GameLogic:
         for y in range(SIZE):
             for x in range(SIZE):
                 if self.can_make_camp_at(x, y) and not self.state.is_occupied(x, y):
-                    dist = abs(x - char['x']) + abs(y - char['y'])
+                    # Calculate distance to center of this cell
+                    cx, cy = x + 0.5, y + 0.5
+                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
                     if dist < best_dist:
                         best_dist = dist
-                        best_spot = (x, y)
+                        best_spot = (cx, cy)
         
         return best_spot
     
     def _get_food_goal(self, char):
-        """Get position to move toward for food."""
+        """Get position to move toward for food. Returns float position."""
         job = char.get('job')
         if job == 'Soldier':
             # Go to barracks barrel position
@@ -1869,7 +1964,7 @@ class GameLogic:
             if barracks_barrel:
                 barrel_pos = self.state.get_barrel_position(barracks_barrel)
                 if barrel_pos:
-                    return barrel_pos
+                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
         if self.can_afford_any_food(char):
             farmer = self.find_willing_farmer(char)
@@ -1878,7 +1973,7 @@ class GameLogic:
         return None
     
     def _get_farmer_goal(self, char):
-        """Get farmer's movement goal."""
+        """Get farmer's movement goal. Returns float position."""
         steward = self.get_steward()
         if steward and char.get('allegiance') == PRIMARY_ALLEGIANCE:
             # No taxes due in first year
@@ -1900,7 +1995,7 @@ class GameLogic:
                 if farm_barrel:
                     barrel_pos = self.state.get_barrel_position(farm_barrel)
                     if barrel_pos:
-                        return barrel_pos
+                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
                 # Fallback if no barrel - go idle
                 if self.state.is_in_village(char['x'], char['y']):
                     return self._get_wander_goal(char, PRIMARY_ALLEGIANCE)
@@ -1913,7 +2008,7 @@ class GameLogic:
                 if farm_barrel and self.state.can_barrel_add_food(farm_barrel, 1):
                     barrel_pos = self.state.get_barrel_position(farm_barrel)
                     if barrel_pos and not self.state.is_adjacent_to_barrel(char, farm_barrel):
-                        return barrel_pos
+                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             
             # Work on farm
             if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('farm'):
@@ -1940,7 +2035,7 @@ class GameLogic:
             return self._nearest_in_area(char, self.state.get_area_by_role('farm'))
     
     def _get_soldier_goal(self, char):
-        """Get soldier's movement goal."""
+        """Get soldier's movement goal. Returns float position."""
         is_hungry = char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_food(char) < FOOD_PER_BITE
         
         if is_hungry or not self.steward_has_food():
@@ -1949,27 +2044,28 @@ class GameLogic:
             if barracks_barrel:
                 barrel_pos = self.state.get_barrel_position(barracks_barrel)
                 if barrel_pos:
-                    return barrel_pos
+                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
         
         perimeter = self.state.get_village_perimeter()  # Now clockwise ordered
-        current = (char['x'], char['y'])
+        # Find which cell the character is currently in
+        current_cell = (int(char['x']), int(char['y']))
         
         # Get positions of other soldiers to avoid
-        other_soldiers = set()
+        other_soldier_cells = set()
         for c in self.state.characters:
             if c != char and c.get('job') == 'Soldier':
-                other_soldiers.add((c['x'], c['y']))
+                other_soldier_cells.add((int(c['x']), int(c['y'])))
         
-        if current in perimeter:
+        if current_cell in perimeter:
             # Find current index and walk to next position in clockwise order
-            idx = perimeter.index(current)
+            idx = perimeter.index(current_cell)
             # Try next few positions to skip over other soldiers
             for offset in range(1, len(perimeter)):
                 next_idx = (idx + offset) % len(perimeter)
                 next_pos = perimeter[next_idx]
-                if next_pos not in other_soldiers:
-                    return next_pos
+                if next_pos not in other_soldier_cells:
+                    return (next_pos[0] + 0.5, next_pos[1] + 0.5)
             # All positions occupied - stay still
             return None
         else:
@@ -1977,15 +2073,16 @@ class GameLogic:
             best = None
             best_dist = float('inf')
             for px, py in perimeter:
-                if (px, py) not in other_soldiers:
-                    dist = abs(px - char['x']) + abs(py - char['y'])
+                if (px, py) not in other_soldier_cells:
+                    cx, cy = px + 0.5, py + 0.5
+                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
                     if dist < best_dist:
                         best_dist = dist
-                        best = (px, py)
+                        best = (cx, cy)
             return best
     
     def _get_steward_goal(self, char):
-        """Get steward's movement goal."""
+        """Get steward's movement goal. Returns float position."""
         target = char.get('tax_collection_target')
         if target and target in self.state.characters:
             return (target['x'], target['y'])
@@ -2003,42 +2100,55 @@ class GameLogic:
             if barracks_barrel:
                 barrel_pos = self.state.get_barrel_position(barracks_barrel)
                 if barrel_pos:
-                    return barrel_pos
+                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
         
         if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('military_housing'):
             return None
         return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
     
     def _get_wander_goal(self, char, area):
-        """Get a random adjacent cell within the given area."""
-        dirs = list(DIRECTIONS)
-        random.shuffle(dirs)
+        """Get a random position within the given area to wander toward.
+        Returns float position.
+        """
         is_village = (area == PRIMARY_ALLEGIANCE)
         
-        for dx, dy in dirs:
-            nx, ny = char['x'] + dx, char['y'] + dy
-            if not self.state.is_position_valid(nx, ny):
-                continue
-            if is_village:
-                if self.state.is_in_village(nx, ny):
-                    return (nx, ny)
-            else:
-                if self.state.get_area_at(nx, ny) == area:
-                    return (nx, ny)
-        return None
+        # Collect valid cells in the area
+        valid_cells = []
+        for y in range(SIZE):
+            for x in range(SIZE):
+                if is_village:
+                    if self.state.is_in_village(x, y):
+                        valid_cells.append((x, y))
+                else:
+                    if self.state.get_area_at(x, y) == area:
+                        valid_cells.append((x, y))
+        
+        if not valid_cells:
+            return None
+        
+        # Pick a random cell in the area
+        target_cell = random.choice(valid_cells)
+        return (target_cell[0] + 0.5, target_cell[1] + 0.5)
     
     def _get_random_neighbor(self, char):
-        """Get a random valid adjacent cell."""
-        dirs = list(DIRECTIONS)
-        random.shuffle(dirs)
-        for dx, dy in dirs:
-            nx, ny = char['x'] + dx, char['y'] + dy
-            if self.state.is_position_valid(nx, ny):
-                return (nx, ny)
-        return None
+        """Get a random valid position nearby. Returns float position."""
+        # Pick a random direction and distance
+        angle = random.random() * 2 * math.pi
+        distance = random.uniform(1.0, 3.0)
+        
+        nx = char['x'] + math.cos(angle) * distance
+        ny = char['y'] + math.sin(angle) * distance
+        
+        # Clamp to bounds
+        nx = max(0.5, min(SIZE - 0.5, nx))
+        ny = max(0.5, min(SIZE - 0.5, ny))
+        
+        return (nx, ny)
     
     def _nearest_in_area(self, char, area, is_village=False):
-        """Find the nearest unoccupied cell in an area. Falls back to occupied if none free."""
+        """Find the nearest unoccupied cell in an area. Returns float position (cell center).
+        Falls back to occupied if none free.
+        """
         best_free = None
         best_free_dist = float('inf')
         best_any = None
@@ -2051,21 +2161,25 @@ class GameLogic:
                 else:
                     in_area = self.state.get_area_at(x, y) == area
                 if in_area:
-                    dist = abs(x - char['x']) + abs(y - char['y'])
+                    # Calculate distance to cell center
+                    cx, cy = x + 0.5, y + 0.5
+                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
                     is_occupied = self.state.is_occupied(x, y)
                     
                     if not is_occupied and dist < best_free_dist:
                         best_free_dist = dist
-                        best_free = (x, y)
+                        best_free = (cx, cy)
                     if dist < best_any_dist:
                         best_any_dist = dist
-                        best_any = (x, y)
+                        best_any = (cx, cy)
         
         return best_free if best_free else best_any
     
     def _nearest_ready_farm_cell(self, char):
-        """Find nearest ready farm cell."""
-        cell = self.state.get_farm_cell_state(char['x'], char['y'])
+        """Find nearest ready farm cell. Returns float position (cell center)."""
+        # Check if character is already on a farm cell being worked
+        char_cell = (int(char['x']), int(char['y']))
+        cell = self.state.get_farm_cell_state(char_cell[0], char_cell[1])
         if cell and cell['state'] in ('ready', 'harvesting', 'replanting'):
             return None
         
@@ -2073,10 +2187,12 @@ class GameLogic:
         best_dist = float('inf')
         for (cx, cy), data in self.state.farm_cells.items():
             if data['state'] == 'ready':
-                dist = abs(cx - char['x']) + abs(cy - char['y'])
+                # Distance to cell center
+                center_x, center_y = cx + 0.5, cy + 0.5
+                dist = math.sqrt((center_x - char['x']) ** 2 + (center_y - char['y']) ** 2)
                 if dist < best_dist:
                     best_dist = dist
-                    best = (cx, cy)
+                    best = (center_x, center_y)
         return best
     
     def _step_toward(self, char, goal_x, goal_y):
@@ -2581,7 +2697,8 @@ class GameLogic:
         # Only farmers can legitimately harvest - others (including player) commit theft
         cells_being_worked = set()
         for char in self.state.characters:
-            cell = (char['x'], char['y'])
+            # Convert float position to cell coordinates
+            cell = (int(char['x']), int(char['y']))
             if cell in self.state.farm_cells and cell not in cells_being_worked:
                 data = self.state.farm_cells[cell]
                 
@@ -2637,7 +2754,11 @@ class GameLogic:
     # =========================================================================
     
     def move_player(self, dx, dy):
-        """Move player by delta. Returns True if moved."""
+        """Set player velocity for ALTTP-style movement.
+        Called by GUI when movement keys are held.
+        dx, dy should be -1, 0, or 1 indicating direction.
+        Returns True if velocity was set successfully.
+        """
         player = self.state.player
         if not player:
             return False
@@ -2664,16 +2785,100 @@ class GameLogic:
         if player.get('is_frozen', False):
             name = self.get_display_name(player)
             self.state.log_action(f"{name} is too weak to move!")
+            player['vx'] = 0.0
+            player['vy'] = 0.0
             return False
         
-        nx = player['x'] + dx
-        ny = player['y'] + dy
+        # Normalize diagonal movement to maintain consistent speed (ALTTP style)
+        if dx != 0 and dy != 0:
+            # Diagonal: multiply by 1/sqrt(2) to maintain same speed as cardinal
+            diagonal_factor = 1.0 / math.sqrt(2)
+            player['vx'] = dx * MOVEMENT_SPEED * diagonal_factor
+            player['vy'] = dy * MOVEMENT_SPEED * diagonal_factor
+        else:
+            # Cardinal: full speed
+            player['vx'] = dx * MOVEMENT_SPEED
+            player['vy'] = dy * MOVEMENT_SPEED
         
-        if self.state.is_position_valid(nx, ny) and not self.state.is_occupied(nx, ny):
-            player['x'] = nx
-            player['y'] = ny
-            return True
-        return False
+        return True
+    
+    def stop_player(self):
+        """Stop player movement (called when no movement keys are held)."""
+        player = self.state.player
+        if player:
+            player['vx'] = 0.0
+            player['vy'] = 0.0
+    
+    def update_player_position(self, dt):
+        """Update player position based on velocity and delta time.
+        Called every frame by the GUI.
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        vx = player.get('vx', 0.0)
+        vy = player.get('vy', 0.0)
+        
+        if vx == 0.0 and vy == 0.0:
+            return
+        
+        # Calculate new position
+        new_x = player['x'] + vx * dt
+        new_y = player['y'] + vy * dt
+        
+        # Keep within bounds
+        half_width = player.get('width', CHARACTER_WIDTH) / 2
+        half_height = player.get('height', CHARACTER_HEIGHT) / 2
+        new_x = max(half_width, min(SIZE - half_width, new_x))
+        new_y = max(half_height, min(SIZE - half_height, new_y))
+        
+        # Check for collision with other characters
+        if not self.state.is_position_blocked(new_x, new_y, exclude_char=player):
+            player['x'] = new_x
+            player['y'] = new_y
+        else:
+            # Blocked - try to slide/jostle around (ALTTP style bumping)
+            moved = False
+            
+            # Try sliding along primary movement axis first
+            if abs(vx) > abs(vy):
+                # Moving mostly horizontal - try X first, then Y
+                if not self.state.is_position_blocked(new_x, player['y'], exclude_char=player):
+                    player['x'] = new_x
+                    moved = True
+                elif not self.state.is_position_blocked(player['x'], new_y, exclude_char=player):
+                    player['y'] = new_y
+                    moved = True
+            else:
+                # Moving mostly vertical - try Y first, then X
+                if not self.state.is_position_blocked(player['x'], new_y, exclude_char=player):
+                    player['y'] = new_y
+                    moved = True
+                elif not self.state.is_position_blocked(new_x, player['y'], exclude_char=player):
+                    player['x'] = new_x
+                    moved = True
+            
+            # If still blocked, try perpendicular jostling
+            if not moved:
+                jostle_amount = MOVEMENT_SPEED * dt * 0.3
+                if abs(vx) > abs(vy):
+                    # Moving horizontal, jostle vertical
+                    for jostle_dir in [1, -1]:
+                        jostle_y = player['y'] + jostle_dir * jostle_amount
+                        if not self.state.is_position_blocked(player['x'], jostle_y, exclude_char=player):
+                            player['y'] = jostle_y
+                            break
+                else:
+                    # Moving vertical, jostle horizontal
+                    for jostle_dir in [1, -1]:
+                        jostle_x = player['x'] + jostle_dir * jostle_amount
+                        if not self.state.is_position_blocked(jostle_x, player['y'], exclude_char=player):
+                            player['x'] = jostle_x
+                            break
     
     def player_eat(self):
         """Player eats from inventory. Returns True if ate."""
