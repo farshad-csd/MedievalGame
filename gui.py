@@ -16,7 +16,8 @@ from constants import (
     FARM_CELL_COLORS, JOB_COLORS, SKILLS,
     BG_COLOR, GRID_COLOR, TEXT_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
-    MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT
+    MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
+    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
 from scenario_characters import CHARACTER_TEMPLATES
@@ -107,6 +108,14 @@ class BoardGUI:
         # Player movement state - which keys are currently held
         self.player_moving = False
         
+        # Camera state
+        self.camera_x = SIZE / 2  # Camera center in world coordinates
+        self.camera_y = SIZE / 2
+        self.zoom = DEFAULT_ZOOM
+        self.camera_panning = False  # True when middle mouse is held for panning
+        self.pan_start_mouse = None  # Mouse position when pan started
+        self.pan_start_camera = None  # Camera position when pan started
+        
         # Running state
         self.running = True
     
@@ -151,6 +160,15 @@ class BoardGUI:
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self._handle_mouse_click(event)
+            
+            elif event.type == pygame.MOUSEBUTTONUP:
+                self._handle_mouse_release(event)
+            
+            elif event.type == pygame.MOUSEMOTION:
+                self._handle_mouse_motion(event)
+            
+            elif event.type == pygame.MOUSEWHEEL:
+                self._handle_mouse_wheel(event)
         
         # Handle continuous player movement (check held keys every frame)
         self._handle_continuous_movement()
@@ -194,6 +212,17 @@ class BoardGUI:
             self._handle_eat()
         elif key == pygame.K_t:
             self._handle_trade()
+        elif key == pygame.K_c:
+            # Recenter camera on player
+            if self.state.player:
+                self.camera_x = self.state.player['x']
+                self.camera_y = self.state.player['y']
+        elif key == pygame.K_EQUALS or key == pygame.K_PLUS:
+            # Zoom in
+            self.zoom = min(MAX_ZOOM, self.zoom + ZOOM_SPEED)
+        elif key == pygame.K_MINUS:
+            # Zoom out
+            self.zoom = max(MIN_ZOOM, self.zoom - ZOOM_SPEED)
     
     def _handle_mouse_click(self, event):
         """Handle mouse clicks"""
@@ -207,6 +236,41 @@ class BoardGUI:
                 self._toggle_pause()
             elif self.buttons['skip_year'].collidepoint(pos):
                 self._skip_one_year()
+        
+        elif event.button == 2:  # Middle click - start panning
+            self.camera_panning = True
+            self.pan_start_mouse = event.pos
+            self.pan_start_camera = (self.camera_x, self.camera_y)
+    
+    def _handle_mouse_release(self, event):
+        """Handle mouse button release"""
+        if event.button == 2:  # Middle click released
+            self.camera_panning = False
+    
+    def _handle_mouse_motion(self, event):
+        """Handle mouse movement for panning"""
+        if self.camera_panning and self.pan_start_mouse:
+            # Calculate how much mouse moved in screen pixels
+            dx = event.pos[0] - self.pan_start_mouse[0]
+            dy = event.pos[1] - self.pan_start_mouse[1]
+            
+            # Convert to world units (inverse because dragging moves camera opposite direction)
+            world_dx = -dx / (self.zoom * CELL_SIZE)
+            world_dy = -dy / (self.zoom * CELL_SIZE)
+            
+            # Update camera position
+            self.camera_x = self.pan_start_camera[0] + world_dx
+            self.camera_y = self.pan_start_camera[1] + world_dy
+    
+    def _handle_mouse_wheel(self, event):
+        """Handle mouse wheel for zooming"""
+        old_zoom = self.zoom
+        
+        # Adjust zoom
+        if event.y > 0:  # Scroll up - zoom in
+            self.zoom = min(MAX_ZOOM, self.zoom + ZOOM_SPEED)
+        elif event.y < 0:  # Scroll down - zoom out
+            self.zoom = max(MIN_ZOOM, self.zoom - ZOOM_SPEED)
     
     # =========================================================================
     # INPUT HANDLERS (delegate to logic)
@@ -261,6 +325,11 @@ class BoardGUI:
             self.logic.update_player_position(scaled_dt)
             self.logic.update_npc_positions(scaled_dt)
         
+        # Center camera on player (unless panning)
+        if not self.camera_panning and self.state.player:
+            self.camera_x = self.state.player['x']
+            self.camera_y = self.state.player['y']
+        
         # Process game ticks at the correct interval
         interval = UPDATE_INTERVAL // self.state.game_speed
         
@@ -307,13 +376,14 @@ class BoardGUI:
             player_info = "No player"
         
         paused_str = " [PAUSED]" if self.state.paused else ""
-        status_text = f"Year {year} Day {day} ({day_progress:.0f}%){paused_str} | {player_info} | Pop: {len(self.state.characters)}"
+        zoom_str = f"Zoom:{self.zoom:.1f}x"
+        status_text = f"Year {year} Day {day} ({day_progress:.0f}%){paused_str} | {player_info} | Pop: {len(self.state.characters)} | {zoom_str}"
         
         self.font_small.render_to(self.screen, (bar_rect.x + 5, bar_rect.y + 7), status_text, self.DEBUG_TEXT)
     
     def _draw_info_bar(self):
         """Draw the info bar at the top"""
-        info_text = f"WASD to move | E to eat | T to trade | {VILLAGE_NAME}: VILLAGE (yellow), FARM (green), RUIN (gray)"
+        info_text = f"WASD to move | E to eat | T to trade | Scroll/+- to zoom | Middle-drag to pan | C to recenter"
         self.font_large.render_to(self.screen, (10, 15), info_text, (0, 0, 0))
     
     def _draw_control_buttons(self):
@@ -340,100 +410,149 @@ class BoardGUI:
             self.screen.blit(text_surface, (text_x, text_y))
     
     def _draw_canvas(self):
-        """Draw the game canvas"""
-        canvas_x = 10
-        canvas_y = self.info_bar_height + self.control_bar_height + 10
+        """Draw the game canvas with camera (zoom and pan)"""
+        # Canvas viewport on screen
+        canvas_left = 10
+        canvas_top = self.info_bar_height + self.control_bar_height + 10
+        canvas_width = self.canvas_width
+        canvas_height = self.canvas_height
+        canvas_center_x = canvas_left + canvas_width / 2
+        canvas_center_y = canvas_top + canvas_height / 2
         
-        # Draw grid cells
-        for y in range(SIZE):
-            for x in range(SIZE):
-                cell_x = canvas_x + x * CELL_SIZE
-                cell_y = canvas_y + y * CELL_SIZE
+        # Create clipping rect for canvas area
+        clip_rect = pygame.Rect(canvas_left, canvas_top, canvas_width, canvas_height)
+        self.screen.set_clip(clip_rect)
+        
+        # Fill canvas background
+        pygame.draw.rect(self.screen, self.BG_COLOR_RGB, clip_rect)
+        
+        # Calculate effective cell size with zoom
+        cell_size = CELL_SIZE * self.zoom
+        
+        # Calculate visible world bounds
+        half_view_width = canvas_width / 2 / cell_size
+        half_view_height = canvas_height / 2 / cell_size
+        
+        min_visible_x = int(self.camera_x - half_view_width) - 1
+        max_visible_x = int(self.camera_x + half_view_width) + 2
+        min_visible_y = int(self.camera_y - half_view_height) - 1
+        max_visible_y = int(self.camera_y + half_view_height) + 2
+        
+        # Clamp to world bounds
+        min_visible_x = max(0, min_visible_x)
+        max_visible_x = min(SIZE, max_visible_x)
+        min_visible_y = max(0, min_visible_y)
+        max_visible_y = min(SIZE, max_visible_y)
+        
+        # Draw grid cells (only visible ones)
+        for y in range(min_visible_y, max_visible_y):
+            for x in range(min_visible_x, max_visible_x):
+                # Transform world to screen coordinates
+                screen_x = canvas_center_x + (x - self.camera_x) * cell_size
+                screen_y = canvas_center_y + (y - self.camera_y) * cell_size
                 
                 # Get cell color
                 color = self._get_cell_color(x, y)
                 color_rgb = hex_to_rgb(color)
                 
                 # Draw cell
-                pygame.draw.rect(self.screen, color_rgb, (cell_x, cell_y, CELL_SIZE, CELL_SIZE))
-                pygame.draw.rect(self.screen, self.GRID_COLOR_RGB, (cell_x, cell_y, CELL_SIZE, CELL_SIZE), 1)
+                rect = pygame.Rect(screen_x, screen_y, cell_size + 1, cell_size + 1)
+                pygame.draw.rect(self.screen, color_rgb, rect)
+                pygame.draw.rect(self.screen, self.GRID_COLOR_RGB, rect, 1)
+        
+        # Store camera transform info for other draw methods
+        self._cam_center_x = canvas_center_x
+        self._cam_center_y = canvas_center_y
+        self._cam_cell_size = cell_size
         
         # Draw barrels
-        self._draw_barrels(canvas_x, canvas_y)
+        self._draw_barrels()
         
         # Draw beds
-        self._draw_beds(canvas_x, canvas_y)
+        self._draw_beds()
         
         # Draw camps
-        self._draw_camps(canvas_x, canvas_y)
+        self._draw_camps()
         
         # Draw characters
-        self._draw_characters(canvas_x, canvas_y)
+        self._draw_characters()
+        
+        # Remove clipping
+        self.screen.set_clip(None)
     
-    def _draw_barrels(self, canvas_x, canvas_y):
+    def _world_to_screen(self, world_x, world_y):
+        """Convert world coordinates to screen coordinates"""
+        screen_x = self._cam_center_x + (world_x - self.camera_x) * self._cam_cell_size
+        screen_y = self._cam_center_y + (world_y - self.camera_y) * self._cam_cell_size
+        return screen_x, screen_y
+    
+    def _draw_barrels(self):
         """Draw all barrels"""
+        cell_size = self._cam_cell_size
         for pos, barrel in self.state.barrels.items():
             x, y = pos
-            cell_x = canvas_x + x * CELL_SIZE
-            cell_y = canvas_y + y * CELL_SIZE
+            screen_x, screen_y = self._world_to_screen(x, y)
             
             # Draw barrel as brown rectangle with "B"
-            padding = 5
-            barrel_rect = pygame.Rect(cell_x + padding, cell_y + padding, 
-                                       CELL_SIZE - 2*padding, CELL_SIZE - 2*padding)
+            padding = 5 * self.zoom
+            barrel_rect = pygame.Rect(screen_x + padding, screen_y + padding, 
+                                       cell_size - 2*padding, cell_size - 2*padding)
             pygame.draw.rect(self.screen, hex_to_rgb("#8B4513"), barrel_rect)
-            pygame.draw.rect(self.screen, hex_to_rgb("#4a2500"), barrel_rect, 2)
+            pygame.draw.rect(self.screen, hex_to_rgb("#4a2500"), barrel_rect, max(1, int(2 * self.zoom)))
             
             # Draw "B" text
             text_surface, text_rect = self.font_barrel.render("B", (255, 255, 255))
-            text_x = cell_x + CELL_SIZE // 2 - text_rect.width // 2
-            text_y = cell_y + CELL_SIZE // 2 - text_rect.height // 2
-            self.screen.blit(text_surface, (text_x, text_y))
+            text_x = screen_x + cell_size / 2 - text_rect.width / 2
+            text_y = screen_y + cell_size / 2 - text_rect.height / 2
+            self.screen.blit(text_surface, (int(text_x), int(text_y)))
     
-    def _draw_beds(self, canvas_x, canvas_y):
+    def _draw_beds(self):
         """Draw all beds"""
+        cell_size = self._cam_cell_size
         for pos, bed in self.state.beds.items():
             x, y = pos
-            cell_x = canvas_x + x * CELL_SIZE
-            cell_y = canvas_y + y * CELL_SIZE
+            screen_x, screen_y = self._world_to_screen(x, y)
             
             # Draw bed as blue rectangle with pillow
-            padding = 4
-            bed_rect = pygame.Rect(cell_x + padding, cell_y + padding,
-                                    CELL_SIZE - 2*padding, CELL_SIZE - 2*padding)
+            padding = 4 * self.zoom
+            bed_rect = pygame.Rect(screen_x + padding, screen_y + padding,
+                                    cell_size - 2*padding, cell_size - 2*padding)
             pygame.draw.rect(self.screen, hex_to_rgb("#4169E1"), bed_rect)
-            pygame.draw.rect(self.screen, hex_to_rgb("#2a4494"), bed_rect, 2)
+            pygame.draw.rect(self.screen, hex_to_rgb("#2a4494"), bed_rect, max(1, int(2 * self.zoom)))
             
             # Draw pillow (small white rectangle at top)
-            pillow_height = 8
-            pillow_rect = pygame.Rect(cell_x + padding + 3, cell_y + padding + 2,
-                                       CELL_SIZE - 2*padding - 6, pillow_height)
+            pillow_height = 8 * self.zoom
+            pillow_rect = pygame.Rect(screen_x + padding + 3*self.zoom, screen_y + padding + 2*self.zoom,
+                                       cell_size - 2*padding - 6*self.zoom, pillow_height)
             pygame.draw.rect(self.screen, (255, 255, 255), pillow_rect)
             pygame.draw.rect(self.screen, (200, 200, 200), pillow_rect, 1)
     
-    def _draw_camps(self, canvas_x, canvas_y):
+    def _draw_camps(self):
         """Draw all camps"""
+        cell_size = self._cam_cell_size
         for char in self.state.characters:
             camp_pos = char.get('camp_position')
             if camp_pos:
                 x, y = camp_pos
-                cell_x = canvas_x + x * CELL_SIZE
-                cell_y = canvas_y + y * CELL_SIZE
+                screen_x, screen_y = self._world_to_screen(x, y)
                 
                 # Draw campfire (orange/red circle)
-                fire_cx = cell_x + CELL_SIZE // 2
-                fire_cy = cell_y + CELL_SIZE // 2
-                pygame.draw.circle(self.screen, (255, 100, 0), (fire_cx, fire_cy), 8)
-                pygame.draw.circle(self.screen, (255, 200, 0), (fire_cx, fire_cy), 5)
-                pygame.draw.circle(self.screen, (255, 255, 100), (fire_cx, fire_cy), 2)
+                fire_cx = int(screen_x + cell_size / 2)
+                fire_cy = int(screen_y + cell_size / 2)
+                r1, r2, r3 = int(8 * self.zoom), int(5 * self.zoom), int(2 * self.zoom)
+                pygame.draw.circle(self.screen, (255, 100, 0), (fire_cx, fire_cy), r1)
+                pygame.draw.circle(self.screen, (255, 200, 0), (fire_cx, fire_cy), r2)
+                pygame.draw.circle(self.screen, (255, 255, 100), (fire_cx, fire_cy), r3)
                 
                 # Draw bedroll next to fire
-                bedroll_x = fire_cx + 10
+                bedroll_x = fire_cx + int(10 * self.zoom)
                 pygame.draw.ellipse(self.screen, (100, 80, 60),
-                                   (bedroll_x - 3, fire_cy - 6, 8, 12))
+                                   (bedroll_x - int(3*self.zoom), fire_cy - int(6*self.zoom), 
+                                    int(8*self.zoom), int(12*self.zoom)))
     
-    def _draw_characters(self, canvas_x, canvas_y):
-        """Draw all characters at their float positions (ALTTP-style)"""
+    def _draw_characters(self):
+        """Draw all characters as rectangles at their float positions (ALTTP-style)"""
+        cell_size = self._cam_cell_size
         for char in self.state.characters:
             # Use float position directly - positions are already continuous
             vis_x = char['x']
@@ -442,119 +561,106 @@ class BoardGUI:
             color = self._get_character_color(char)
             color_rgb = hex_to_rgb(color)
             
-            # Calculate pixel position from float grid position
-            # Character is drawn centered at their position
-            # Subtract 0.5 because character positions are at center, not top-left corner
-            pixel_x = canvas_x + (vis_x - 0.5) * CELL_SIZE
-            pixel_y = canvas_y + (vis_y - 0.5) * CELL_SIZE
+            # Transform world position to screen position
+            pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
             
-            # Circle bounds (leaving room for name below)
-            padding = 3
-            circle_top = pixel_y + padding
-            circle_bottom = pixel_y + CELL_SIZE - padding - 8
-            circle_left = pixel_x + padding
-            circle_right = pixel_x + CELL_SIZE - padding
-            circle_cx = int((circle_left + circle_right) / 2)
-            circle_cy = int((circle_top + circle_bottom) / 2)
+            # Rectangle dimensions from constants (in pixels, scaled by zoom)
+            rect_width = int(CHARACTER_WIDTH * cell_size)
+            rect_height = int(CHARACTER_HEIGHT * cell_size)
             
-            # Draw filled circle
-            pygame.draw.ellipse(self.screen, color_rgb, 
-                              (circle_left, circle_top, circle_right - circle_left, circle_bottom - circle_top))
-            pygame.draw.ellipse(self.screen, (0, 0, 0),
-                              (circle_left, circle_top, circle_right - circle_left, circle_bottom - circle_top), 1)
+            # Calculate rectangle bounds (centered on character position)
+            rect_left = int(pixel_cx - rect_width / 2)
+            rect_top = int(pixel_cy - rect_height / 2)
             
-            # Draw eyes based on facing direction
-            self._draw_character_eyes(char, circle_cx, circle_cy)
+            # Draw filled rectangle
+            pygame.draw.rect(self.screen, color_rgb, 
+                           (rect_left, rect_top, rect_width, rect_height))
+            pygame.draw.rect(self.screen, (0, 0, 0),
+                           (rect_left, rect_top, rect_width, rect_height), 1)
             
-            # Draw first name below circle
+            # Draw eyes at configured position from top of rectangle
+            eye_y = rect_top + int(rect_height * CHARACTER_EYE_POSITION)
+            rect_cx = rect_left + rect_width // 2
+            self._draw_character_eyes(char, rect_cx, eye_y, rect_width)
+            
+            # Draw first name below rectangle
             first_name = char['name'].split()[0]
             text_surface, text_rect = self.font_tiny.render(first_name, (0, 0, 0))
-            text_x = pixel_x + CELL_SIZE / 2 - text_rect.width / 2
-            text_y = pixel_y + CELL_SIZE - 12
+            text_x = pixel_cx - text_rect.width / 2
+            text_y = rect_top + rect_height + 2
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
     
-    def _draw_character_eyes(self, char, cx, cy):
-        """Draw eyes based on facing direction"""
+    def _draw_character_eyes(self, char, cx, eye_y, rect_width):
+        """Draw eyes based on facing direction. Eyes are always at eye_y (10% from top)."""
         facing = char.get('facing', 'down')
         eye_radius = 2
         eye_color = (255, 255, 255)
         pupil_color = (0, 0, 0)
         
+        # Eye spread based on rectangle width
+        eye_spread = rect_width // 4
+        
         if facing == 'down':
-            # Eyes on bottom half, looking down
-            left_eye_x = cx - 5
-            right_eye_x = cx + 5
-            eye_y = cy + 3
+            left_eye_x = cx - eye_spread
+            right_eye_x = cx + eye_spread
             pupil_offset_x, pupil_offset_y = 0, 1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y, 
                                           eye_radius, eye_color, pupil_color, 
                                           pupil_offset_x, pupil_offset_y)
         
         elif facing == 'up':
-            # Eyes on top half, looking up
-            left_eye_x = cx - 5
-            right_eye_x = cx + 5
-            eye_y = cy - 3
+            left_eye_x = cx - eye_spread
+            right_eye_x = cx + eye_spread
             pupil_offset_x, pupil_offset_y = 0, -1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
                                           eye_radius, eye_color, pupil_color,
                                           pupil_offset_x, pupil_offset_y)
         
         elif facing == 'left':
-            # Eyes on left side, looking left
-            eye_x = cx - 4
-            top_eye_y = cy - 3
-            bottom_eye_y = cy + 3
+            eye_x = cx - eye_spread
+            top_eye_y = eye_y - 2
+            bottom_eye_y = eye_y + 4
             pupil_offset_x, pupil_offset_y = -1, 0
             self._draw_eye_pair_vertical(eye_x, top_eye_y, bottom_eye_y,
                                         eye_radius, eye_color, pupil_color,
                                         pupil_offset_x, pupil_offset_y)
         
         elif facing == 'right':
-            # Eyes on right side, looking right
-            eye_x = cx + 4
-            top_eye_y = cy - 3
-            bottom_eye_y = cy + 3
+            eye_x = cx + eye_spread
+            top_eye_y = eye_y - 2
+            bottom_eye_y = eye_y + 4
             pupil_offset_x, pupil_offset_y = 1, 0
             self._draw_eye_pair_vertical(eye_x, top_eye_y, bottom_eye_y,
                                         eye_radius, eye_color, pupil_color,
                                         pupil_offset_x, pupil_offset_y)
         
         elif facing == 'up-left':
-            # Eyes looking up-left (diagonal)
-            left_eye_x = cx - 4
-            right_eye_x = cx + 2
-            eye_y = cy - 2
+            left_eye_x = cx - eye_spread
+            right_eye_x = cx + eye_spread // 2
             pupil_offset_x, pupil_offset_y = -1, -1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
                                           eye_radius, eye_color, pupil_color,
                                           pupil_offset_x, pupil_offset_y)
         
         elif facing == 'up-right':
-            # Eyes looking up-right (diagonal)
-            left_eye_x = cx - 2
-            right_eye_x = cx + 4
-            eye_y = cy - 2
+            left_eye_x = cx - eye_spread // 2
+            right_eye_x = cx + eye_spread
             pupil_offset_x, pupil_offset_y = 1, -1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
                                           eye_radius, eye_color, pupil_color,
                                           pupil_offset_x, pupil_offset_y)
         
         elif facing == 'down-left':
-            # Eyes looking down-left (diagonal)
-            left_eye_x = cx - 4
-            right_eye_x = cx + 2
-            eye_y = cy + 2
+            left_eye_x = cx - eye_spread
+            right_eye_x = cx + eye_spread // 2
             pupil_offset_x, pupil_offset_y = -1, 1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
                                           eye_radius, eye_color, pupil_color,
                                           pupil_offset_x, pupil_offset_y)
         
         elif facing == 'down-right':
-            # Eyes looking down-right (diagonal)
-            left_eye_x = cx - 2
-            right_eye_x = cx + 4
-            eye_y = cy + 2
+            left_eye_x = cx - eye_spread // 2
+            right_eye_x = cx + eye_spread
             pupil_offset_x, pupil_offset_y = 1, 1
             self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
                                           eye_radius, eye_color, pupil_color,

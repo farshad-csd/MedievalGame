@@ -205,13 +205,46 @@ MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
 # ALTTP-STYLE MOVEMENT (Float-based continuous movement)
 # =============================================================================
 # Movement speed in cells per second (ALTTP Link moves ~1.5 tiles/sec)
-MOVEMENT_SPEED = 3.0  # cells per second (doubled for snappier feel)
+MOVEMENT_SPEED = 2.3  # cells per second (doubled for snappier feel)
 
 # Character hitbox dimensions (in cells, not pixels)
 # ALTTP Link is roughly 16x22 in a 16x16 world (1.0 x 1.375 cells)
 # Characters are taller than wide, allowing them to weave between obstacles
-CHARACTER_WIDTH = 0.7   # 70% of a cell wide
-CHARACTER_HEIGHT = 0.9  # 90% of a cell tall
+# =============================================================================
+# CHARACTER SPRITE DIMENSIONS
+# =============================================================================
+# Configure using two intuitive ratios:
+#   SPRITE_HW_RATIO: Height-to-Width ratio of the sprite shape
+#   SPRITE_TILES_TALL: How many tiles tall the sprite is
+#
+# Reference from real games:
+#   Game                    | H:W Ratio | Tiles Tall
+#   ------------------------|-----------|------------
+#   A Link to the Past      | 1.5       | 1.5
+#   Pokemon Emerald (mons)  | 1.0       | 1.0
+#   Pokemon Emerald (human) | 2.0       | 2.0
+#   Heroes of Hammerwatch   | 1.3       | 1.0
+#   Sephiria                | 1.6       | 2.0
+#   Chrono Trigger          | 2.4       | 2.25
+#   Suikoden 2              | 2.0       | 2.0
+#   Pokemon Ranger          | 2.0       | 2.0
+#   Children of Morta       | 2.0       | 1.75
+#   Fallout 2               | 1.8       | 1.0
+#   Project Zomboid         | 2.0       | 1.0
+
+SPRITE_HW_RATIO = 1.5      # Height-to-width ratio (taller = bigger number)
+SPRITE_TILES_TALL = 1    # How many tiles tall the sprite is
+
+# Calculated dimensions (don't edit these directly)
+CHARACTER_HEIGHT = SPRITE_TILES_TALL
+CHARACTER_WIDTH = CHARACTER_HEIGHT / SPRITE_HW_RATIO
+CHARACTER_EYE_POSITION = 0.2  # Eyes at 10% from top of rectangle
+
+
+DEFAULT_ZOOM = 1.5         # Default camera zoom level (1.5x magnification)
+MIN_ZOOM = 0.5             # Minimum zoom (zoomed out)
+MAX_ZOOM = 4.0             # Maximum zoom (zoomed in)
+ZOOM_SPEED = 0.1           # How much zoom changes per scroll
 
 # Collision radius - how close before characters "bump" each other
 # Set VERY small to allow characters to squeeze past each other like in ALTTP
@@ -220,7 +253,7 @@ CHARACTER_COLLISION_RADIUS = 0.15  # Tiny - only blocks when nearly on top of ea
 
 # Adjacency threshold - how close characters need to be for interactions
 # Generous range so characters don't need to be perfectly aligned to trade/talk
-ADJACENCY_DISTANCE = 1.3  # Within 1.8 cells - can interact from reasonable distance
+ADJACENCY_DISTANCE = 1.3 # Within 1.8 cells - can interact from reasonable distance
 
 # Combat range - need to be closer for attacks
 COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
