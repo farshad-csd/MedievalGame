@@ -1005,15 +1005,24 @@ class GameLogic:
         """Get how far to flee from a criminal. Returns intensity * 2."""
         return intensity * 2
     
-    def will_care_about_crime(self, responder, crime_allegiance):
-        """Does this person care about this crime (for responding, trade refusal, etc)?
+    def will_care_about_crime(self, responder, crime_allegiance, intensity=None):
+        """Does this person care about this crime?
         
-        Base rule: effective_morality >= 7
-        Guard bonus: +3 for same-allegiance crimes
+        Soldiers: +3 morality bonus for same-allegiance crimes, any intensity
+        Others: morality >= 7 required, only for intensity >= 15
         """
         effective_morality = self.get_trait(responder, 'morality')
-        if responder.get('job') == 'Soldier' and responder.get('allegiance') == crime_allegiance:
+        is_same_allegiance_soldier = (responder.get('job') == 'Soldier' and 
+                                    responder.get('allegiance') == crime_allegiance)
+        
+        if is_same_allegiance_soldier:
             effective_morality += 3
+            return effective_morality >= 7
+        
+        # Non-soldiers only care about serious crimes
+        if intensity is not None and intensity < 15:
+            return False
+        
         return effective_morality >= 7
     
     def remember_crime(self, witness, criminal, intensity, crime_allegiance):
@@ -1044,7 +1053,7 @@ class GameLogic:
         crimes = observer.get('known_crimes', {}).get(criminal_id, [])
         
         for crime in crimes:
-            if self.will_care_about_crime(observer, crime['allegiance']):
+            if self.will_care_about_crime(observer, crime['allegiance'], crime['intensity']):
                 return True
         return False
     
@@ -1068,7 +1077,7 @@ class GameLogic:
                     if dist <= murder_range:
                         # Active aggression - check if we care
                         crime_allegiance = target.get('allegiance')
-                        if self.will_care_about_crime(char, crime_allegiance):
+                        if self.will_care_about_crime(char, crime_allegiance, CRIME_INTENSITY_MURDER):
                             return (other, CRIME_INTENSITY_MURDER)
         
         # Check known crimes
@@ -1086,7 +1095,7 @@ class GameLogic:
                 
                 dist = self.get_distance(char, other)
                 if dist <= crime_range:
-                    if self.will_care_about_crime(char, crime_allegiance):
+                    if self.will_care_about_crime(char, crime_allegiance, intensity):
                         return (other, intensity)
         
         return (None, None)
@@ -1282,7 +1291,7 @@ class GameLogic:
                 self.remember_crime(char, thief, intensity, crime_allegiance)
                 
                 # Check if this witness cares
-                cares = self.will_care_about_crime(char, crime_allegiance)
+                cares = self.will_care_about_crime(char, crime_allegiance, intensity)
                 
                 # Check if this is the farm owner (always reacts as victim)
                 is_owner = char.get('job') == 'Farmer' and char.get('home') == self.state.get_area_by_role('farm')
