@@ -12,15 +12,14 @@ It does NOT contain:
 import pygame
 import pygame.freetype
 from constants import (
-    SIZE, CELL_SIZE, UPDATE_INTERVAL, SPEED_OPTIONS,
-    FARM_CELL_COLORS, JOB_COLORS, SKILLS,
-    BG_COLOR, GRID_COLOR, TEXT_COLOR,
+    SIZE, CELL_SIZE, UPDATE_INTERVAL,
+    FARM_CELL_COLORS, JOB_COLORS,
+    BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
-from scenario_characters import CHARACTER_TEMPLATES
 from game_state import GameState
 from game_logic import GameLogic
 from debug_window import DebugWindow
@@ -49,16 +48,6 @@ class BoardGUI:
     BG_COLOR_RGB = hex_to_rgb(BG_COLOR)
     GRID_COLOR_RGB = hex_to_rgb(GRID_COLOR)
     
-    # Debug panel colors (for status bar)
-    DEBUG_BG = (44, 62, 80)  # #2c3e50
-    DEBUG_TEXT = (236, 240, 241)  # #ecf0f1
-    DEBUG_YELLOW = (241, 196, 15)  # #f1c40f
-    
-    # Button colors
-    BUTTON_BG = (100, 100, 100)
-    BUTTON_HOVER = (120, 120, 120)
-    BUTTON_TEXT = (255, 255, 255)
-    
     def __init__(self, root=None):
         """Initialize pygame and game components. root parameter kept for compatibility but ignored."""
         pygame.init()
@@ -68,37 +57,22 @@ class BoardGUI:
         self.state = GameState()
         self.logic = GameLogic(self.state)
         
-        # Create debug window (separate Tkinter window)
-        self.debug_window = DebugWindow(self.state)
+        # Create debug window (separate Tkinter window) - pass logic for skip year
+        self.debug_window = DebugWindow(self.state, self.logic)
         
-        # Speed index for cycling through SPEED_OPTIONS
-        self.speed_index = 0
-        
-        # Calculate window dimensions (no debug panel - it's in separate window)
-        self.canvas_width = SIZE * CELL_SIZE
-        self.canvas_height = SIZE * CELL_SIZE
-        self.info_bar_height = 40
-        self.control_bar_height = 50
-        self.status_bar_height = 25
-        self.window_width = self.canvas_width + 20
-        self.window_height = self.canvas_height + self.info_bar_height + self.control_bar_height + self.status_bar_height + 20
+        # Calculate window dimensions - 16:9 aspect ratio
+        self.window_height = SIZE * CELL_SIZE + 20
+        self.window_width = int(self.window_height * 16 / 9)
+        self.canvas_width = self.window_width - 20
+        self.canvas_height = self.window_height - 20
         
         # Create window
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
         pygame.display.set_caption(f"{VILLAGE_NAME} - Village Simulation")
         
         # Load fonts
-        self.font_large = pygame.freetype.SysFont('Arial', 12)
-        self.font_medium = pygame.freetype.SysFont('Arial', 11)
-        self.font_small = pygame.freetype.SysFont('Courier', 9)
         self.font_tiny = pygame.freetype.SysFont('Arial', 7)
-        self.font_char = pygame.freetype.SysFont('Arial', 18, bold=True)
         self.font_barrel = pygame.freetype.SysFont('Arial', 14, bold=True)
-        self.font_title = pygame.freetype.SysFont('Courier', 12, bold=True)
-        
-        # Button definitions
-        self.buttons = {}
-        self._setup_buttons()
         
         # Timing
         self.clock = pygame.time.Clock()
@@ -112,25 +86,13 @@ class BoardGUI:
         self.camera_x = SIZE / 2  # Camera center in world coordinates
         self.camera_y = SIZE / 2
         self.zoom = DEFAULT_ZOOM
-        self.camera_panning = False  # True when middle mouse is held for panning
-        self.pan_start_mouse = None  # Mouse position when pan started
-        self.pan_start_camera = None  # Camera position when pan started
+        self.camera_following_player = True  # Whether camera follows player
+        self.camera_dragging = False  # True while actively dragging
+        self.drag_start_mouse = None  # Mouse position when drag started
+        self.drag_start_camera = None  # Camera position when drag started
         
         # Running state
         self.running = True
-    
-
-    def _setup_buttons(self):
-        """Setup button positions and sizes"""
-        button_y = self.info_bar_height + 10
-        button_width = 100
-        button_height = 30
-        button_spacing = 10
-        start_x = 10
-        
-        self.buttons['speed'] = pygame.Rect(start_x, button_y, button_width, button_height)
-        self.buttons['pause'] = pygame.Rect(start_x + button_width + button_spacing, button_y, button_width, button_height)
-        self.buttons['skip_year'] = pygame.Rect(start_x + 2 * (button_width + button_spacing), button_y, button_width, button_height)
     
     def run(self):
         """Main game loop"""
@@ -139,8 +101,17 @@ class BoardGUI:
             self._game_loop()
             self._render_frame()
             
-            # Update debug window (Tkinter)
+            # Update debug window (Tkinter) with status info
             if self.debug_window.is_open():
+                # Build status string for debug window
+                player = self.state.player
+                if player:
+                    player_food = self.state.get_food(player)
+                    player_money = self.state.get_money(player)
+                    status = f"Pos:({player['x']:.1f},{player['y']:.1f}) Food:{player_food} ${player_money} HP:{player['health']} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
+                else:
+                    status = f"No player | Zoom:{self.zoom:.1f}x"
+                self.debug_window.set_status(status)
                 self.debug_window.update()
             
             self.clock.tick(60)  # Cap at 60 FPS
@@ -213,7 +184,8 @@ class BoardGUI:
         elif key == pygame.K_t:
             self._handle_trade()
         elif key == pygame.K_c:
-            # Recenter camera on player
+            # Recenter camera on player and resume following
+            self.camera_following_player = True
             if self.state.player:
                 self.camera_x = self.state.player['x']
                 self.camera_y = self.state.player['y']
@@ -229,38 +201,35 @@ class BoardGUI:
         if event.button == 1:  # Left click
             pos = event.pos
             
-            # Check buttons
-            if self.buttons['speed'].collidepoint(pos):
-                self._toggle_speed()
-            elif self.buttons['pause'].collidepoint(pos):
-                self._toggle_pause()
-            elif self.buttons['skip_year'].collidepoint(pos):
-                self._skip_one_year()
-        
-        elif event.button == 2:  # Middle click - start panning
-            self.camera_panning = True
-            self.pan_start_mouse = event.pos
-            self.pan_start_camera = (self.camera_x, self.camera_y)
+            # Check if click is on canvas area - start dragging
+            canvas_left = 10
+            canvas_top = 10
+            canvas_rect = pygame.Rect(canvas_left, canvas_top, self.canvas_width, self.canvas_height)
+            if canvas_rect.collidepoint(pos):
+                self.camera_dragging = True
+                self.camera_following_player = False  # Stop following player
+                self.drag_start_mouse = pos
+                self.drag_start_camera = (self.camera_x, self.camera_y)
     
     def _handle_mouse_release(self, event):
         """Handle mouse button release"""
-        if event.button == 2:  # Middle click released
-            self.camera_panning = False
+        if event.button == 1:  # Left click released
+            self.camera_dragging = False
     
     def _handle_mouse_motion(self, event):
         """Handle mouse movement for panning"""
-        if self.camera_panning and self.pan_start_mouse:
+        if self.camera_dragging and self.drag_start_mouse:
             # Calculate how much mouse moved in screen pixels
-            dx = event.pos[0] - self.pan_start_mouse[0]
-            dy = event.pos[1] - self.pan_start_mouse[1]
+            dx = event.pos[0] - self.drag_start_mouse[0]
+            dy = event.pos[1] - self.drag_start_mouse[1]
             
-            # Convert to world units (inverse because dragging moves camera opposite direction)
+            # Convert to world units (inverse because dragging moves view opposite direction)
             world_dx = -dx / (self.zoom * CELL_SIZE)
             world_dy = -dy / (self.zoom * CELL_SIZE)
             
             # Update camera position
-            self.camera_x = self.pan_start_camera[0] + world_dx
-            self.camera_y = self.pan_start_camera[1] + world_dy
+            self.camera_x = self.drag_start_camera[0] + world_dx
+            self.camera_y = self.drag_start_camera[1] + world_dy
     
     def _handle_mouse_wheel(self, event):
         """Handle mouse wheel for zooming"""
@@ -284,24 +253,6 @@ class BoardGUI:
         """Handle player trade input"""
         self.logic.player_trade()
     
-    def _toggle_speed(self):
-        """Cycle through speed options"""
-        self.speed_index = (self.speed_index + 1) % len(SPEED_OPTIONS)
-        self.state.game_speed = SPEED_OPTIONS[self.speed_index]
-    
-    def _toggle_pause(self):
-        """Toggle pause state"""
-        self.state.paused = not self.state.paused
-    
-    def _skip_one_year(self):
-        """Skip forward one year"""
-        self.state.log_action("=== SKIPPING 1 YEAR ===")
-        
-        for _ in range(TICKS_PER_YEAR):
-            self.logic.process_tick()
-        
-        self.state.log_action("=== SKIP COMPLETE ===")
-    
     # =========================================================================
     # GAME LOOP
     # =========================================================================
@@ -310,33 +261,56 @@ class BoardGUI:
         """Main game loop - called every frame, processes ticks and updates positions"""
         current_time = pygame.time.get_ticks()
         
-        # Calculate delta time for smooth movement (in seconds)
+        # Calculate delta time (in seconds)
         dt = (current_time - self.last_frame_time) / 1000.0
         self.last_frame_time = current_time
         
-        # Cap delta time to prevent huge jumps
+        # Cap delta time to prevent huge jumps after lag
         dt = min(dt, 0.1)  # Max 100ms per frame
         
-        # Scale dt by game speed for player movement
-        scaled_dt = dt * self.state.game_speed
+        if self.state.paused:
+            return
         
-        # Update player and NPC positions based on velocity (every frame for smooth movement)
-        if not self.state.paused:
-            self.logic.update_player_position(scaled_dt)
-            self.logic.update_npc_positions(scaled_dt)
+        # Calculate how much game time has passed
+        game_dt = dt * self.state.game_speed
         
-        # Center camera on player (unless panning)
-        if not self.camera_panning and self.state.player:
+        # Time per tick in game seconds
+        tick_duration = UPDATE_INTERVAL / 1000.0  # 0.1 seconds per tick
+        
+        # Accumulate time and process ticks with interleaved movement
+        # This ensures velocities get updated as NPCs reach goals
+        self._accumulated_time = getattr(self, '_accumulated_time', 0.0) + game_dt
+        
+        # Cap accumulated time to prevent spiral of death at extreme speeds
+        max_ticks_per_frame = 200
+        self._accumulated_time = min(self._accumulated_time, tick_duration * max_ticks_per_frame)
+        
+        # Process simulation in tick-sized chunks
+        while self._accumulated_time >= tick_duration:
+            # Process game logic (sets velocities based on goals)
+            self.logic.process_tick()
+            
+            # Move characters for this tick's worth of time
+            # Use small steps to prevent overshooting
+            remaining = tick_duration
+            while remaining > 0:
+                step = min(remaining, 0.05)
+                self.logic.update_player_position(step)
+                self.logic.update_npc_positions(step)
+                remaining -= step
+            
+            self._accumulated_time -= tick_duration
+        
+        # Handle any remaining fractional time for smooth rendering
+        if self._accumulated_time > 0:
+            step = min(self._accumulated_time, 0.05)
+            self.logic.update_player_position(step)
+            self.logic.update_npc_positions(step)
+        
+        # Center camera on player (if following)
+        if self.camera_following_player and self.state.player:
             self.camera_x = self.state.player['x']
             self.camera_y = self.state.player['y']
-        
-        # Process game ticks at the correct interval
-        interval = UPDATE_INTERVAL // self.state.game_speed
-        
-        if not self.state.paused and current_time - self.last_tick_time >= interval:
-            # Process game logic (NPC movement, actions, etc.)
-            self.logic.process_tick()
-            self.last_tick_time = current_time
     
     # =========================================================================
     # RENDERING
@@ -347,73 +321,16 @@ class BoardGUI:
         # Fill background
         self.screen.fill(self.BG_COLOR_RGB)
         
-        # Draw components
-        self._draw_info_bar()
-        self._draw_control_buttons()
+        # Draw the game canvas
         self._draw_canvas()
-        self._draw_status_bar()
         
         pygame.display.flip()
-    
-    def _draw_status_bar(self):
-        """Draw a compact status bar at the bottom of the window"""
-        bar_y = self.window_height - self.status_bar_height - 5
-        bar_rect = pygame.Rect(10, bar_y, self.canvas_width, self.status_bar_height)
-        pygame.draw.rect(self.screen, self.DEBUG_BG, bar_rect)
-        
-        # Time info
-        year = (self.state.ticks // TICKS_PER_YEAR) + 1
-        day = ((self.state.ticks % TICKS_PER_YEAR) // TICKS_PER_DAY) + 1
-        day_progress = (self.state.ticks % TICKS_PER_DAY) / TICKS_PER_DAY * 100
-        
-        # Player info
-        player = self.state.player
-        if player:
-            player_food = self.state.get_food(player)
-            player_money = self.state.get_money(player)
-            player_info = f"Pos:({player['x']:.1f},{player['y']:.1f}) Food:{player_food} ${player_money} HP:{player['health']}"
-        else:
-            player_info = "No player"
-        
-        paused_str = " [PAUSED]" if self.state.paused else ""
-        zoom_str = f"Zoom:{self.zoom:.1f}x"
-        status_text = f"Year {year} Day {day} ({day_progress:.0f}%){paused_str} | {player_info} | Pop: {len(self.state.characters)} | {zoom_str}"
-        
-        self.font_small.render_to(self.screen, (bar_rect.x + 5, bar_rect.y + 7), status_text, self.DEBUG_TEXT)
-    
-    def _draw_info_bar(self):
-        """Draw the info bar at the top"""
-        info_text = f"WASD to move | E to eat | T to trade | Scroll/+- to zoom | Middle-drag to pan | C to recenter"
-        self.font_large.render_to(self.screen, (10, 15), info_text, (0, 0, 0))
-    
-    def _draw_control_buttons(self):
-        """Draw control buttons"""
-        mouse_pos = pygame.mouse.get_pos()
-        
-        for name, rect in self.buttons.items():
-            # Determine color based on hover
-            color = self.BUTTON_HOVER if rect.collidepoint(mouse_pos) else self.BUTTON_BG
-            pygame.draw.rect(self.screen, color, rect, border_radius=5)
-            pygame.draw.rect(self.screen, (50, 50, 50), rect, 2, border_radius=5)
-            
-            # Draw button text
-            if name == 'speed':
-                text = f"Speed: {self.state.game_speed}x"
-            elif name == 'pause':
-                text = "Resume" if self.state.paused else "Pause"
-            else:
-                text = "Skip 1 Year"
-            
-            text_surface, text_rect = self.font_medium.render(text, self.BUTTON_TEXT)
-            text_x = rect.centerx - text_rect.width // 2
-            text_y = rect.centery - text_rect.height // 2
-            self.screen.blit(text_surface, (text_x, text_y))
     
     def _draw_canvas(self):
         """Draw the game canvas with camera (zoom and pan)"""
         # Canvas viewport on screen
         canvas_left = 10
-        canvas_top = self.info_bar_height + self.control_bar_height + 10
+        canvas_top = 10
         canvas_width = self.canvas_width
         canvas_height = self.canvas_height
         canvas_center_x = canvas_left + canvas_width / 2

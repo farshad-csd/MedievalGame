@@ -2087,6 +2087,14 @@ class GameLogic:
         if target and target in self.state.characters:
             return (target['x'], target['y'])
         
+        # Go to barrel to eat when hungry and low on personal food
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_food(char) < FOOD_PER_BITE:
+            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+            if barracks_barrel and self.state.get_barrel_food(barracks_barrel) >= SOLDIER_FOOD_PAYMENT:
+                barrel_pos = self.state.get_barrel_position(barracks_barrel)
+                if barrel_pos:
+                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
+        
         if self.steward_needs_to_buy_food(char) and self.can_afford_any_food(char):
             farmer = self.find_willing_farmer(char)
             if farmer:
@@ -2434,6 +2442,16 @@ class GameLogic:
     def _do_steward_actions(self, char):
         """Steward actions."""
         name = self.get_display_name(char)
+        
+        # Get food from barracks barrel when adjacent to it and hungry (same as soldiers)
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_food(char) < FOOD_PER_BITE:
+            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+            if barracks_barrel and self.state.is_adjacent_to_barrel(char, barracks_barrel):
+                if self.state.get_barrel_food(barracks_barrel) >= SOLDIER_FOOD_PAYMENT:
+                    if self.can_add_food(char, SOLDIER_FOOD_PAYMENT):
+                        self.state.remove_barrel_food(barracks_barrel, SOLDIER_FOOD_PAYMENT)
+                        self.add_food(char, SOLDIER_FOOD_PAYMENT)
+                        self.state.log_action(f"Steward {name} took {SOLDIER_FOOD_PAYMENT} food from barracks barrel")
         
         # Tax collection - only after first year
         target = char.get('tax_collection_target')

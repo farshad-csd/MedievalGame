@@ -1,7 +1,7 @@
 # debug_window.py - Tkinter-based debug window with scrollable, selectable text
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-from constants import TICKS_PER_YEAR, TICKS_PER_DAY, SKILLS
+from constants import TICKS_PER_YEAR, TICKS_PER_DAY, SKILLS, SPEED_OPTIONS, UPDATE_INTERVAL
 from scenario_characters import CHARACTER_TEMPLATES
 
 
@@ -13,18 +13,23 @@ class DebugWindow:
     - Text selection with mouse
     - Ctrl+C / Cmd+C to copy
     - Auto-updates from game state
+    - Game controls (speed, pause, skip)
     """
     
-    def __init__(self, state):
+    def __init__(self, state, logic=None):
         self.state = state
+        self.logic = logic  # GameLogic instance for skip year
         self.root = tk.Tk()
         self.root.title("Debug Console")
-        self.root.geometry("900x700")
+        self.root.geometry("900x750")
         self.root.configure(bg='#1a1a2e')
         
         # Track last log length to detect new entries
         self._last_log_length = 0
         self._auto_scroll_log = True
+        
+        # Speed control
+        self.speed_index = 0
         
         self._setup_ui()
         
@@ -36,12 +41,42 @@ class DebugWindow:
         style.configure('Debug.TLabel', background='#1a1a2e', foreground='#e0e0e0', 
                        font=('Consolas', 10, 'bold'))
         style.configure('Debug.TCheckbutton', background='#1a1a2e', foreground='#e0e0e0')
+        style.configure('Control.TButton', font=('Arial', 10))
         
         # Main container
         main_frame = ttk.Frame(self.root, style='Debug.TFrame')
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Top section - Tick info
+        # Control bar at top
+        control_frame = ttk.Frame(main_frame, style='Debug.TFrame')
+        control_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Speed button
+        self.speed_btn = tk.Button(
+            control_frame, text="Speed: 1x", command=self._toggle_speed,
+            bg='#3a3a5a', fg='white', font=('Arial', 10), width=12
+        )
+        self.speed_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Pause button
+        self.pause_btn = tk.Button(
+            control_frame, text="Pause", command=self._toggle_pause,
+            bg='#3a3a5a', fg='white', font=('Arial', 10), width=10
+        )
+        self.pause_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Skip year button
+        self.skip_btn = tk.Button(
+            control_frame, text="Skip 1 Year", command=self._skip_one_year,
+            bg='#3a3a5a', fg='white', font=('Arial', 10), width=12
+        )
+        self.skip_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Status bar (player info, zoom, etc)
+        self.status_label = ttk.Label(control_frame, text="", style='Debug.TLabel')
+        self.status_label.pack(side=tk.RIGHT, padx=10)
+        
+        # Tick info section
         tick_frame = ttk.Frame(main_frame, style='Debug.TFrame')
         tick_frame.pack(fill=tk.X, pady=(0, 5))
         
@@ -122,6 +157,41 @@ class DebugWindow:
         # Make text read-only but still selectable
         self.debug_text.bind('<Key>', lambda e: self._readonly_handler(e))
         self.log_text.bind('<Key>', lambda e: self._readonly_handler(e))
+    
+    def _toggle_speed(self):
+        """Cycle through speed options"""
+        self.speed_index = (self.speed_index + 1) % len(SPEED_OPTIONS)
+        self.state.game_speed = SPEED_OPTIONS[self.speed_index]
+        self.speed_btn.configure(text=f"Speed: {self.state.game_speed}x")
+    
+    def _toggle_pause(self):
+        """Toggle pause state"""
+        self.state.paused = not self.state.paused
+        self.pause_btn.configure(text="Resume" if self.state.paused else "Pause")
+    
+    def _skip_one_year(self):
+        """Skip forward one year"""
+        if not self.logic:
+            return
+            
+        self.state.log_action("=== SKIPPING 1 YEAR ===")
+        
+        # Time per tick in seconds
+        tick_duration = UPDATE_INTERVAL / 1000.0
+        
+        for _ in range(TICKS_PER_YEAR):
+            # Process game logic (sets velocities)
+            self.logic.process_tick()
+            
+            # Move characters for this tick
+            remaining = tick_duration
+            while remaining > 0:
+                step = min(remaining, 0.05)
+                self.logic.update_player_position(step)
+                self.logic.update_npc_positions(step)
+                remaining -= step
+        
+        self.state.log_action("=== SKIP COMPLETE ===")
         
     def _readonly_handler(self, event):
         """Allow copy but prevent editing"""
@@ -136,16 +206,26 @@ class DebugWindow:
         """Handle copy - let default behavior work"""
         pass  # Default Tkinter copy works fine
     
+    def set_status(self, status_text):
+        """Update the status label (called from GUI)"""
+        self.status_label.configure(text=status_text)
+    
     def update(self):
         """Update the window contents. Call this from the game loop."""
         try:
             self._update_tick_info()
             self._update_debug_stats()
             self._update_action_log()
+            self._update_button_states()
             self.root.update()
         except tk.TclError:
             # Window was closed
             pass
+    
+    def _update_button_states(self):
+        """Update button text to reflect current state"""
+        self.speed_btn.configure(text=f"Speed: {self.state.game_speed}x")
+        self.pause_btn.configure(text="Resume" if self.state.paused else "Pause")
     
     def _update_tick_info(self):
         """Update the tick/time display"""

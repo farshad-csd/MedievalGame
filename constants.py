@@ -205,7 +205,7 @@ MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
 # ALTTP-STYLE MOVEMENT (Float-based continuous movement)
 # =============================================================================
 # Movement speed in cells per second (ALTTP Link moves ~1.5 tiles/sec)
-MOVEMENT_SPEED = 2.3  # cells per second (doubled for snappier feel)
+MOVEMENT_SPEED = 1.0 # cells per second (doubled for snappier feel)
 
 # Character hitbox dimensions (in cells, not pixels)
 # ALTTP Link is roughly 16x22 in a 16x16 world (1.0 x 1.375 cells)
@@ -217,20 +217,19 @@ MOVEMENT_SPEED = 2.3  # cells per second (doubled for snappier feel)
 #   SPRITE_HW_RATIO: Height-to-Width ratio of the sprite shape
 #   SPRITE_TILES_TALL: How many tiles tall the sprite is
 #
-# Reference from real games:
-#   Game                    | H:W Ratio | Tiles Tall
-#   ------------------------|-----------|------------
-#   A Link to the Past      | 1.5       | 1.5
-#   Pokemon Emerald (mons)  | 1.0       | 1.0
-#   Pokemon Emerald (human) | 2.0       | 2.0
-#   Heroes of Hammerwatch   | 1.3       | 1.0
-#   Sephiria                | 1.6       | 2.0
-#   Chrono Trigger          | 2.4       | 2.25
-#   Suikoden 2              | 2.0       | 2.0
-#   Pokemon Ranger          | 2.0       | 2.0
-#   Children of Morta       | 2.0       | 1.75
-#   Fallout 2               | 1.8       | 1.0
-#   Project Zomboid         | 2.0       | 1.0
+# Sprite Proportions Reference
+# ============================
+# H:W Ratio | Tiles Tall | Games
+# ----------|------------|----------------------------------------------
+# 1:1       | 1          | Pokemon Emerald (Pokemon)
+# 1.3:1     | 1          | Heroes of Hammerwatch
+# 1.5:1     | 1.5        | A Link to the Past
+# 1.6:1     | 2          | Sephiria
+# 1.8:1     | 1          | Fallout 2
+# 2:1       | 1          | Project Zomboid
+# 2:1       | 1.5-2      | Children of Morta
+# 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
+# 2.4:1     | 2.25       | Chrono Trigger
 
 SPRITE_HW_RATIO = 1.5      # Height-to-width ratio (taller = bigger number)
 SPRITE_TILES_TALL = 1    # How many tiles tall the sprite is
