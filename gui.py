@@ -17,7 +17,7 @@ from constants import (
     BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
-    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED
+    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
 from game_state import GameState
@@ -164,9 +164,12 @@ class BoardGUI:
         elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
             dx = 1
         
+        # Check if sprinting (shift held)
+        sprinting = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+        
         if dx != 0 or dy != 0:
             # Set player velocity (logic handles normalization for diagonal)
-            self.logic.move_player(dx, dy)
+            self.logic.move_player(dx, dy, sprinting)
             self.player_moving = True
         else:
             # No movement keys held - stop player

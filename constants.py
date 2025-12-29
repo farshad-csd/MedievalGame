@@ -239,11 +239,18 @@ CHARACTER_HEIGHT = SPRITE_TILES_TALL
 CHARACTER_WIDTH = CHARACTER_HEIGHT / SPRITE_HW_RATIO
 CHARACTER_EYE_POSITION = 0.2  # Eyes at 10% from top of rectangle
 
-
+# =============================================================================
+# CAMERA SETTINGS
+# =============================================================================
 DEFAULT_ZOOM = 1.5         # Default camera zoom level (1.5x magnification)
 MIN_ZOOM = 0.5             # Minimum zoom (zoomed out)
 MAX_ZOOM = 4.0             # Maximum zoom (zoomed in)
 ZOOM_SPEED = 0.1           # How much zoom changes per scroll
+
+# =============================================================================
+# PLAYER SPRINT
+# =============================================================================
+SPRINT_SPEED = 2         # Player speed while sprinting (cells/second)
 
 # Collision radius - how close before characters "bump" each other
 # Set VERY small to allow characters to squeeze past each other like in ALTTP

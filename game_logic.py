@@ -21,7 +21,7 @@ from constants import (
     ALLEGIANCE_FOOD_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
     CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
     SLEEP_START_FRACTION, PRIMARY_ALLEGIANCE,
-    MOVEMENT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
+    MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
     VENDOR_GOODS, GOODS_PRICES, GOODS_STACK_SIZES, VENDOR_PERSONAL_RESERVE
@@ -2771,10 +2771,11 @@ class GameLogic:
     # PLAYER ACTIONS
     # =========================================================================
     
-    def move_player(self, dx, dy):
+    def move_player(self, dx, dy, sprinting=False):
         """Set player velocity for ALTTP-style movement.
         Called by GUI when movement keys are held.
         dx, dy should be -1, 0, or 1 indicating direction.
+        sprinting: if True, use SPRINT_SPEED instead of MOVEMENT_SPEED.
         Returns True if velocity was set successfully.
         """
         player = self.state.player
@@ -2807,16 +2808,19 @@ class GameLogic:
             player['vy'] = 0.0
             return False
         
+        # Use sprint speed if sprinting
+        speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
+        
         # Normalize diagonal movement to maintain consistent speed (ALTTP style)
         if dx != 0 and dy != 0:
             # Diagonal: multiply by 1/sqrt(2) to maintain same speed as cardinal
             diagonal_factor = 1.0 / math.sqrt(2)
-            player['vx'] = dx * MOVEMENT_SPEED * diagonal_factor
-            player['vy'] = dy * MOVEMENT_SPEED * diagonal_factor
+            player['vx'] = dx * speed * diagonal_factor
+            player['vy'] = dy * speed * diagonal_factor
         else:
             # Cardinal: full speed
-            player['vx'] = dx * MOVEMENT_SPEED
-            player['vy'] = dy * MOVEMENT_SPEED
+            player['vx'] = dx * speed
+            player['vy'] = dy * speed
         
         return True
     
