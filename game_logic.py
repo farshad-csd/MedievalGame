@@ -24,7 +24,11 @@ from constants import (
     MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
-    VENDOR_GOODS, GOODS_PRICES, GOODS_STACK_SIZES, VENDOR_PERSONAL_RESERVE
+    VENDOR_GOODS, GOODS_PRICES, GOODS_STACK_SIZES, VENDOR_PERSONAL_RESERVE,
+    IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
+    IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
+    SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
+    ATTACK_ANIMATION_DURATION
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -1369,16 +1373,14 @@ class GameLogic:
             robber['robbery_target'] = None
             return False
         
-        was_adjacent = self.is_adjacent(robber, target)
-        
-        if not was_adjacent:
-            self.move_toward_character(robber, target)
+        # Movement is handled by velocity system in _get_goal
+        # We just check if adjacent and attack if so
         
         robber_name = self.get_display_name(robber)
         target_name = self.get_display_name(target)
         
         if self.is_adjacent(robber, target):
-            damage = random.randint(10, 20)
+            damage = random.randint(2, 5)  # Reduced damage (was 10-20)
             target['health'] -= damage
             self.state.log_action(f"{robber_name} ATTACKS {target_name} for {damage} damage! Health: {target['health'] + damage} -> {target['health']}")
             
@@ -1408,9 +1410,6 @@ class GameLogic:
                 self.state.remove_character(target)
                 robber['robbery_target'] = None
                 robber['is_aggressor'] = False
-        else:
-            dist = self.get_distance(robber, target)
-            self.state.log_action(f"{robber_name} pursuing {target_name} (distance: {dist})")
         
         return True
     
@@ -1601,6 +1600,9 @@ class GameLogic:
                 char['vy'] = 0.0
                 continue
             
+            # Reset idle flag before getting goal (will be set if idling)
+            char['idle_is_idle'] = False
+            
             goal = self._get_goal(char)
             if goal:
                 # Calculate direction to goal
@@ -1612,14 +1614,23 @@ class GameLogic:
                     char['vx'] = 0.0
                     char['vy'] = 0.0
                 else:
+                    # Use slower speed if idling
+                    speed = MOVEMENT_SPEED
+                    if char.get('idle_is_idle', False):
+                        speed = MOVEMENT_SPEED * IDLE_SPEED_MULTIPLIER
+                    
                     # Normalize and apply speed
-                    char['vx'] = (dx / dist) * MOVEMENT_SPEED
-                    char['vy'] = (dy / dist) * MOVEMENT_SPEED
+                    char['vx'] = (dx / dist) * speed
+                    char['vy'] = (dy / dist) * speed
                     # Update facing direction
                     self._update_facing_from_velocity(char)
             else:
                 char['vx'] = 0.0
                 char['vy'] = 0.0
+            
+            # If character is not idling, reset their idle state for next time
+            if not char.get('idle_is_idle', False):
+                self._reset_idle_state(char)
         
         # Run actions (combat, trading, eating, etc.)
         for char in npcs:
@@ -1632,7 +1643,11 @@ class GameLogic:
             self.try_report_crimes_to_soldier(char)
     
     def update_npc_positions(self, dt):
-        """Update NPC positions based on velocity. Called every frame for smooth movement."""
+        """Update NPC positions based on velocity. Called every frame for smooth movement.
+        
+        Implements squeeze behavior: when blocked for more than SQUEEZE_THRESHOLD_TICKS,
+        characters will slide perpendicular to their movement direction to squeeze past obstacles.
+        """
         npcs = [c for c in self.state.characters if not self.is_player(c)]
         
         for char in npcs:
@@ -1640,9 +1655,12 @@ class GameLogic:
             vy = char.get('vy', 0.0)
             
             if vx == 0.0 and vy == 0.0:
+                # Not moving - reset squeeze state
+                char['blocked_ticks'] = 0
+                char['squeeze_direction'] = 0
                 continue
             
-            # Calculate new position
+            # Calculate base new position
             new_x = char['x'] + vx * dt
             new_y = char['y'] + vy * dt
             
@@ -1654,49 +1672,144 @@ class GameLogic:
             
             # Check for collision with other characters
             if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
+                # Clear path - move normally
                 char['x'] = new_x
                 char['y'] = new_y
+                char['blocked_ticks'] = 0
+                char['squeeze_direction'] = 0
             else:
-                # Blocked - try to jostle around (ALTTP style bumping)
-                moved = False
-                
-                # Try sliding along primary axis first
-                if abs(vx) > abs(vy):
-                    # Moving mostly horizontal - try X first, then Y
-                    if not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
-                        char['x'] = new_x
-                        moved = True
-                    elif not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
-                        char['y'] = new_y
-                        moved = True
-                else:
-                    # Moving mostly vertical - try Y first, then X
-                    if not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
-                        char['y'] = new_y
-                        moved = True
-                    elif not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
-                        char['x'] = new_x
-                        moved = True
-                
-                # If still blocked, try perpendicular jostling (small sideways movement)
-                if not moved:
-                    jostle_amount = MOVEMENT_SPEED * dt * 0.5  # Half-speed jostle
-                    # Try jostling perpendicular to movement direction
-                    if abs(vx) > abs(vy):
-                        # Moving horizontal, jostle vertical
-                        for jostle_dir in [1, -1]:
-                            jostle_y = char['y'] + jostle_dir * jostle_amount
-                            if not self.state.is_position_blocked(char['x'], jostle_y, exclude_char=char):
-                                char['y'] = jostle_y
-                                break
-                    else:
-                        # Moving vertical, jostle horizontal
-                        for jostle_dir in [1, -1]:
-                            jostle_x = char['x'] + jostle_dir * jostle_amount
-                            if not self.state.is_position_blocked(jostle_x, char['y'], exclude_char=char):
-                                char['x'] = jostle_x
-                                break
+                # Blocked - try to find a way through
+                moved = self._try_squeeze_movement(char, vx, vy, new_x, new_y, dt)
     
+    def _try_squeeze_movement(self, char, vx, vy, new_x, new_y, dt):
+        """Try to squeeze past an obstacle when blocked.
+        
+        Strategy:
+        1. First, try simple axis-aligned sliding (might work for glancing collisions)
+        2. If blocked for 3+ ticks, pick a perpendicular direction and slide that way
+        3. Keep sliding in that direction until we make forward progress or get unstuck
+        
+        Returns True if character moved, False if completely stuck.
+        """
+        moved = False
+        made_forward_progress = False
+        
+        # Try simple axis-aligned sliding first (handles glancing collisions)
+        # Only try if we're actually moving in that direction
+        if abs(vx) >= abs(vy):
+            # Moving mostly horizontal - try X only first
+            if abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
+                char['x'] = new_x
+                moved = True
+                made_forward_progress = True
+            # Then try Y if we have Y velocity
+            elif abs(vy) > 0.01 and not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
+                char['y'] = new_y
+                moved = True
+        else:
+            # Moving mostly vertical - try Y only first
+            if abs(vy) > 0.01 and not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
+                char['y'] = new_y
+                moved = True
+                made_forward_progress = True
+            # Then try X if we have X velocity
+            elif abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
+                char['x'] = new_x
+                moved = True
+        
+        if made_forward_progress:
+            # Made actual forward progress - reset squeeze state
+            char['blocked_ticks'] = 0
+            char['squeeze_direction'] = 0
+            return True
+        
+        # Still blocked on primary axis - increment counter
+        char['blocked_ticks'] = char.get('blocked_ticks', 0) + 1
+        
+        # After threshold OR if already squeezing, continue squeeze behavior
+        if char['blocked_ticks'] >= SQUEEZE_THRESHOLD_TICKS or char.get('squeeze_direction', 0) != 0:
+            # Pick a squeeze direction if we don't have one
+            if char.get('squeeze_direction', 0) == 0:
+                # Choose direction based on which way has more space
+                # or randomly if equal
+                char['squeeze_direction'] = self._choose_squeeze_direction(char, vx, vy)
+            
+            squeeze_dir = char['squeeze_direction']
+            slide_speed = MOVEMENT_SPEED * SQUEEZE_SLIDE_SPEED * dt
+            
+            # Calculate slide movement perpendicular to travel direction
+            if abs(vx) > abs(vy):
+                # Moving horizontal, slide vertical
+                slide_y = char['y'] + squeeze_dir * slide_speed
+                # Try to move: slide perpendicular + forward progress
+                if not self.state.is_position_blocked(new_x, slide_y, exclude_char=char):
+                    char['x'] = new_x
+                    char['y'] = slide_y
+                    char['blocked_ticks'] = 0
+                    char['squeeze_direction'] = 0
+                    return True
+                # Try just sliding perpendicular
+                elif not self.state.is_position_blocked(char['x'], slide_y, exclude_char=char):
+                    char['y'] = slide_y
+                    return True
+                else:
+                    # This direction is blocked, try the other way
+                    char['squeeze_direction'] = -squeeze_dir
+            else:
+                # Moving vertical, slide horizontal
+                slide_x = char['x'] + squeeze_dir * slide_speed
+                # Try to move: slide perpendicular + forward progress
+                if not self.state.is_position_blocked(slide_x, new_y, exclude_char=char):
+                    char['x'] = slide_x
+                    char['y'] = new_y
+                    char['blocked_ticks'] = 0
+                    char['squeeze_direction'] = 0
+                    return True
+                # Try just sliding perpendicular
+                elif not self.state.is_position_blocked(slide_x, char['y'], exclude_char=char):
+                    char['x'] = slide_x
+                    return True
+                else:
+                    # This direction is blocked, try the other way
+                    char['squeeze_direction'] = -squeeze_dir
+        
+        return False
+    
+    def _choose_squeeze_direction(self, char, vx, vy):
+        """Choose which direction to squeeze (perpendicular to movement).
+        Picks the direction with more open space, or random if equal.
+        Returns -1 or 1.
+        """
+        # Check space in both perpendicular directions
+        check_dist = 1.0  # How far to look
+        
+        if abs(vx) > abs(vy):
+            # Moving horizontal, check vertical space
+            space_pos = 0
+            space_neg = 0
+            for d in [0.3, 0.6, 1.0]:
+                if not self.state.is_position_blocked(char['x'], char['y'] + d, exclude_char=char):
+                    space_pos += 1
+                if not self.state.is_position_blocked(char['x'], char['y'] - d, exclude_char=char):
+                    space_neg += 1
+        else:
+            # Moving vertical, check horizontal space
+            space_pos = 0
+            space_neg = 0
+            for d in [0.3, 0.6, 1.0]:
+                if not self.state.is_position_blocked(char['x'] + d, char['y'], exclude_char=char):
+                    space_pos += 1
+                if not self.state.is_position_blocked(char['x'] - d, char['y'], exclude_char=char):
+                    space_neg += 1
+        
+        if space_pos > space_neg:
+            return 1
+        elif space_neg > space_pos:
+            return -1
+        else:
+            # Equal space - pick randomly
+            return random.choice([-1, 1])
+
     def _update_facing_from_velocity(self, char):
         """Update character's facing direction based on velocity."""
         vx = char.get('vx', 0.0)
@@ -1925,8 +2038,103 @@ class GameLogic:
                 # Not home - move toward home
                 return self._nearest_in_area(char, home, is_village=is_village_home)
         
-        # No home - random wander
-        return self._get_random_neighbor(char)
+        # No home - use idle wandering system with a null area (wanders anywhere non-farm)
+        return self._get_homeless_idle_goal(char)
+    
+    def _get_homeless_idle_goal(self, char):
+        """Get idle goal for a homeless character - wanders anywhere except farm cells.
+        Uses the same state machine as _get_wander_goal but without area constraints.
+        """
+        # Mark character as idling (for speed reduction)
+        char['idle_is_idle'] = True
+        
+        idle_state = char.get('idle_state', 'choosing')
+        
+        # Handle waiting state
+        if idle_state == 'waiting' or idle_state == 'paused':
+            wait_ticks = char.get('idle_wait_ticks', 0)
+            if wait_ticks > 0:
+                char['idle_wait_ticks'] = wait_ticks - 1
+                return None  # Stay still
+            else:
+                # Done waiting, choose new destination
+                char['idle_state'] = 'choosing'
+                idle_state = 'choosing'
+        
+        # Handle choosing state - pick a new destination
+        if idle_state == 'choosing':
+            destination = self._choose_homeless_destination(char)
+            if destination:
+                char['idle_destination'] = destination
+                char['idle_state'] = 'moving'
+                idle_state = 'moving'
+            else:
+                # No valid destination, stay put
+                return None
+        
+        # Handle moving state
+        if idle_state == 'moving':
+            destination = char.get('idle_destination')
+            if not destination:
+                char['idle_state'] = 'choosing'
+                return None
+            
+            # Check if we've arrived at destination
+            dx = destination[0] - char['x']
+            dy = destination[1] - char['y']
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < 0.4:  # Arrived at destination
+                # Start waiting
+                char['idle_state'] = 'waiting'
+                char['idle_wait_ticks'] = random.randint(IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS)
+                char['idle_destination'] = None
+                return None
+            
+            # Maybe pause mid-journey
+            if random.random() < IDLE_PAUSE_CHANCE / 100:
+                char['idle_state'] = 'paused'
+                char['idle_wait_ticks'] = random.randint(IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS)
+                return None
+            
+            return destination
+        
+        return None
+    
+    def _choose_homeless_destination(self, char):
+        """Choose a destination for homeless wandering.
+        Picks a random non-farm cell within moderate distance.
+        """
+        current_x, current_y = int(char['x']), int(char['y'])
+        
+        # Find valid cells within a reasonable wander range (not too far)
+        valid_cells = []
+        wander_range = 8  # Cells to consider
+        
+        for dy in range(-wander_range, wander_range + 1):
+            for dx in range(-wander_range, wander_range + 1):
+                nx, ny = current_x + dx, current_y + dy
+                if not self.state.is_position_valid(nx, ny):
+                    continue
+                # Skip farm cells
+                if (nx, ny) in self.state.farm_cells:
+                    continue
+                # Skip current cell
+                if dx == 0 and dy == 0:
+                    continue
+                valid_cells.append((nx, ny))
+        
+        if not valid_cells:
+            return None
+        
+        # Prefer cells that are at least 2 cells away for more purposeful movement
+        far_cells = [c for c in valid_cells if abs(c[0]-current_x) + abs(c[1]-current_y) > 2]
+        if far_cells:
+            cell = random.choice(far_cells)
+        else:
+            cell = random.choice(valid_cells)
+        
+        return (cell[0] + 0.5, cell[1] + 0.5)
     
     def _get_flee_goal(self, char, threat):
         """Get a position away from the threat. Returns float position."""
@@ -2044,10 +2252,16 @@ class GameLogic:
             return self._nearest_in_area(char, self.state.get_area_by_role('farm'))
     
     def _get_soldier_goal(self, char):
-        """Get soldier's movement goal. Returns float position."""
+        """Get soldier's movement goal. Returns float position.
+        
+        Soldiers patrol the village perimeter in clockwise order.
+        When blocked, they squeeze past obstacles without losing their patrol progress.
+        """
         is_hungry = char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_food(char) < FOOD_PER_BITE
         
         if is_hungry or not self.steward_has_food():
+            # Going to get food - clear patrol target
+            char['patrol_target'] = None
             # Go to barracks barrel position
             barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
             if barracks_barrel:
@@ -2056,8 +2270,10 @@ class GameLogic:
                     return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
         
-        perimeter = self.state.get_village_perimeter()  # Now clockwise ordered
-        # Find which cell the character is currently in
+        perimeter = self.state.get_village_perimeter()  # Clockwise ordered
+        if not perimeter:
+            return None
+            
         current_cell = (int(char['x']), int(char['y']))
         
         # Get positions of other soldiers to avoid
@@ -2066,29 +2282,52 @@ class GameLogic:
             if c != char and c.get('job') == 'Soldier':
                 other_soldier_cells.add((int(c['x']), int(c['y'])))
         
+        # Check if we have an existing patrol target
+        patrol_target = char.get('patrol_target')
+        
+        if patrol_target:
+            # Check if we've reached our patrol target
+            target_x, target_y = patrol_target
+            dist_to_target = math.sqrt((char['x'] - target_x - 0.5)**2 + (char['y'] - target_y - 0.5)**2)
+            
+            if dist_to_target < 0.5:
+                # Reached target - clear it and pick next one below
+                char['patrol_target'] = None
+                patrol_target = None
+            elif patrol_target not in other_soldier_cells:
+                # Still heading to target and it's not blocked by another soldier
+                return (target_x + 0.5, target_y + 0.5)
+            else:
+                # Target is now occupied by another soldier - skip it
+                char['patrol_target'] = None
+                patrol_target = None
+        
+        # Need to pick a new patrol target
+        # Find our position in the perimeter (or nearest point if we're off the path)
         if current_cell in perimeter:
-            # Find current index and walk to next position in clockwise order
-            idx = perimeter.index(current_cell)
-            # Try next few positions to skip over other soldiers
-            for offset in range(1, len(perimeter)):
-                next_idx = (idx + offset) % len(perimeter)
-                next_pos = perimeter[next_idx]
-                if next_pos not in other_soldier_cells:
-                    return (next_pos[0] + 0.5, next_pos[1] + 0.5)
-            # All positions occupied - stay still
-            return None
+            current_idx = perimeter.index(current_cell)
         else:
-            # Move to nearest unoccupied perimeter cell
-            best = None
+            # Off perimeter (maybe squeezed off) - find nearest perimeter point
+            # and continue from there in the same direction
+            best_idx = 0
             best_dist = float('inf')
-            for px, py in perimeter:
-                if (px, py) not in other_soldier_cells:
-                    cx, cy = px + 0.5, py + 0.5
-                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best = (cx, cy)
-            return best
+            for idx, (px, py) in enumerate(perimeter):
+                dist = abs(char['x'] - px - 0.5) + abs(char['y'] - py - 0.5)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            current_idx = best_idx
+        
+        # Find next unoccupied perimeter cell in clockwise order
+        for offset in range(1, len(perimeter)):
+            next_idx = (current_idx + offset) % len(perimeter)
+            next_pos = perimeter[next_idx]
+            if next_pos not in other_soldier_cells:
+                char['patrol_target'] = next_pos
+                return (next_pos[0] + 0.5, next_pos[1] + 0.5)
+        
+        # All positions occupied - stay still
+        return None
     
     def _get_steward_goal(self, char):
         """Get steward's movement goal. Returns float position."""
@@ -2120,46 +2359,146 @@ class GameLogic:
                     return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
         
         if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('military_housing'):
-            return None
+            # Already in barracks - wander around naturally
+            return self._get_wander_goal(char, self.state.get_area_by_role('military_housing'))
         return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
     
     def _get_wander_goal(self, char, area):
-        """Get a random position within the given area to wander toward.
-        Returns float position.
+        """Get the current idle destination for this character within the given area.
+        Uses a state machine to create natural wandering behavior:
+        - Choose a point of interest or random valid cell
+        - Move toward it at reduced speed
+        - Wait there for a while
+        - Sometimes pause mid-journey
+        Returns float position or None if waiting/paused.
         """
         is_village = (area == PRIMARY_ALLEGIANCE)
         
-        # Collect valid cells in the area
-        valid_cells = []
-        for y in range(SIZE):
-            for x in range(SIZE):
-                if is_village:
-                    if self.state.is_in_village(x, y):
-                        valid_cells.append((x, y))
-                else:
-                    if self.state.get_area_at(x, y) == area:
-                        valid_cells.append((x, y))
+        # Mark character as idling (for speed reduction)
+        char['idle_is_idle'] = True
         
-        if not valid_cells:
+        idle_state = char.get('idle_state', 'choosing')
+        
+        # Handle waiting state
+        if idle_state == 'waiting' or idle_state == 'paused':
+            wait_ticks = char.get('idle_wait_ticks', 0)
+            if wait_ticks > 0:
+                char['idle_wait_ticks'] = wait_ticks - 1
+                return None  # Stay still
+            else:
+                # Done waiting, choose new destination
+                char['idle_state'] = 'choosing'
+                idle_state = 'choosing'
+        
+        # Handle choosing state - pick a new destination
+        if idle_state == 'choosing':
+            destination = self._choose_idle_destination(char, area, is_village)
+            if destination:
+                char['idle_destination'] = destination
+                char['idle_state'] = 'moving'
+                idle_state = 'moving'
+            else:
+                # No valid destination, stay put
+                return None
+        
+        # Handle moving state
+        if idle_state == 'moving':
+            destination = char.get('idle_destination')
+            if not destination:
+                char['idle_state'] = 'choosing'
+                return None
+            
+            # Check if we've arrived at destination
+            dx = destination[0] - char['x']
+            dy = destination[1] - char['y']
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < 0.4:  # Arrived at destination
+                # Start waiting
+                char['idle_state'] = 'waiting'
+                char['idle_wait_ticks'] = random.randint(IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS)
+                char['idle_destination'] = None
+                return None
+            
+            # Maybe pause mid-journey (small chance per tick)
+            # Only check occasionally to avoid constant rolls
+            if random.random() < IDLE_PAUSE_CHANCE / 100:  # Scaled down since called every tick
+                char['idle_state'] = 'paused'
+                char['idle_wait_ticks'] = random.randint(IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS)
+                return None
+            
+            return destination
+        
+        return None
+    
+    def _choose_idle_destination(self, char, area, is_village):
+        """Choose a destination for idle wandering.
+        70% chance to pick a point of interest (corners, center, edges)
+        30% chance to pick a random valid cell
+        Avoids farm cells.
+        """
+        # Get points of interest
+        poi_list = self.state.get_area_points_of_interest(area, is_village)
+        
+        # Get valid cells for random wandering
+        valid_cells = self.state.get_valid_idle_cells(area, is_village)
+        
+        if not poi_list and not valid_cells:
             return None
         
-        # Pick a random cell in the area
-        target_cell = random.choice(valid_cells)
-        return (target_cell[0] + 0.5, target_cell[1] + 0.5)
+        # 70% chance to go to a point of interest if available
+        if poi_list and (not valid_cells or random.random() < 0.7):
+            # Pick a POI that's not too close to current position
+            current_pos = (char['x'], char['y'])
+            far_pois = [p for p in poi_list if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
+            if far_pois:
+                return random.choice(far_pois)
+            elif poi_list:
+                return random.choice(poi_list)
+        
+        # Pick a random valid cell
+        if valid_cells:
+            # Prefer cells that are at least 2 cells away
+            current_cell = (int(char['x']), int(char['y']))
+            far_cells = [c for c in valid_cells if abs(c[0]-current_cell[0]) + abs(c[1]-current_cell[1]) > 2]
+            if far_cells:
+                cell = random.choice(far_cells)
+            else:
+                cell = random.choice(valid_cells)
+            return (cell[0] + 0.5, cell[1] + 0.5)
+        
+        return None
     
+    def _reset_idle_state(self, char):
+        """Reset idle state when character is no longer idling."""
+        char['idle_state'] = 'choosing'
+        char['idle_destination'] = None
+        char['idle_wait_ticks'] = 0
+        char['idle_is_idle'] = False
+
     def _get_random_neighbor(self, char):
-        """Get a random valid position nearby. Returns float position."""
-        # Pick a random direction and distance
-        angle = random.random() * 2 * math.pi
-        distance = random.uniform(1.0, 3.0)
+        """Get a random valid position nearby. Returns float position.
+        Avoids farm cells.
+        """
+        # Try several times to find a non-farm cell
+        for _ in range(10):
+            # Pick a random direction and distance
+            angle = random.random() * 2 * math.pi
+            distance = random.uniform(1.0, 3.0)
+            
+            nx = char['x'] + math.cos(angle) * distance
+            ny = char['y'] + math.sin(angle) * distance
+            
+            # Clamp to bounds
+            nx = max(0.5, min(SIZE - 0.5, nx))
+            ny = max(0.5, min(SIZE - 0.5, ny))
+            
+            # Check if this is a farm cell
+            cell_x, cell_y = int(nx), int(ny)
+            if (cell_x, cell_y) not in self.state.farm_cells:
+                return (nx, ny)
         
-        nx = char['x'] + math.cos(angle) * distance
-        ny = char['y'] + math.sin(angle) * distance
-        
-        # Clamp to bounds
-        nx = max(0.5, min(SIZE - 0.5, nx))
-        ny = max(0.5, min(SIZE - 0.5, ny))
-        
+        # Fallback to any position if no non-farm cell found
         return (nx, ny)
     
     def _nearest_in_area(self, char, area, is_village=False):
@@ -2575,10 +2914,22 @@ class GameLogic:
     
     def _do_attack(self, attacker, target):
         """Execute an attack."""
+        import time
+        
         attacker_name = self.get_display_name(attacker)
         target_name = self.get_display_name(target)
         
-        damage = random.randint(10, 20)
+        # Start attack animation
+        attacker['attack_animation_start'] = time.time()
+        # Calculate attack direction toward target
+        dx = target['x'] - attacker['x']
+        dy = target['y'] - attacker['y']
+        if abs(dx) > abs(dy):
+            attacker['attack_direction'] = 'right' if dx > 0 else 'left'
+        else:
+            attacker['attack_direction'] = 'down' if dy > 0 else 'up'
+        
+        damage = random.randint(2, 5)  # Reduced damage (was 10-20)
         target['health'] -= damage
         self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target['health']}")
         
@@ -2973,3 +3324,114 @@ class GameLogic:
             else:
                 self.state.log_action(f"{name} tried to trade but {vendor_name} refused")
         return False
+    
+    def player_attack(self):
+        """Player swings sword in facing direction. Returns True if swung."""
+        import time
+        
+        player = self.state.player
+        if not player:
+            return False
+        
+        # Check if already attacking (animation in progress)
+        anim_start = player.get('attack_animation_start')
+        if anim_start is not None:
+            elapsed = time.time() - anim_start
+            if elapsed < ATTACK_ANIMATION_DURATION:
+                return False  # Still animating
+        
+        name = self.get_display_name(player)
+        facing = player.get('facing', 'down')
+        
+        # Start attack animation
+        player['attack_animation_start'] = time.time()
+        player['attack_direction'] = self._facing_to_attack_direction(facing)
+        
+        # Calculate attack hitbox based on facing direction (1 cell range)
+        attack_range = 1.0
+        targets_hit = []
+        
+        # Get attack direction vector
+        dx, dy = self._get_direction_vector(facing)
+        
+        # Check for targets in the attack area
+        for char in self.state.characters:
+            if char is player:
+                continue
+            
+            # Calculate distance in the attack direction
+            rel_x = char['x'] - player['x']
+            rel_y = char['y'] - player['y']
+            
+            # Project onto attack direction
+            if dx != 0 or dy != 0:
+                # Distance along attack direction
+                proj_dist = rel_x * dx + rel_y * dy
+                
+                # Perpendicular distance (for width of swing)
+                perp_dist = abs(rel_x * (-dy) + rel_y * dx)
+                
+                # Hit if within range in attack direction and within swing width
+                if 0 < proj_dist <= attack_range and perp_dist < 0.7:
+                    targets_hit.append(char)
+        
+        # Deal damage to all targets hit
+        if targets_hit:
+            for target in targets_hit:
+                target_name = self.get_display_name(target)
+                damage = random.randint(2, 5)
+                target['health'] -= damage
+                self.state.log_action(f"{name} ATTACKS {target_name} for {damage}! HP: {target['health']}")
+                
+                # Mark player as aggressor if target wasn't hostile
+                if not target.get('is_aggressor') and not target.get('is_murderer') and not target.get('is_thief'):
+                    player['is_aggressor'] = True
+                
+                if target['health'] <= 0:
+                    target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
+                    
+                    if target_was_criminal:
+                        self.state.log_action(f"{name} KILLED {target_name} (justified)!")
+                    else:
+                        player['is_murderer'] = True
+                        self.state.log_action(f"{name} KILLED {target_name}!")
+                        self.witness_murder(player, target)
+                    
+                    # Transfer items
+                    self.state.transfer_all_items(target, player)
+                    self.state.remove_character(target)
+            return True
+        else:
+            self.state.log_action(f"{name} swings sword (missed)")
+            return True
+    
+    def _facing_to_attack_direction(self, facing):
+        """Convert facing direction to attack direction."""
+        if facing in ('up', 'up-left', 'up-right'):
+            return 'up'
+        elif facing in ('down', 'down-left', 'down-right'):
+            return 'down'
+        elif facing in ('left',):
+            return 'left'
+        elif facing in ('right',):
+            return 'right'
+        # Handle diagonal facings
+        if 'left' in facing:
+            return 'left'
+        if 'right' in facing:
+            return 'right'
+        return 'down'
+    
+    def _get_direction_vector(self, facing):
+        """Get unit direction vector for a facing direction."""
+        vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        return vectors.get(facing, (0, 1))

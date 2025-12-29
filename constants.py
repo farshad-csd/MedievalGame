@@ -276,6 +276,28 @@ NPC_MOVE_TICK_INTERVAL = 6
 SLEEP_START_FRACTION = 2/3  # Sleep starts at 2/3 of the day (latter 1/3)
 
 # =============================================================================
+# IDLE/WANDERING SETTINGS
+# =============================================================================
+IDLE_SPEED_MULTIPLIER = 0.5  # Idle characters move at half speed
+IDLE_MIN_WAIT_TICKS = 30 * TICK_MULTIPLIER  # Minimum time to wait at a spot (3 seconds)
+IDLE_MAX_WAIT_TICKS = 80 * TICK_MULTIPLIER  # Maximum time to wait at a spot (8 seconds)
+IDLE_PAUSE_CHANCE = 0.3  # 30% chance to pause mid-journey
+IDLE_PAUSE_MIN_TICKS = 10 * TICK_MULTIPLIER  # Minimum pause duration (1 second)
+IDLE_PAUSE_MAX_TICKS = 30 * TICK_MULTIPLIER  # Maximum pause duration (3 seconds)
+
+# =============================================================================
+# SQUEEZE/PATHFINDING SETTINGS
+# =============================================================================
+SQUEEZE_THRESHOLD_TICKS = 3  # Ticks blocked before starting to squeeze
+SQUEEZE_SLIDE_SPEED = 0.8  # How fast to slide perpendicular (relative to movement speed)
+
+# =============================================================================
+# ATTACK ANIMATION SETTINGS
+# =============================================================================
+ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
+ATTACK_COOLDOWN_TICKS = 10  # Minimum ticks between attacks
+
+# =============================================================================
 # VISUAL SETTINGS
 # =============================================================================
 # Farm cell state colors

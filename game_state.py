@@ -270,6 +270,23 @@ class GameState:
             '_idle_logged': False,
             '_work_logged': False,
             
+            # Idle/wandering state
+            'idle_state': 'choosing',  # 'choosing', 'moving', 'waiting', 'paused'
+            'idle_destination': None,  # (x, y) float position
+            'idle_wait_ticks': 0,  # Ticks remaining to wait
+            'idle_is_idle': False,  # True when character is in idle behavior (for speed)
+            
+            # Squeeze/pathfinding state (for getting past obstacles)
+            'blocked_ticks': 0,  # How many ticks character has been blocked
+            'squeeze_direction': 0,  # -1 or 1 for which way to slide, 0 for none
+            
+            # Patrol state (for soldiers)
+            'patrol_target': None,  # (x, y) cell tuple - current patrol destination
+            
+            # Attack animation state
+            'attack_animation_start': None,  # Tick when attack animation started (None = not attacking)
+            'attack_direction': None,  # Direction of the attack swing
+            
             # Visual state
             'facing': 'down',  # 'up', 'down', 'left', 'right'
         }
@@ -432,6 +449,111 @@ class GameState:
                 if self.area_map[y][x] == area_name:
                     cells.append((x, y))
         return cells
+    
+    def get_area_bounds(self, area_name):
+        """Get the bounding box of an area as (min_x, min_y, max_x, max_y).
+        Returns None if area not found.
+        """
+        cells = self.get_area_cells(area_name)
+        if not cells:
+            return None
+        
+        min_x = min(c[0] for c in cells)
+        max_x = max(c[0] for c in cells)
+        min_y = min(c[1] for c in cells)
+        max_y = max(c[1] for c in cells)
+        return (min_x, min_y, max_x, max_y)
+    
+    def get_village_bounds(self):
+        """Get the bounding box of all village areas combined."""
+        min_x, max_x = SIZE, 0
+        min_y, max_y = SIZE, 0
+        found = False
+        
+        for y in range(SIZE):
+            for x in range(SIZE):
+                if self.is_in_village(x, y):
+                    min_x = min(min_x, x)
+                    max_x = max(max_x, x)
+                    min_y = min(min_y, y)
+                    max_y = max(max_y, y)
+                    found = True
+        
+        if not found:
+            return None
+        return (min_x, min_y, max_x, max_y)
+    
+    def get_area_points_of_interest(self, area_name, is_village=False):
+        """Get interesting points within an area for idle wandering.
+        Returns list of (x, y) float positions representing:
+        - Center of area
+        - Corners of area
+        - Midpoints of edges
+        Avoids farm cells.
+        """
+        if is_village:
+            bounds = self.get_village_bounds()
+        else:
+            bounds = self.get_area_bounds(area_name)
+        
+        if not bounds:
+            return []
+        
+        min_x, min_y, max_x, max_y = bounds
+        
+        # Calculate center and edge midpoints (as float positions, cell centers)
+        center_x = (min_x + max_x) / 2.0 + 0.5
+        center_y = (min_y + max_y) / 2.0 + 0.5
+        
+        # Points of interest (cell centers)
+        points = [
+            # Center
+            (center_x, center_y),
+            # Corners (slightly inward to stay in area)
+            (min_x + 0.5, min_y + 0.5),  # Top-left
+            (max_x + 0.5, min_y + 0.5),  # Top-right
+            (min_x + 0.5, max_y + 0.5),  # Bottom-left
+            (max_x + 0.5, max_y + 0.5),  # Bottom-right
+            # Edge midpoints
+            (center_x, min_y + 0.5),  # Top edge
+            (center_x, max_y + 0.5),  # Bottom edge
+            (min_x + 0.5, center_y),  # Left edge
+            (max_x + 0.5, center_y),  # Right edge
+        ]
+        
+        # Filter out points that are on farm cells
+        valid_points = []
+        for px, py in points:
+            cell_x, cell_y = int(px), int(py)
+            if (cell_x, cell_y) not in self.farm_cells:
+                # Also verify the point is actually in the target area
+                if is_village:
+                    if self.is_in_village(cell_x, cell_y):
+                        valid_points.append((px, py))
+                else:
+                    if self.get_area_at(cell_x, cell_y) == area_name:
+                        valid_points.append((px, py))
+        
+        return valid_points
+    
+    def get_valid_idle_cells(self, area_name, is_village=False):
+        """Get all valid cells for idle wandering in an area.
+        Excludes farm cells.
+        """
+        valid_cells = []
+        for y in range(SIZE):
+            for x in range(SIZE):
+                # Skip farm cells
+                if (x, y) in self.farm_cells:
+                    continue
+                
+                if is_village:
+                    if self.is_in_village(x, y):
+                        valid_cells.append((x, y))
+                else:
+                    if self.get_area_at(x, y) == area_name:
+                        valid_cells.append((x, y))
+        return valid_cells
     
     def get_village_perimeter(self):
         """Get cells forming the perimeter around the village in clockwise order"""

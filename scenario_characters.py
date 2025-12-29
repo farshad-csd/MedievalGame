@@ -68,7 +68,7 @@ CHARACTER_TEMPLATES = {
         "morality": 4,
         "starting_allegiance": None,
         "starting_job": None,
-        "starting_home": "RUIN",  # Homeless wanderer - spawns at specific location
+        "starting_home": None,
         "starting_money": 0,
         "starting_food": 0,
         "starting_age": 32,

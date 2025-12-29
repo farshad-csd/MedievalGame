@@ -9,6 +9,8 @@ It does NOT contain:
 - Game state (that's in game_state.py)
 """
 
+import time
+import math
 import pygame
 import pygame.freetype
 from constants import (
@@ -17,7 +19,8 @@ from constants import (
     BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
-    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED
+    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
+    ATTACK_ANIMATION_DURATION
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
 from game_state import GameState
@@ -186,6 +189,8 @@ class BoardGUI:
             self._handle_eat()
         elif key == pygame.K_t:
             self._handle_trade()
+        elif key == pygame.K_f:
+            self._handle_attack()
         elif key == pygame.K_c:
             # Recenter camera on player and resume following
             self.camera_following_player = True
@@ -255,6 +260,10 @@ class BoardGUI:
     def _handle_trade(self):
         """Handle player trade input"""
         self.logic.player_trade()
+    
+    def _handle_attack(self):
+        """Handle player attack input"""
+        self.logic.player_attack()
     
     # =========================================================================
     # GAME LOOP
@@ -503,12 +512,94 @@ class BoardGUI:
             rect_cx = rect_left + rect_width // 2
             self._draw_character_eyes(char, rect_cx, eye_y, rect_width)
             
+            # Draw sword swing animation if active
+            self._draw_sword_swing(char, pixel_cx, pixel_cy, rect_width, rect_height)
+            
             # Draw first name below rectangle
             first_name = char['name'].split()[0]
             text_surface, text_rect = self.font_tiny.render(first_name, (0, 0, 0))
             text_x = pixel_cx - text_rect.width / 2
             text_y = rect_top + rect_height + 2
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
+    
+    def _draw_sword_swing(self, char, cx, cy, rect_width, rect_height):
+        """Draw sword swing animation arc if character is attacking."""
+        anim_start = char.get('attack_animation_start')
+        if anim_start is None:
+            return
+        
+        # Calculate animation progress (0.0 to 1.0)
+        elapsed = time.time() - anim_start
+        if elapsed > ATTACK_ANIMATION_DURATION:
+            # Animation finished - clear it
+            char['attack_animation_start'] = None
+            char['attack_direction'] = None
+            return
+        
+        progress = elapsed / ATTACK_ANIMATION_DURATION
+        
+        # Sword parameters
+        sword_length = int(rect_height * 1.2)  # Sword is slightly longer than character height
+        sword_width = max(2, int(3 * self.zoom))
+        
+        # Attack direction determines swing arc
+        attack_dir = char.get('attack_direction', 'right')
+        
+        # Calculate swing angle based on progress
+        # Swing goes from -60 degrees to +60 degrees (120 degree arc)
+        # Using eased animation for snappy feel
+        ease_progress = 1 - (1 - progress) ** 3  # Ease out cubic
+        swing_angle = -60 + (120 * ease_progress)
+        
+        # Base angle depends on attack direction
+        if attack_dir == 'right':
+            base_angle = 0
+            origin_x = cx + rect_width // 2
+            origin_y = cy
+        elif attack_dir == 'left':
+            base_angle = 180
+            origin_x = cx - rect_width // 2
+            origin_y = cy
+        elif attack_dir == 'down':
+            base_angle = 90
+            origin_x = cx
+            origin_y = cy + rect_height // 2
+        else:  # up
+            base_angle = -90
+            origin_x = cx
+            origin_y = cy - rect_height // 2
+        
+        # Calculate sword endpoint
+        total_angle = math.radians(base_angle + swing_angle)
+        end_x = origin_x + int(sword_length * math.cos(total_angle))
+        end_y = origin_y + int(sword_length * math.sin(total_angle))
+        
+        # Draw sword blade (silver/gray)
+        pygame.draw.line(self.screen, (180, 180, 200), 
+                        (int(origin_x), int(origin_y)), 
+                        (int(end_x), int(end_y)), 
+                        sword_width)
+        
+        # Draw sword edge highlight
+        pygame.draw.line(self.screen, (220, 220, 240),
+                        (int(origin_x), int(origin_y)),
+                        (int(end_x), int(end_y)),
+                        max(1, sword_width // 2))
+        
+        # Draw swing trail (motion blur effect)
+        if progress < 0.8:
+            trail_alpha = int(100 * (1 - progress))
+            # Draw a few trail lines behind the current position
+            for i in range(3):
+                trail_progress = max(0, ease_progress - (i + 1) * 0.15)
+                trail_angle = math.radians(base_angle + (-60 + 120 * trail_progress))
+                trail_end_x = origin_x + int(sword_length * math.cos(trail_angle))
+                trail_end_y = origin_y + int(sword_length * math.sin(trail_angle))
+                trail_color = (150, 150, 170)
+                pygame.draw.line(self.screen, trail_color,
+                               (int(origin_x), int(origin_y)),
+                               (int(trail_end_x), int(trail_end_y)),
+                               max(1, sword_width - i - 1))
     
     def _draw_character_eyes(self, char, cx, eye_y, rect_width):
         """Draw eyes based on facing direction. Eyes are always at eye_y (10% from top)."""
