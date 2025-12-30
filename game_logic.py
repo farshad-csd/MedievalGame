@@ -29,7 +29,8 @@ from constants import (
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
     ATTACK_ANIMATION_DURATION,
-    WHEAT_TO_BREAD_RATIO
+    WHEAT_TO_BREAD_RATIO,
+    BREAD_PER_BITE, HUNGER_PER_BREAD
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -1736,12 +1737,12 @@ class GameLogic:
         job = char.get('job')
         name = self.get_display_name(char)
         
-        # Option 1: Eat from inventory
-        if self.get_wheat(char) >= WHEAT_PER_BITE:
-            self.remove_wheat(char, WHEAT_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_WHEAT)
+        # Option 1: Eat from inventory (bread only - wheat cannot be eaten)
+        if self.get_bread(char) >= BREAD_PER_BITE:
+            self.remove_bread(char, BREAD_PER_BITE)
+            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
             char['wheat_seek_ticks'] = 0
-            self.state.log_action(f"{name} ate from inventory, hunger now {char['hunger']:.0f}")
+            self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return True
         
         # Option 2: Soldiers wait for steward to bring wheat (passive)
@@ -2977,11 +2978,11 @@ class GameLogic:
                 self._do_attack(char, attacker)
                 return
         
-        # Eat if hungry
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) >= WHEAT_PER_BITE:
-            self.remove_wheat(char, WHEAT_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_WHEAT)
-            self.state.log_action(f"{name} ate from inventory, hunger now {char['hunger']:.0f}")
+        # Eat if hungry (bread only - wheat cannot be eaten)
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) >= BREAD_PER_BITE:
+            self.remove_bread(char, BREAD_PER_BITE)
+            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
+            self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return
         
         # Job-specific actions
@@ -3217,7 +3218,9 @@ class GameLogic:
                             self.try_robbery(char)
     
     def _try_frozen_trade(self, char):
-        """Frozen character tries to trade with any adjacent wheat vendor."""
+        """Frozen character tries to trade with any adjacent wheat vendor.
+        Note: They buy wheat but can't eat it - they need bread to recover.
+        """
         if self.can_afford_any_wheat(char):
             vendor = self.find_adjacent_vendor(char, 'wheat')
             if vendor and self.vendor_willing_to_trade(vendor, char, 'wheat'):
@@ -3226,12 +3229,13 @@ class GameLogic:
                     self.execute_vendor_trade(vendor, char, 'wheat', amount)
                     name = self.get_display_name(char)
                     self.state.log_action(f"{name} (frozen) bought {amount} wheat!")
-                    if self.get_wheat(char) >= WHEAT_PER_BITE:
-                        self.remove_wheat(char, WHEAT_PER_BITE)
-                        char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_WHEAT)
+                    # They have wheat but can't eat it - need bread to recover
+                    if self.get_bread(char) >= BREAD_PER_BITE:
+                        self.remove_bread(char, BREAD_PER_BITE)
+                        char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
                         char['is_starving'] = False
                         char['is_frozen'] = False
-                        self.state.log_action(f"{name} recovered from starvation!")
+                        self.state.log_action(f"{name} ate bread and recovered from starvation!")
     
     def _do_attack(self, attacker, target):
         """Execute an attack."""
@@ -3351,10 +3355,11 @@ class GameLogic:
                     char['ticks_starving'] = 0
                     self.state.log_action(f"{name} is STARVING! Losing health...")
                     
-                    # Soldiers quit when they start starving - lose job, allegiance, and home
+                    # Soldiers quit when they start starving - lose job and home, but keep allegiance
+                    # This gives them a chance to buy wheat from a farmer and rejoin
+                    # If no farmer will sell to them, wheat timeout will naturally remove allegiance
                     if char.get('job') == 'Soldier':
                         char['job'] = None
-                        char['allegiance'] = None
                         char['home'] = None
                         # Remove bed ownership
                         self.state.unassign_bed_owner(char['name'])
@@ -3593,16 +3598,16 @@ class GameLogic:
                             break
     
     def player_eat(self):
-        """Player eats from inventory. Returns True if ate."""
+        """Player eats bread from inventory. Returns True if ate."""
         player = self.state.player
         if not player:
             return False
         
         name = self.get_display_name(player)
         
-        if self.get_wheat(player) >= WHEAT_PER_BITE:
-            self.remove_wheat(player, WHEAT_PER_BITE)
-            player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_WHEAT)
+        if self.get_bread(player) >= BREAD_PER_BITE:
+            self.remove_bread(player, BREAD_PER_BITE)
+            player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_BREAD)
             
             # Check if this recovered from starvation
             if player['hunger'] > STARVATION_THRESHOLD:
@@ -3611,11 +3616,11 @@ class GameLogic:
                     player['is_frozen'] = False
                     player['starvation_health_lost'] = 0
                     player['ticks_starving'] = 0
-                    self.state.log_action(f"{name} ate and recovered from starvation! Hunger: {player['hunger']:.0f}")
+                    self.state.log_action(f"{name} ate bread and recovered from starvation! Hunger: {player['hunger']:.0f}")
                 else:
-                    self.state.log_action(f"{name} ate from inventory, hunger now {player['hunger']:.0f}")
+                    self.state.log_action(f"{name} ate bread, hunger now {player['hunger']:.0f}")
             else:
-                self.state.log_action(f"{name} ate from inventory, hunger now {player['hunger']:.0f}")
+                self.state.log_action(f"{name} ate bread, hunger now {player['hunger']:.0f}")
             return True
         return False
     
@@ -3639,16 +3644,16 @@ class GameLogic:
                     self.execute_vendor_trade(vendor, player, 'wheat', amount)
                     self.state.log_action(f"{name} bought {amount} wheat for ${price} from {vendor_name}")
                     
-                    # If starving/frozen, auto-eat to try to recover
-                    if (player.get('is_starving', False) or player.get('is_frozen', False)) and self.get_wheat(player) >= WHEAT_PER_BITE:
-                        self.remove_wheat(player, WHEAT_PER_BITE)
-                        player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_WHEAT)
+                    # If starving/frozen, auto-eat bread to try to recover (wheat can't be eaten)
+                    if (player.get('is_starving', False) or player.get('is_frozen', False)) and self.get_bread(player) >= BREAD_PER_BITE:
+                        self.remove_bread(player, BREAD_PER_BITE)
+                        player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_BREAD)
                         if player['hunger'] > STARVATION_THRESHOLD:
                             player['is_starving'] = False
                             player['is_frozen'] = False
                             player['starvation_health_lost'] = 0
                             player['ticks_starving'] = 0
-                            self.state.log_action(f"{name} ate and recovered from starvation! Hunger: {player['hunger']:.0f}")
+                            self.state.log_action(f"{name} ate bread and recovered from starvation! Hunger: {player['hunger']:.0f}")
                     
                     return True
             else:

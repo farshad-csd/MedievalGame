@@ -93,6 +93,7 @@ ITEMS = {
         "name": "Bread",
         "price": 7,
         "stack_size": 15,
+        "hunger_value": 33,  # How much hunger restored per unit
     },
 }
 
@@ -113,6 +114,8 @@ WHEAT_PRICE_PER_UNIT = ITEMS[WHEAT_ITEM]["price"]
 BREAD_STACK_SIZE = ITEMS["bread"]["stack_size"]
 BREAD_PRICE_PER_UNIT = ITEMS["bread"]["price"]
 WHEAT_TO_BREAD_RATIO = 1  # 1 wheat -> 1 bread
+BREAD_PER_BITE = 1
+HUNGER_PER_BREAD = ITEMS["bread"]["hunger_value"]
 
 # =============================================================================
 # BARREL SETTINGS
