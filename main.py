@@ -23,4 +23,3 @@ if __name__ == "__main__":
 
 
 # git push https://farshad-csd@github.com/farshad-csd/MedievalGame.git main
-# git push https://farshad-csd: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@github.com/farshad-csd/MedievalGame.git main
