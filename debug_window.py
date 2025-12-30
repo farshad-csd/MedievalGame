@@ -262,7 +262,7 @@ class DebugWindow:
                     inv_parts.append('-')
                 elif slot['type'] == 'money':
                     inv_parts.append(f"${slot['amount']}")
-                elif slot['type'] == 'food':
+                elif slot['type'] == 'wheat':
                     inv_parts.append(f"F{slot['amount']}")
                 else:
                     inv_parts.append(f"{slot['type'][:3]}{slot['amount']}")
@@ -310,12 +310,12 @@ class DebugWindow:
             barrel_pos = f"({pos[0]},{pos[1]})"
             barrel_home = barrel['home']
             barrel_owner = barrel['owner'] if barrel['owner'] else "(unowned)"
-            barrel_food = self.state.get_barrel_food(barrel)
+            barrel_wheat = self.state.get_barrel_wheat(barrel)
             barrel_money = self.state.get_barrel_money(barrel)
             used_slots = sum(1 for slot in barrel['inventory'] if slot is not None)
             total_slots = len(barrel['inventory'])
             
-            line = f"{barrel_name:<20} Pos:{barrel_pos:<10} Home:{barrel_home:<10} Owner:{barrel_owner:<18} Food:{barrel_food:<5} ${barrel_money:<5} Slots:{used_slots}/{total_slots}"
+            line = f"{barrel_name:<20} Pos:{barrel_pos:<10} Home:{barrel_home:<10} Owner:{barrel_owner:<18} Wheat:{barrel_wheat:<5} ${barrel_money:<5} Slots:{used_slots}/{total_slots}"
             lines.append(line)
         
         # Beds section

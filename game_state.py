@@ -8,11 +8,11 @@ import random
 import math
 from constants import (
     SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL,
-    INVENTORY_SLOTS, FOOD_STACK_SIZE, BARREL_SLOTS, BARREL_FOOD_STACK_SIZE,
+    INVENTORY_SLOTS, WHEAT_STACK_SIZE, BARREL_SLOTS, BARREL_WHEAT_STACK_SIZE,
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
-from scenario_world import AREAS, BARRELS, BEDS
+from scenario_world import AREAS, BARRELS, BEDS, STOVES
 from scenario_characters import CHARACTER_TEMPLATES
 
 
@@ -38,6 +38,7 @@ class GameState:
         self.farm_cells = {}  # (x, y) -> {'state': str, 'timer': int}
         self.barrels = {}  # (x, y) -> {'name': str, 'home': str, 'owner': str, 'inventory': list}
         self.beds = {}  # (x, y) -> {'name': str, 'home': str, 'owner': str}
+        self.stoves = {}  # (x, y) -> {'name': str, 'home': str}
         
         # Character data
         self.characters = []  # List of character dicts
@@ -51,6 +52,7 @@ class GameState:
         self._init_farm_cells()
         self._init_barrels()
         self._init_beds()
+        self._init_stoves()
         self._init_characters()
     
     def _init_areas(self):
@@ -102,6 +104,15 @@ class GameState:
                 'name': bed_def["name"],
                 'home': bed_def["home"],
                 'owner': None  # Assigned at runtime based on jobs
+            }
+    
+    def _init_stoves(self):
+        """Initialize stoves from STOVES configuration."""
+        for stove_def in STOVES:
+            x, y = stove_def["position"]
+            self.stoves[(x, y)] = {
+                'name': stove_def["name"],
+                'home': stove_def["home"]
             }
     
     def _init_characters(self):
@@ -192,10 +203,10 @@ class GameState:
     
     def _create_character(self, name, template, x, y, home_area):
         """Create a character dict from template"""
-        # Build initial inventory from starting money/food
+        # Build initial inventory from starting money/wheat
         inventory = self._build_initial_inventory(
             template['starting_money'], 
-            template['starting_food']
+            template['starting_wheat']
         )
         
         # Initialize skills - all start at 0, then apply starting_skills from template
@@ -263,8 +274,8 @@ class GameState:
             'tax_paid_this_cycle': False,
             'paid_this_cycle': False,
             'soldier_stopped': False,
-            'asked_steward_for_food': False,
-            'food_seek_ticks': 0,
+            'asked_steward_for_wheat': False,
+            'wheat_seek_ticks': 0,
             
             # Logging flags (to avoid spam)
             '_idle_logged': False,
@@ -291,8 +302,8 @@ class GameState:
             'facing': 'down',  # 'up', 'down', 'left', 'right'
         }
     
-    def _build_initial_inventory(self, money, food):
-        """Build inventory from starting money and food amounts."""
+    def _build_initial_inventory(self, money, wheat):
+        """Build inventory from starting money and wheat amounts."""
         inventory = [None] * INVENTORY_SLOTS
         slot_idx = 0
         
@@ -301,12 +312,12 @@ class GameState:
             inventory[slot_idx] = {'type': 'money', 'amount': money}
             slot_idx += 1
         
-        # Add food slots (stacks of FOOD_STACK_SIZE)
-        remaining_food = food
-        while remaining_food > 0 and slot_idx < INVENTORY_SLOTS:
-            stack_amount = min(remaining_food, FOOD_STACK_SIZE)
-            inventory[slot_idx] = {'type': 'food', 'amount': stack_amount}
-            remaining_food -= stack_amount
+        # Add wheat slots (stacks of WHEAT_STACK_SIZE)
+        remaining_wheat = wheat
+        while remaining_wheat > 0 and slot_idx < INVENTORY_SLOTS:
+            stack_amount = min(remaining_wheat, WHEAT_STACK_SIZE)
+            inventory[slot_idx] = {'type': 'wheat', 'amount': stack_amount}
+            remaining_wheat -= stack_amount
             slot_idx += 1
         
         return inventory
@@ -666,11 +677,11 @@ class GameState:
     # INVENTORY METHODS
     # =========================================================================
     
-    def get_food(self, char):
-        """Get total food from character's inventory."""
+    def get_wheat(self, char):
+        """Get total wheat from character's inventory."""
         total = 0
         for slot in char['inventory']:
-            if slot and slot['type'] == 'food':
+            if slot and slot['type'] == 'wheat':
                 total += slot['amount']
         return total
     
@@ -688,14 +699,14 @@ class GameState:
                 return True
         return False
     
-    def can_add_food(self, char, amount):
-        """Check if character can add this much food to inventory."""
+    def can_add_wheat(self, char, amount):
+        """Check if character can add this much wheat to inventory."""
         space = 0
         for slot in char['inventory']:
             if slot is None:
-                space += FOOD_STACK_SIZE
-            elif slot['type'] == 'food' and slot['amount'] < FOOD_STACK_SIZE:
-                space += FOOD_STACK_SIZE - slot['amount']
+                space += WHEAT_STACK_SIZE
+            elif slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
+                space += WHEAT_STACK_SIZE - slot['amount']
         return space >= amount
     
     def can_add_money(self, char):
@@ -707,14 +718,14 @@ class GameState:
                 return True
         return False
     
-    def add_food(self, char, amount):
-        """Add food to character's inventory. Returns amount actually added."""
+    def add_wheat(self, char, amount):
+        """Add wheat to character's inventory. Returns amount actually added."""
         remaining = amount
         
-        # First, fill existing food stacks
+        # First, fill existing wheat stacks
         for slot in char['inventory']:
-            if slot and slot['type'] == 'food' and slot['amount'] < FOOD_STACK_SIZE:
-                can_add = FOOD_STACK_SIZE - slot['amount']
+            if slot and slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
+                can_add = WHEAT_STACK_SIZE - slot['amount']
                 to_add = min(remaining, can_add)
                 slot['amount'] += to_add
                 remaining -= to_add
@@ -724,24 +735,24 @@ class GameState:
         # Then, use empty slots
         for i, slot in enumerate(char['inventory']):
             if slot is None:
-                to_add = min(remaining, FOOD_STACK_SIZE)
-                char['inventory'][i] = {'type': 'food', 'amount': to_add}
+                to_add = min(remaining, WHEAT_STACK_SIZE)
+                char['inventory'][i] = {'type': 'wheat', 'amount': to_add}
                 remaining -= to_add
                 if remaining <= 0:
                     return amount
         
         return amount - remaining  # Return amount actually added
     
-    def remove_food(self, char, amount):
-        """Remove food from character's inventory. Returns amount actually removed."""
+    def remove_wheat(self, char, amount):
+        """Remove wheat from character's inventory. Returns amount actually removed."""
         remaining = amount
         
-        # Remove from food stacks (prefer smaller stacks first to consolidate)
-        food_slots = [(i, slot) for i, slot in enumerate(char['inventory']) 
-                      if slot and slot['type'] == 'food']
-        food_slots.sort(key=lambda x: x[1]['amount'])
+        # Remove from wheat stacks (prefer smaller stacks first to consolidate)
+        wheat_slots = [(i, slot) for i, slot in enumerate(char['inventory']) 
+                      if slot and slot['type'] == 'wheat']
+        wheat_slots.sort(key=lambda x: x[1]['amount'])
         
-        for i, slot in food_slots:
+        for i, slot in wheat_slots:
             to_remove = min(remaining, slot['amount'])
             slot['amount'] -= to_remove
             remaining -= to_remove
@@ -794,28 +805,28 @@ class GameState:
             self.remove_money(from_char, money)
             self.add_money(to_char, money)
         
-        # Transfer food
-        food = self.get_food(from_char)
-        if food > 0:
-            self.remove_food(from_char, food)
-            self.add_food(to_char, food)
+        # Transfer wheat
+        wheat = self.get_wheat(from_char)
+        if wheat > 0:
+            self.remove_wheat(from_char, wheat)
+            self.add_wheat(to_char, wheat)
     
     def get_inventory_space(self, char):
-        """Get remaining food capacity in inventory."""
+        """Get remaining wheat capacity in inventory."""
         space = 0
         for slot in char['inventory']:
             if slot is None:
-                space += FOOD_STACK_SIZE
-            elif slot['type'] == 'food' and slot['amount'] < FOOD_STACK_SIZE:
-                space += FOOD_STACK_SIZE - slot['amount']
+                space += WHEAT_STACK_SIZE
+            elif slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
+                space += WHEAT_STACK_SIZE - slot['amount']
         return space
     
     def is_inventory_full(self, char):
-        """Check if inventory has no empty slots and all food stacks are full."""
+        """Check if inventory has no empty slots and all wheat stacks are full."""
         for slot in char['inventory']:
             if slot is None:
                 return False
-            if slot['type'] == 'food' and slot['amount'] < FOOD_STACK_SIZE:
+            if slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
                 return False
         return True
     
@@ -871,11 +882,11 @@ class GameState:
             return True
         return char.get('home') == barrel['home']
     
-    def get_barrel_food(self, barrel):
-        """Get total food from barrel's inventory."""
+    def get_barrel_wheat(self, barrel):
+        """Get total wheat from barrel's inventory."""
         total = 0
         for slot in barrel['inventory']:
-            if slot and slot['type'] == 'food':
+            if slot and slot['type'] == 'wheat':
                 total += slot['amount']
         return total
     
@@ -886,24 +897,24 @@ class GameState:
                 return slot['amount']
         return 0
     
-    def can_barrel_add_food(self, barrel, amount):
-        """Check if barrel can add this much food to inventory."""
+    def can_barrel_add_wheat(self, barrel, amount):
+        """Check if barrel can add this much wheat to inventory."""
         space = 0
         for slot in barrel['inventory']:
             if slot is None:
-                space += BARREL_FOOD_STACK_SIZE
-            elif slot['type'] == 'food' and slot['amount'] < BARREL_FOOD_STACK_SIZE:
-                space += BARREL_FOOD_STACK_SIZE - slot['amount']
+                space += BARREL_WHEAT_STACK_SIZE
+            elif slot['type'] == 'wheat' and slot['amount'] < BARREL_WHEAT_STACK_SIZE:
+                space += BARREL_WHEAT_STACK_SIZE - slot['amount']
         return space >= amount
     
-    def add_barrel_food(self, barrel, amount):
-        """Add food to barrel's inventory. Returns amount actually added."""
+    def add_barrel_wheat(self, barrel, amount):
+        """Add wheat to barrel's inventory. Returns amount actually added."""
         remaining = amount
         
-        # First, fill existing food stacks
+        # First, fill existing wheat stacks
         for slot in barrel['inventory']:
-            if slot and slot['type'] == 'food' and slot['amount'] < BARREL_FOOD_STACK_SIZE:
-                can_add = BARREL_FOOD_STACK_SIZE - slot['amount']
+            if slot and slot['type'] == 'wheat' and slot['amount'] < BARREL_WHEAT_STACK_SIZE:
+                can_add = BARREL_WHEAT_STACK_SIZE - slot['amount']
                 to_add = min(remaining, can_add)
                 slot['amount'] += to_add
                 remaining -= to_add
@@ -913,24 +924,24 @@ class GameState:
         # Then, use empty slots
         for i, slot in enumerate(barrel['inventory']):
             if slot is None:
-                to_add = min(remaining, BARREL_FOOD_STACK_SIZE)
-                barrel['inventory'][i] = {'type': 'food', 'amount': to_add}
+                to_add = min(remaining, BARREL_WHEAT_STACK_SIZE)
+                barrel['inventory'][i] = {'type': 'wheat', 'amount': to_add}
                 remaining -= to_add
                 if remaining <= 0:
                     return amount
         
         return amount - remaining  # Return amount actually added
     
-    def remove_barrel_food(self, barrel, amount):
-        """Remove food from barrel's inventory. Returns amount actually removed."""
+    def remove_barrel_wheat(self, barrel, amount):
+        """Remove wheat from barrel's inventory. Returns amount actually removed."""
         remaining = amount
         
-        # Remove from food stacks (prefer smaller stacks first to consolidate)
-        food_slots = [(i, slot) for i, slot in enumerate(barrel['inventory']) 
-                      if slot and slot['type'] == 'food']
-        food_slots.sort(key=lambda x: x[1]['amount'])
+        # Remove from wheat stacks (prefer smaller stacks first to consolidate)
+        wheat_slots = [(i, slot) for i, slot in enumerate(barrel['inventory']) 
+                      if slot and slot['type'] == 'wheat']
+        wheat_slots.sort(key=lambda x: x[1]['amount'])
         
-        for i, slot in food_slots:
+        for i, slot in wheat_slots:
             to_remove = min(remaining, slot['amount'])
             slot['amount'] -= to_remove
             remaining -= to_remove
@@ -1014,4 +1025,37 @@ class GameState:
             if bed['owner'] == owner_name:
                 bed['owner'] = None
                 return bed
+        return None
+    
+    # =========================================================================
+    # STOVE METHODS
+    # =========================================================================
+    
+    def get_stove_at(self, x, y):
+        """Get stove at position, if any"""
+        return self.stoves.get((x, y))
+    
+    def get_stove_position(self, stove):
+        """Get the (x, y) position of a stove"""
+        for pos, s in self.stoves.items():
+            if s is stove:
+                return pos
+        return None
+    
+    def is_adjacent_to_stove(self, char, stove):
+        """Check if character is adjacent to the stove."""
+        pos = self.get_stove_position(stove)
+        if not pos:
+            return False
+        sx, sy = pos
+        stove_cx = sx + 0.5
+        stove_cy = sy + 0.5
+        dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
+        return dist <= ADJACENCY_DISTANCE
+    
+    def get_adjacent_stove(self, char):
+        """Get any stove adjacent to the character, or None."""
+        for pos, stove in self.stoves.items():
+            if self.is_adjacent_to_stove(char, stove):
+                return stove
         return None

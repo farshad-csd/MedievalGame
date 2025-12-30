@@ -25,7 +25,7 @@ UPDATE_INTERVAL = BASE_UPDATE_INTERVAL // TICK_MULTIPLIER  # milliseconds per ti
 # Scenarios assign roles to their areas
 AREA_ROLES = {
     "military_housing": "Where soldiers live and sleep",
-    "farm": "Where food is grown",
+    "farm": "Where wheat is grown",
     "market": "Where trading happens",
     "residential": "General village living area",
 }
@@ -57,8 +57,8 @@ CRIME_INTENSITY_THEFT = 10   # 10 cells (2.5x original)
 # =============================================================================
 MAX_HUNGER = 100
 HUNGER_DECAY = 100 / TICKS_PER_DAY  # lose all hunger in 1 day (same rate, more ticks)
-HUNGER_CRITICAL = 40  # always seek food at or below this
-HUNGER_CHANCE_THRESHOLD = 60  # chance to seek food between CRITICAL and this
+HUNGER_CRITICAL = 40  # always seek wheat at or below this
+HUNGER_CHANCE_THRESHOLD = 60  # chance to seek wheat between CRITICAL and this
 
 # Starvation settings
 STARVATION_THRESHOLD = 0  # hunger at or below this = starving
@@ -71,22 +71,47 @@ STARVATION_FREEZE_HEALTH = 20  # freeze in place when health drops to this while
 # INVENTORY SETTINGS
 # =============================================================================
 INVENTORY_SLOTS = 5
-FOOD_STACK_SIZE = 15  # Max food per inventory slot
 # Money is infinitely stackable and takes 1 slot
 
 # =============================================================================
-# FOOD AND EATING SETTINGS
+# ITEM DEFINITIONS
 # =============================================================================
-FOOD_PER_BITE = 1
-HUNGER_PER_FOOD = 33
-FOOD_TO_EAT = 3
-FOOD_BUFFER_TARGET = 3  # Characters want 1 day of food in inventory
+# Central item registry - all items and their properties
+ITEMS = {
+    "wheat": {
+        "name": "Wheat",
+        "price": 5,
+        "stack_size": 15,
+        "hunger_value": 33,  # How much hunger restored per unit
+    },
+    "gold": {
+        "name": "Gold",
+        "price": 1,
+        "stack_size": None,  # Infinite stacking
+    },
+    "bread": {
+        "name": "Bread",
+        "price": 7,
+        "stack_size": 15,
+    },
+}
+
+# =============================================================================
+# WHEAT AND EATING SETTINGS
+# =============================================================================
+WHEAT_ITEM = "wheat"  # Which item is used for eating
+WHEAT_PER_BITE = 1
+HUNGER_PER_WHEAT = ITEMS[WHEAT_ITEM]["hunger_value"]
+WHEAT_TO_EAT = 3
+WHEAT_BUFFER_TARGET = 3  # Characters want 1 day of wheat in inventory
+WHEAT_STACK_SIZE = ITEMS[WHEAT_ITEM]["stack_size"]
+WHEAT_PRICE_PER_UNIT = ITEMS[WHEAT_ITEM]["price"]
 
 # =============================================================================
 # BARREL SETTINGS
 # =============================================================================
 BARREL_SLOTS = 30
-BARREL_FOOD_STACK_SIZE = 15  # Same as character inventory
+BARREL_WHEAT_STACK_SIZE = ITEMS[WHEAT_ITEM]["stack_size"]
 
 # =============================================================================
 # FARM SETTINGS
@@ -99,8 +124,7 @@ FARM_REPLANT_TIME = 5 * TICK_MULTIPLIER  # 5 seconds worth of ticks
 # =============================================================================
 # TRADING SETTINGS
 # =============================================================================
-FOOD_PRICE_PER_UNIT = 5  # 5 gold per food
-FARMER_PERSONAL_RESERVE = 10  # Food needed to feed self for a year (~3 food/day × 3 days)
+FARMER_PERSONAL_RESERVE = 10  # Wheat needed to feed self for a year (~3 wheat/day × 3 days)
 TRADE_COOLDOWN = 3 * TICK_MULTIPLIER  # 3 seconds worth of ticks (quick trading)
 
 # =============================================================================
@@ -109,22 +133,22 @@ TRADE_COOLDOWN = 3 * TICK_MULTIPLIER  # 3 seconds worth of ticks (quick trading)
 # Maps vendor job types to the goods they sell
 # Each vendor type can sell one or more goods
 VENDOR_GOODS = {
-    "Farmer": ["food"],
+    "Farmer": ["wheat"],
     "Medicine Vendor": ["medicine"],
     "Alcohol Vendor": ["alcohol"],
     "Explosives Vendor": ["explosives"],
     "Blacksmith": ["weapons", "tools", "armor"],
     "Tailor": ["clothing"],
-    "Innkeeper": ["food", "alcohol", "lodging"],
+    "Innkeeper": ["wheat", "alcohol", "lodging"],
     "Doctor": ["medicine", "medical_service"],
     "Carpenter": ["tools", "furniture"],
-    "Hunter": ["food", "leather", "furs"],
-    "Fisherman": ["food"],
+    "Hunter": ["wheat", "leather", "furs"],
+    "Fisherman": ["wheat"],
 }
 
-# Prices per unit of each goods type
+# Prices per unit of each goods type (items use ITEMS dict, these are for non-item goods)
 GOODS_PRICES = {
-    "food": 5,
+    "wheat": ITEMS["wheat"]["price"],
     "medicine": 15,
     "alcohol": 8,
     "explosives": 50,
@@ -141,7 +165,7 @@ GOODS_PRICES = {
 
 # Stack sizes for different goods in inventory
 GOODS_STACK_SIZES = {
-    "food": 15,
+    "wheat": ITEMS["wheat"]["stack_size"],
     "medicine": 10,
     "alcohol": 10,
     "explosives": 5,
@@ -158,7 +182,7 @@ GOODS_STACK_SIZES = {
 
 # Personal reserve amounts - vendors keep this much for themselves
 VENDOR_PERSONAL_RESERVE = {
-    "food": 10,
+    "wheat": 10,
     "medicine": 2,
     "alcohol": 2,
     "explosives": 1,
@@ -178,13 +202,13 @@ VENDOR_PERSONAL_RESERVE = {
 # =============================================================================
 STEWARD_TAX_INTERVAL = TICKS_PER_YEAR  # Uses multiplied value
 STEWARD_TAX_AMOUNT = 90
-SOLDIER_FOOD_PAYMENT = 6
+SOLDIER_WHEAT_PAYMENT = 6
 TAX_GRACE_PERIOD = TICKS_PER_DAY // 2  # Uses multiplied value
 
 # =============================================================================
 # ALLEGIANCE SETTINGS
 # =============================================================================
-ALLEGIANCE_FOOD_TIMEOUT = 30 * TICK_MULTIPLIER  # 30 seconds worth of ticks
+ALLEGIANCE_WHEAT_TIMEOUT = 30 * TICK_MULTIPLIER  # 30 seconds worth of ticks
 
 # =============================================================================
 # MOVEMENT
@@ -338,7 +362,7 @@ JOB_TIERS = {
     
     # TIER 3 — SKILLED TRADES WITH STATUS
     "Trader": 3,            # Wealth potential, independence, travels
-    "Soldier": 3,           # Steady pay and food, but dangerous and takes orders
+    "Soldier": 3,           # Steady pay and wheat, but dangerous and takes orders
     "Farmer": 3,            # Hard labor, low pay, dependent on others
     "Doctor": 3,            # Rare skill, well-paid, respected
     "Blacksmith": 3,        # Essential, well-paid, respected craft
@@ -356,7 +380,7 @@ JOB_TIERS = {
     
     # TIER 5 — RESPECTABLE BUT HARDER LABOR
     "Hunter": 5,            # Independence, skill-based, but weather-dependent
-    "Fisherman": 5,         # Steady food source, but hard and wet work
+    "Fisherman": 5,         # Steady wheat source, but hard and wet work
     "Shepherd": 5,          # Lonely, exposed to elements, but peaceful
     "Mercenary": 5,         # Good pay sometimes, but no security, violent, disreputable
     "Lumberjack": 5,        # Dangerous, exhausting, low status

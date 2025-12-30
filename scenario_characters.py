@@ -17,7 +17,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": "VILLAGE",
         "starting_job": None,
         "starting_money": 200,
-        "starting_food": 0,
+        "starting_wheat": 0,
         "starting_age": 45,
         "starting_skills": {"mercantile": 70},
         "is_player": False
@@ -30,7 +30,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": None,
         "starting_job": None,
         "starting_money": 50,
-        "starting_food": 36,
+        "starting_wheat": 10,
         "starting_age": 35,
         "starting_skills": {"farming": 50},
         "is_player": False
@@ -42,8 +42,8 @@ CHARACTER_TEMPLATES = {
         "morality": 9,
         "starting_allegiance": None,
         "starting_job": None,
-        "starting_money": 20,
-        "starting_food": 0,
+        "starting_money": 0,
+        "starting_wheat": 0,
         "starting_age": 25,
         "starting_skills": {"strength": 50},
         "is_player": False
@@ -55,8 +55,8 @@ CHARACTER_TEMPLATES = {
         "morality": 9,
         "starting_allegiance": None,
         "starting_job": None,
-        "starting_money": 20,
-        "starting_food": 0,
+        "starting_money": 0,
+        "starting_wheat": 0,
         "starting_age": 28,
         "starting_skills": {"strength": 50},
         "is_player": False
@@ -70,7 +70,7 @@ CHARACTER_TEMPLATES = {
         "starting_job": None,
         "starting_home": None,
         "starting_money": 0,
-        "starting_food": 0,
+        "starting_wheat": 0,
         "starting_age": 32,
         "starting_skills": {},
         "is_player": False
@@ -83,7 +83,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": None,
         "starting_job": None,
         "starting_money": 200,
-        "starting_food": 0,
+        "starting_wheat": 0,
         "starting_age": 32,
         "starting_skills": {"mercantile": 50},
         "is_player": False
@@ -96,7 +96,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": None,
         "starting_job": None,
         "starting_money": 50,
-        "starting_food": 0,
+        "starting_wheat": 0,
         "starting_age": 22,
         "starting_skills": {},
         "is_player": True

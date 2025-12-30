@@ -109,9 +109,9 @@ class BoardGUI:
                 # Build status string for debug window
                 player = self.state.player
                 if player:
-                    player_food = self.state.get_food(player)
+                    player_food = self.state.get_wheat(player)
                     player_money = self.state.get_money(player)
-                    status = f"Pos:({player['x']:.1f},{player['y']:.1f}) Food:{player_food} ${player_money} HP:{player['health']} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
+                    status = f"Pos:({player['x']:.1f},{player['y']:.1f}) Wheat:{player_food} ${player_money} HP:{player['health']} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
                 else:
                     status = f"No player | Zoom:{self.zoom:.1f}x"
                 self.debug_window.set_status(status)
@@ -400,6 +400,9 @@ class BoardGUI:
         # Draw beds
         self._draw_beds()
         
+        # Draw stoves
+        self._draw_stoves()
+        
         # Draw camps
         self._draw_camps()
         
@@ -455,6 +458,26 @@ class BoardGUI:
                                        cell_size - 2*padding - 6*self.zoom, pillow_height)
             pygame.draw.rect(self.screen, (255, 255, 255), pillow_rect)
             pygame.draw.rect(self.screen, (200, 200, 200), pillow_rect, 1)
+    
+    def _draw_stoves(self):
+        """Draw all stoves"""
+        cell_size = self._cam_cell_size
+        for pos, stove in self.state.stoves.items():
+            x, y = pos
+            screen_x, screen_y = self._world_to_screen(x, y)
+            
+            # Draw stove as dark gray rectangle with "S"
+            padding = 4 * self.zoom
+            stove_rect = pygame.Rect(screen_x + padding, screen_y + padding,
+                                      cell_size - 2*padding, cell_size - 2*padding)
+            pygame.draw.rect(self.screen, hex_to_rgb("#444444"), stove_rect)
+            pygame.draw.rect(self.screen, hex_to_rgb("#222222"), stove_rect, max(1, int(2 * self.zoom)))
+            
+            # Draw "S" text
+            text_surface, text_rect = self.font_barrel.render("S", (255, 150, 50))
+            text_x = screen_x + cell_size / 2 - text_rect.width / 2
+            text_y = screen_y + cell_size / 2 - text_rect.height / 2
+            self.screen.blit(text_surface, (int(text_x), int(text_y)))
     
     def _draw_camps(self):
         """Draw all camps"""

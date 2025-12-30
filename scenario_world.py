@@ -94,3 +94,21 @@ BEDS = [
         "home": "FARM"
     }
 ]
+
+# =============================================================================
+# STOVE DEFINITIONS (JSON-serializable)
+# =============================================================================
+# Stoves have: name, position (x, y), home area
+# Used to convert wheat into bread
+STOVES = [
+    {
+        "name": "Barracks Stove",
+        "position": [10, 11],  # x, y - in barracks
+        "home": "BARRACKS"
+    },
+    {
+        "name": "Farm Stove",
+        "position": [19, 2],  # x, y - corner of farm
+        "home": "FARM"
+    }
+]
