@@ -16,8 +16,7 @@ TEXT_COLOR = "white" # UI Text Color
 # =============================================================================
 # BOARD SETTINGS
 # =============================================================================
-SIZE = 20
-CELL_SIZE = 35
+CELL_SIZE = 35  # Pixels per cell for rendering
 
 # =============================================================================
 # TIMING SETTINGS
@@ -256,7 +255,6 @@ VENDOR_GOODS = {
 
 TRADE_COOLDOWN = 3 * TICK_MULTIPLIER  # 3 seconds worth of ticks (quick trading)
 
-
 # =============================================================================
 # STEWARD / TAX SETTINGS
 # =============================================================================
@@ -272,11 +270,9 @@ ALLEGIANCE_WHEAT_TIMEOUT = 30 * TICK_MULTIPLIER  # How long until soldiers quit
 # Standard roles that areas can have - game logic uses these roles, not area names
 # Scenarios assign roles to their areas
 AREA_ROLES = {
-    "military_housing": "Where soldiers live and sleep",
-    "farm": "Where wheat is grown",
-    "market": "Where trading happens",
-    "residential": "General village living area",
+    "village": "A settlement/economic hub",
+    "market": "Where trading happens, in a village",
+    "military_housing": "Where soldiers live and sleep, in a village",
+    "farm": "Where wheat is grown, part of a village",
+    "encampment": "No purpose"
 }
-
-# Standard allegiance name for the main settlement
-PRIMARY_ALLEGIANCE = "VILLAGE"

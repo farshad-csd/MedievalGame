@@ -9,7 +9,7 @@ import random
 import math
 from collections import deque
 from constants import (
-    SIZE, DIRECTIONS, ITEMS,
+    DIRECTIONS, ITEMS,
     MAX_HUNGER, HUNGER_DECAY, HUNGER_CRITICAL, HUNGER_CHANCE_THRESHOLD,
     STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL, 
     STARVATION_MORALITY_CHANCE, STARVATION_FREEZE_HEALTH,
@@ -20,7 +20,7 @@ from constants import (
     STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT, TAX_GRACE_PERIOD,
     ALLEGIANCE_WHEAT_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
     CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
-    SLEEP_START_FRACTION, PRIMARY_ALLEGIANCE,
+    SLEEP_START_FRACTION,
     MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
@@ -32,6 +32,7 @@ from constants import (
     WHEAT_TO_BREAD_RATIO,
     BREAD_PER_BITE, BREAD_BUFFER_TARGET
 )
+from scenario_world import SIZE
 from scenario_characters import CHARACTER_TEMPLATES
 
 
@@ -421,23 +422,24 @@ class GameLogic:
         barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
         return barracks_barrel is not None and self.state.get_barrel_wheat(barracks_barrel) > 0
     
-    def get_village_allegiance_count(self):
-        """Count all characters with VILLAGE allegiance"""
-        return sum(1 for c in self.state.characters if c.get('allegiance') == PRIMARY_ALLEGIANCE)
+    def get_allegiance_count(self, allegiance):
+        """Count all characters with a specific allegiance"""
+        return sum(1 for c in self.state.characters if c.get('allegiance') == allegiance)
     
-    def get_steward_wheat_target(self):
+    def get_steward_wheat_target(self, steward):
         """Calculate how much wheat steward wants to stockpile.
         Target: enough to feed all villagers for 2 days.
         (~3 wheat per person per day to maintain hunger)
         """
-        village_mouths = self.get_village_allegiance_count()
+        allegiance = steward.get('allegiance')
+        village_mouths = self.get_allegiance_count(allegiance) if allegiance else 0
         wheat_per_person_per_day = 3
         days_to_stockpile = 2
         return village_mouths * wheat_per_person_per_day * days_to_stockpile
     
     def steward_needs_to_buy_wheat(self, steward):
         """Check if barracks barrel wheat supply is below target"""
-        target = self.get_steward_wheat_target()
+        target = self.get_steward_wheat_target(steward)
         barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
         if not barracks_barrel:
             return True
@@ -501,9 +503,9 @@ class GameLogic:
         """Estimate how much wheat the farmer can produce before tax is due.
         Returns an integer (or a very large number if no tax constraint).
         """
-        # Only VILLAGE allegiance farmers owe tax
-        if farmer.get('allegiance') != PRIMARY_ALLEGIANCE:
-            return 999999  # Effectively unlimited
+        # Only farmers with an allegiance owe tax
+        if not farmer.get('allegiance'):
+            return 999999  # No allegiance = no tax = effectively unlimited
         
         # Check if tax is due
         tax_due_tick = farmer.get('tax_due_tick')
@@ -928,10 +930,10 @@ class GameLogic:
     
     def is_eligible_for_steward(self, char):
         """Check if character is eligible to be Steward.
-        Requirements: VILLAGE allegiance + mercantile skill >= 50
+        Requirements: must have an allegiance + mercantile skill >= 50
         Traders can also be promoted to steward.
         """
-        if char.get('allegiance') != PRIMARY_ALLEGIANCE:
+        if not char.get('allegiance'):
             return False
         mercantile_skill = char.get('skills', {}).get('mercantile', 0)
         return mercantile_skill >= 50
@@ -973,9 +975,12 @@ class GameLogic:
         """Promote a character to steward position."""
         old_job = char.get('job')
         
+        military_area = self.state.get_area_by_role('military_housing')
+        allegiance = self.state.get_allegiance_of_area(military_area)
+        
         char['job'] = 'Steward'
-        char['home'] = self.state.get_area_by_role('military_housing')
-        char['allegiance'] = PRIMARY_ALLEGIANCE
+        char['home'] = military_area
+        char['allegiance'] = allegiance
         
         # Assign bed in barracks
         self.state.unassign_bed_owner(char['name'])
@@ -1028,8 +1033,14 @@ class GameLogic:
         return True
     
     def is_farmer_job_available(self):
-        """Check if farmer position is available (unowned village farm)"""
-        return self.get_unowned_village_farm() is not None
+        """Check if farmer position is available (unowned farm for an existing steward's allegiance)"""
+        steward = self.get_steward()
+        if not steward:
+            return False
+        steward_allegiance = steward.get('allegiance')
+        if not steward_allegiance:
+            return False
+        return self.get_unowned_allegiance_farm(steward_allegiance) is not None
     
     def get_best_available_job(self, char):
         """Get the best available job for this character based on tier priority.
@@ -1114,33 +1125,36 @@ class GameLogic:
     def enlist_as_soldier(self, char):
         """Enlist a character as a soldier"""
         old_allegiance = char.get('allegiance')
+        military_area = self.state.get_area_by_role('military_housing')
+        allegiance = self.state.get_allegiance_of_area(military_area)
+        
         char['job'] = 'Soldier'
-        char['home'] = self.state.get_area_by_role('military_housing')
-        char['allegiance'] = PRIMARY_ALLEGIANCE
+        char['home'] = military_area
+        char['allegiance'] = allegiance
         char['soldier_stopped'] = False
         char['asked_steward_for_wheat'] = False
         
         # Assign a bed in barracks
-        bed = self.state.get_unowned_bed_by_home(self.state.get_area_by_role('military_housing'))
+        bed = self.state.get_unowned_bed_by_home(military_area)
         if bed:
             self.state.assign_bed_owner(bed, char['name'])
         
         name = self.get_display_name(char)
         if old_allegiance is None:
-            self.state.log_action(f"{name} ENLISTED as Soldier! (gained VILLAGE allegiance)")
-        elif old_allegiance != PRIMARY_ALLEGIANCE:
-            self.state.log_action(f"{name} ENLISTED as Soldier! (allegiance changed from {old_allegiance} to VILLAGE)")
+            self.state.log_action(f"{name} ENLISTED as Soldier! (gained {allegiance} allegiance)")
+        elif old_allegiance != allegiance:
+            self.state.log_action(f"{name} ENLISTED as Soldier! (allegiance changed from {old_allegiance} to {allegiance})")
         else:
             self.state.log_action(f"{name} RE-ENLISTED as Soldier!")
     
-    def get_unowned_village_farm(self):
-        """Find a village-allegiance farm area that has no farmer assigned.
+    def get_unowned_allegiance_farm(self, allegiance):
+        """Find a farm area belonging to an allegiance that has no farmer assigned.
         Returns the area name or None if all farms are owned.
         """
         from scenario_world import AREAS
         
         for area in AREAS:
-            if area.get('has_farm_cells') and area.get('allegiance') == PRIMARY_ALLEGIANCE:
+            if area.get('has_farm_cells') and area.get('allegiance') == allegiance:
                 farm_name = area['name']
                 # Check if any farmer owns this farm (has it as home)
                 farm_has_farmer = False
@@ -1154,15 +1168,24 @@ class GameLogic:
     
     def enlist_as_farmer(self, char):
         """Enlist a character as a farmer"""
-        # Find the available farm
-        farm_name = self.get_unowned_village_farm()
+        # Get the steward to know which allegiance's farm to use
+        steward = self.get_steward()
+        if not steward:
+            return  # Need a steward to enlist farmers
+        
+        steward_allegiance = steward.get('allegiance')
+        
+        # Find the available farm for this allegiance
+        farm_name = self.get_unowned_allegiance_farm(steward_allegiance)
         if not farm_name:
             return  # No farm available
         
+        allegiance = self.state.get_allegiance_of_area(farm_name)
         old_allegiance = char.get('allegiance')
+        
         char['job'] = 'Farmer'
         char['home'] = farm_name
-        char['allegiance'] = PRIMARY_ALLEGIANCE
+        char['allegiance'] = allegiance
         char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # First tax due 1 year after hire
         
         # Assign the farm barrel to this farmer
@@ -1177,9 +1200,9 @@ class GameLogic:
         
         name = self.get_display_name(char)
         if old_allegiance is None:
-            self.state.log_action(f"{name} ENLISTED as Farmer! (gained VILLAGE allegiance)")
-        elif old_allegiance != PRIMARY_ALLEGIANCE:
-            self.state.log_action(f"{name} ENLISTED as Farmer! (allegiance changed from {old_allegiance} to VILLAGE)")
+            self.state.log_action(f"{name} ENLISTED as Farmer! (gained {allegiance} allegiance)")
+        elif old_allegiance != allegiance:
+            self.state.log_action(f"{name} ENLISTED as Farmer! (allegiance changed from {old_allegiance} to {allegiance})")
         else:
             self.state.log_action(f"{name} ENLISTED as Farmer!")
 
@@ -2301,7 +2324,7 @@ class GameLogic:
         if home:
             # Check if already in home area
             current_area = self.state.get_area_at(char['x'], char['y'])
-            is_village_home = (home == PRIMARY_ALLEGIANCE)
+            is_village_home = self.state.is_village_area(home)
             
             if is_village_home:
                 in_home = self.state.is_in_village(char['x'], char['y'])
@@ -2492,8 +2515,9 @@ class GameLogic:
     
     def _get_farmer_goal(self, char):
         """Get farmer's movement goal. Returns float position."""
-        steward = self.get_steward()
-        if steward and char.get('allegiance') == PRIMARY_ALLEGIANCE:
+        char_allegiance = char.get('allegiance')
+        steward = self.state.get_steward_for_allegiance(char_allegiance) if char_allegiance else None
+        if steward:
             # Go pay tax if tax is due (current tick >= tax_due_tick)
             tax_due_tick = char.get('tax_due_tick')
             if tax_due_tick is not None and self.state.ticks >= tax_due_tick:
@@ -2517,6 +2541,8 @@ class GameLogic:
         is_work_time = day_tick < TICKS_PER_DAY // 2  # Work first half of day
         is_market_time = TICKS_PER_DAY // 2 <= day_tick < TICKS_PER_DAY * 2 // 3  # Market second quarter (50-67%)
         
+        home = char.get('home')
+        
         if is_work_time:
             # Check if inventory full - go to barrel to deposit
             if self.is_inventory_full(char):
@@ -2525,10 +2551,10 @@ class GameLogic:
                     barrel_pos = self.state.get_barrel_position(farm_barrel)
                     if barrel_pos:
                         return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-                # Fallback if no barrel - go idle
-                if self.state.is_in_village(char['x'], char['y']):
-                    return self._get_wander_goal(char, PRIMARY_ALLEGIANCE)
-                return self._nearest_in_area(char, PRIMARY_ALLEGIANCE, is_village=True)
+                # Fallback if no barrel - wander in home or village
+                if home:
+                    return self._get_wander_goal(char, home)
+                return None
             
             # Check if has a full stack of wheat to deposit
             farmer_wheat = self.get_wheat(char)
@@ -2736,7 +2762,7 @@ class GameLogic:
         - Sometimes pause mid-journey
         Returns float position or None if waiting/paused.
         """
-        is_village = (area == PRIMARY_ALLEGIANCE)
+        is_village = self.state.is_village_area(area) if area else False
         
         # Mark character as idling (for speed reduction)
         char['idle_is_idle'] = True
@@ -3111,41 +3137,41 @@ class GameLogic:
     def _do_farmer_actions(self, char):
         """Farmer actions."""
         name = self.get_display_name(char)
-        steward = self.get_steward()
+        char_allegiance = char.get('allegiance')
+        steward = self.state.get_steward_for_allegiance(char_allegiance) if char_allegiance else None
         farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
         
         # Tax payment - if tax is due (current tick >= tax_due_tick)
         tax_due_tick = char.get('tax_due_tick')
         if steward and self.is_adjacent(char, steward) and tax_due_tick is not None and self.state.ticks >= tax_due_tick:
-            if char.get('allegiance') == PRIMARY_ALLEGIANCE:
-                # Calculate total available wheat (inventory + barrel - farmer owns the barrel)
-                farmer_wheat = self.get_wheat(char)
-                barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
-                total_wheat = farmer_wheat + barrel_wheat
+            # Calculate total available wheat (inventory + barrel - farmer owns the barrel)
+            farmer_wheat = self.get_wheat(char)
+            barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
+            total_wheat = farmer_wheat + barrel_wheat
+            
+            if total_wheat >= STEWARD_TAX_AMOUNT:
+                # Pay tax - take from inventory first, then barrel
+                amount_needed = STEWARD_TAX_AMOUNT
+                from_inventory = min(farmer_wheat, amount_needed)
+                if from_inventory > 0:
+                    self.remove_wheat(char, from_inventory)
+                    amount_needed -= from_inventory
+                if amount_needed > 0 and farm_barrel:
+                    self.state.remove_barrel_wheat(farm_barrel, amount_needed)
                 
-                if total_wheat >= STEWARD_TAX_AMOUNT:
-                    # Pay tax - take from inventory first, then barrel
-                    amount_needed = STEWARD_TAX_AMOUNT
-                    from_inventory = min(farmer_wheat, amount_needed)
-                    if from_inventory > 0:
-                        self.remove_wheat(char, from_inventory)
-                        amount_needed -= from_inventory
-                    if amount_needed > 0 and farm_barrel:
-                        self.state.remove_barrel_wheat(farm_barrel, amount_needed)
-                    
-                    self.add_wheat(steward, STEWARD_TAX_AMOUNT)
-                    char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # Next tax due in 1 year
-                    steward['tax_collection_target'] = None
-                    self.state.log_action(f"{name} paid {STEWARD_TAX_AMOUNT} wheat tax")
-                else:
-                    self.state.log_action(f"{name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
-                    char['job'] = None
-                    char['home'] = None
-                    char['tax_due_tick'] = None
-                    steward['tax_collection_target'] = None
-                    # Remove bed ownership
-                    self.state.unassign_bed_owner(char['name'])
-                return
+                self.add_wheat(steward, STEWARD_TAX_AMOUNT)
+                char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # Next tax due in 1 year
+                steward['tax_collection_target'] = None
+                self.state.log_action(f"{name} paid {STEWARD_TAX_AMOUNT} wheat tax")
+            else:
+                self.state.log_action(f"{name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
+                char['job'] = None
+                char['home'] = None
+                char['tax_due_tick'] = None
+                steward['tax_collection_target'] = None
+                # Remove bed ownership
+                self.state.unassign_bed_owner(char['name'])
+            return
         
         # Deposit wheat into farm barrel when adjacent to it (only full stacks)
         if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
@@ -3421,8 +3447,9 @@ class GameLogic:
         # Tax grace period check - steward goes to collect if farmer is late
         steward = self.get_steward()
         if steward:
+            steward_allegiance = steward.get('allegiance')
             for char in self.state.characters:
-                if char.get('job') == 'Farmer' and char.get('allegiance') == PRIMARY_ALLEGIANCE:
+                if char.get('job') == 'Farmer' and char.get('allegiance') == steward_allegiance:
                     tax_due_tick = char.get('tax_due_tick')
                     if tax_due_tick is not None and self.state.ticks >= tax_due_tick + TAX_GRACE_PERIOD:
                         if steward.get('tax_collection_target') != char:

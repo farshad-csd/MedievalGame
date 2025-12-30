@@ -24,7 +24,7 @@ import math
 import pygame
 import pygame.freetype
 from constants import (
-    SIZE, CELL_SIZE, UPDATE_INTERVAL,
+    CELL_SIZE, UPDATE_INTERVAL,
     FARM_CELL_COLORS, JOB_TIERS,
     BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
@@ -32,7 +32,7 @@ from constants import (
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
     ATTACK_ANIMATION_DURATION
 )
-from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME
+from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE
 from game_state import GameState
 from game_logic import GameLogic
 from debug_window import DebugWindow

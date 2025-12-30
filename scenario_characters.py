@@ -14,7 +14,7 @@ CHARACTER_TEMPLATES = {
         "confidence": 3,
         "cunning": 9,
         "morality": 7,
-        "starting_allegiance": "VILLAGE",
+        "starting_allegiance": "Dunmere",
         "starting_job": None,
         "starting_money": 200,
         "starting_wheat": 0,

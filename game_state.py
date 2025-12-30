@@ -7,12 +7,12 @@ It is purely a data container - no game logic, no rendering.
 import random
 import math
 from constants import (
-    SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL, ITEMS,
+    MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL, ITEMS,
     INVENTORY_SLOTS, BARREL_SLOTS,
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
-from scenario_world import AREAS, BARRELS, BEDS, STOVES
+from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE
 from scenario_characters import CHARACTER_TEMPLATES
 
 
@@ -72,7 +72,7 @@ class GameState:
             if area.get("has_farm_cells"):
                 bounds = area.get("farm_cell_bounds", area["bounds"])
                 y_start, x_start, y_end, x_end = bounds
-                allegiance = area.get("allegiance")  # Farm's allegiance (e.g., "VILLAGE" or None)
+                allegiance = area.get("allegiance")  # Farm's allegiance (e.g., "Dunmere" or None)
                 for y in range(y_start, y_end):
                     for x in range(x_start, x_end):
                         if 0 <= y < SIZE and 0 <= x < SIZE:
@@ -364,6 +364,54 @@ class GameState:
                 return area_def.get("role")
         return None
     
+    def get_villages(self):
+        """Get all areas that are villages (have role='village').
+        Villages define allegiances - the village name IS the allegiance.
+        """
+        return [area_def["name"] for area_def in AREAS if area_def.get("role") == "village"]
+    
+    def get_first_village(self):
+        """Get the first/primary village. For single-village scenarios."""
+        villages = self.get_villages()
+        return villages[0] if villages else None
+    
+    def is_village_area(self, area_name):
+        """Check if an area is a village (has role='village')."""
+        return self.get_area_role(area_name) == "village"
+    
+    def get_allegiance_of_area(self, area_name):
+        """Get the allegiance that an area belongs to.
+        - If area is a village (role='village'), the allegiance is the village name itself
+        - If area has an 'allegiance' field, return that
+        - Otherwise return None
+        """
+        for area_def in AREAS:
+            if area_def["name"] == area_name:
+                if area_def.get("role") == "village":
+                    return area_name  # Village's allegiance is itself
+                return area_def.get("allegiance")
+        return None
+    
+    def get_areas_for_allegiance(self, allegiance):
+        """Get all areas that belong to an allegiance.
+        This includes the village itself and all areas with allegiance=<village>.
+        """
+        areas = []
+        for area_def in AREAS:
+            area_name = area_def["name"]
+            if area_def.get("role") == "village" and area_name == allegiance:
+                areas.append(area_name)
+            elif area_def.get("allegiance") == allegiance:
+                areas.append(area_name)
+        return areas
+    
+    def get_steward_for_allegiance(self, allegiance):
+        """Find the steward character for a given allegiance."""
+        for char in self.characters:
+            if char.get('job') == 'Steward' and char.get('allegiance') == allegiance:
+                return char
+        return None
+    
     def is_position_valid(self, x, y):
         """Check if position is within bounds (works with float positions)"""
         return 0 <= x < SIZE and 0 <= y < SIZE
@@ -439,7 +487,8 @@ class GameState:
         return closest
     
     def is_in_village(self, x, y):
-        """Check if position is in the village area (including sub-areas).
+        """Check if position is in any village or area belonging to a village.
+        Returns True if the area has an allegiance (is part of a settlement).
         Works with float positions - uses the cell containing the point.
         """
         cell_x = int(x)
@@ -447,11 +496,34 @@ class GameState:
         if not (0 <= cell_x < SIZE and 0 <= cell_y < SIZE):
             return False
         area = self.area_map[cell_y][cell_x]
-        # Check against AREAS config for is_village_part
-        for area_def in AREAS:
-            if area_def["name"] == area and area_def.get("is_village_part"):
-                return True
-        return False
+        if not area:
+            return False
+        # Check if this area has an allegiance (is part of a settlement)
+        allegiance = self.get_allegiance_of_area(area)
+        return allegiance is not None
+    
+    def is_in_allegiance(self, x, y, allegiance):
+        """Check if position is in an area belonging to a specific allegiance.
+        Works with float positions.
+        """
+        cell_x = int(x)
+        cell_y = int(y)
+        if not (0 <= cell_x < SIZE and 0 <= cell_y < SIZE):
+            return False
+        area = self.area_map[cell_y][cell_x]
+        if not area:
+            return False
+        area_allegiance = self.get_allegiance_of_area(area)
+        return area_allegiance == allegiance
+    
+    def get_allegiance_at(self, x, y):
+        """Get the allegiance at a position, if any.
+        Works with float positions.
+        """
+        area = self.get_area_at(x, y)
+        if area:
+            return self.get_allegiance_of_area(area)
+        return None
     
     def get_area_cells(self, area_name):
         """Get all cells belonging to an area"""
@@ -613,13 +685,10 @@ class GameState:
         return self.farm_cells.get((cell_x, cell_y))
     
     def get_area_allegiance(self, x, y):
-        """Get the allegiance of the area at a position. Works with float positions."""
-        area_name = self.get_area_at(x, y)
-        if area_name:
-            for area_def in AREAS:
-                if area_def["name"] == area_name:
-                    return area_def.get("allegiance")
-        return None
+        """Get the allegiance of the area at a position. Works with float positions.
+        Deprecated - use get_allegiance_at instead.
+        """
+        return self.get_allegiance_at(x, y)
     
     def get_farm_cell_allegiance(self, x, y):
         """Get the allegiance of a farm cell. Works with float positions."""
