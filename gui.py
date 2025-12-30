@@ -203,6 +203,8 @@ class BoardGUI:
         elif key == pygame.K_MINUS:
             # Zoom out
             self.zoom = max(MIN_ZOOM, self.zoom - ZOOM_SPEED)
+        elif key == pygame.K_b:
+            self._handle_bake()
     
     def _handle_mouse_click(self, event):
         """Handle mouse clicks"""
@@ -264,6 +266,10 @@ class BoardGUI:
     def _handle_attack(self):
         """Handle player attack input"""
         self.logic.player_attack()
+    
+    def _handle_bake(self):
+        """Handle player bake input"""
+        self.logic.player_bake()
     
     # =========================================================================
     # GAME LOOP

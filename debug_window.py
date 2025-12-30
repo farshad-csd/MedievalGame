@@ -24,8 +24,8 @@ class DebugWindow:
         self.root.geometry("900x750")
         self.root.configure(bg='#1a1a2e')
         
-        # Track last log length to detect new entries
-        self._last_log_length = 0
+        # Track total log entries seen (syncs with state.log_total_count)
+        self._last_log_total = 0
         self._auto_scroll_log = True
         
         # Speed control
@@ -383,26 +383,44 @@ class DebugWindow:
         self.debug_text.yview_moveto(scroll_pos[0])
     
     def _update_action_log(self):
-        """Update the action log display"""
+        """Update the action log display.
+        
+        Uses log_total_count to track how many entries have been added total,
+        which correctly handles the case where old entries are trimmed from
+        the log when it exceeds the max size.
+        """
+        current_total = getattr(self.state, 'log_total_count', len(self.state.action_log))
         current_len = len(self.state.action_log)
         
-        if current_len != self._last_log_length:
-            # New entries - update the log
+        if current_total != self._last_log_total:
             self.log_text.configure(state=tk.NORMAL)
             
-            if current_len > self._last_log_length:
-                # Append new entries
-                new_entries = self.state.action_log[self._last_log_length:]
+            if current_total == 0:
+                # Log was reset - clear display
+                self.log_text.delete('1.0', tk.END)
+            elif current_total > self._last_log_total:
+                # New entries added
+                new_count = current_total - self._last_log_total
+                
+                # Get the new entries from the end of the log
+                # (they're always at the end, even if old ones were trimmed)
+                new_entries = self.state.action_log[-new_count:] if new_count <= current_len else self.state.action_log
+                
                 for entry in new_entries:
                     self.log_text.insert(tk.END, entry + '\n')
+                
+                # Trim the display if it gets too long (keep last 1000 lines)
+                line_count = int(self.log_text.index('end-1c').split('.')[0])
+                if line_count > 1000:
+                    self.log_text.delete('1.0', f'{line_count - 1000}.0')
             else:
-                # Log was cleared or reset - rebuild
+                # Total went down - full reset occurred, rebuild from current log
                 self.log_text.delete('1.0', tk.END)
                 for entry in self.state.action_log:
                     self.log_text.insert(tk.END, entry + '\n')
             
             self.log_text.configure(state=tk.DISABLED)
-            self._last_log_length = current_len
+            self._last_log_total = current_total
             
             # Auto-scroll to bottom if enabled
             if self.auto_scroll_var.get():

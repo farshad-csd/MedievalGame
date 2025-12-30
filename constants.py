@@ -108,6 +108,13 @@ WHEAT_STACK_SIZE = ITEMS[WHEAT_ITEM]["stack_size"]
 WHEAT_PRICE_PER_UNIT = ITEMS[WHEAT_ITEM]["price"]
 
 # =============================================================================
+# BREAD SETTINGS
+# =============================================================================
+BREAD_STACK_SIZE = ITEMS["bread"]["stack_size"]
+BREAD_PRICE_PER_UNIT = ITEMS["bread"]["price"]
+WHEAT_TO_BREAD_RATIO = 1  # 1 wheat -> 1 bread
+
+# =============================================================================
 # BARREL SETTINGS
 # =============================================================================
 BARREL_SLOTS = 30

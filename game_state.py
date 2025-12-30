@@ -8,7 +8,7 @@ import random
 import math
 from constants import (
     SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL,
-    INVENTORY_SLOTS, WHEAT_STACK_SIZE, BARREL_SLOTS, BARREL_WHEAT_STACK_SIZE,
+    INVENTORY_SLOTS, WHEAT_STACK_SIZE, BREAD_STACK_SIZE, BARREL_SLOTS, BARREL_WHEAT_STACK_SIZE,
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
@@ -46,6 +46,7 @@ class GameState:
         
         # Action log
         self.action_log = []
+        self.log_total_count = 0  # Total entries ever added (for UI sync)
         
         # Initialize world
         self._init_areas()
@@ -649,12 +650,16 @@ class GameState:
         from constants import TICKS_PER_DAY, TICKS_PER_YEAR
         year = (self.ticks // TICKS_PER_YEAR) + 1
         day = ((self.ticks % TICKS_PER_YEAR) // TICKS_PER_DAY) + 1
-        log_entry = f"[Y{year}D{day}] {message}"
+        day_tick = self.ticks % TICKS_PER_DAY
+        log_entry = f"[Y{year}D{day}T{day_tick}] {message}"
         self.action_log.append(log_entry)
         
-        # Keep only last 100 entries
-        if len(self.action_log) > 100:
-            self.action_log = self.action_log[-100:]
+        # Track total entries ever added (for debug window sync)
+        self.log_total_count = getattr(self, 'log_total_count', 0) + 1
+        
+        # Keep only last 1000 entries (increased from 100)
+        if len(self.action_log) > 1000:
+            self.action_log = self.action_log[-1000:]
     
     def reset(self):
         """Reset game to initial state"""
@@ -666,6 +671,7 @@ class GameState:
         self.farm_cells = {}
         self.barrels = {}
         self.action_log = []
+        self.log_total_count = 0  # Reset log counter
         self.area_map = [[None for _ in range(SIZE)] for _ in range(SIZE)]
         
         self._init_areas()
@@ -1059,3 +1065,97 @@ class GameState:
             if self.is_adjacent_to_stove(char, stove):
                 return stove
         return None
+    
+    # =========================================================================
+    # CAMP/CAMPFIRE METHODS
+    # =========================================================================
+    
+    def is_adjacent_to_camp(self, char, camp_position):
+        """Check if character is adjacent to a camp position."""
+        if not camp_position:
+            return False
+        cx, cy = camp_position
+        camp_center_x = cx + 0.5
+        camp_center_y = cy + 0.5
+        dist = math.sqrt((char['x'] - camp_center_x) ** 2 + (char['y'] - camp_center_y) ** 2)
+        return dist <= ADJACENCY_DISTANCE
+    
+    def get_adjacent_camp(self, char):
+        """Get any camp adjacent to the character (from any character), or None.
+        Returns (camp_position, owner_char) tuple or (None, None).
+        """
+        for other_char in self.characters:
+            camp_pos = other_char.get('camp_position')
+            if camp_pos and self.is_adjacent_to_camp(char, camp_pos):
+                return camp_pos, other_char
+        return None, None
+    
+    # =========================================================================
+    # BREAD INVENTORY METHODS
+    # =========================================================================
+    
+    def get_bread(self, char):
+        """Get total bread from character's inventory."""
+        total = 0
+        for slot in char['inventory']:
+            if slot and slot['type'] == 'bread':
+                total += slot['amount']
+        return total
+    
+    def can_add_bread(self, char, amount):
+        """Check if character can add this much bread to inventory."""
+        space = 0
+        for slot in char['inventory']:
+            if slot is None:
+                space += BREAD_STACK_SIZE
+            elif slot['type'] == 'bread' and slot['amount'] < BREAD_STACK_SIZE:
+                space += BREAD_STACK_SIZE - slot['amount']
+        return space >= amount
+    
+    def add_bread(self, char, amount):
+        """Add bread to character's inventory. Returns amount actually added."""
+        remaining = amount
+        
+        # First, fill existing bread stacks
+        for slot in char['inventory']:
+            if slot and slot['type'] == 'bread' and slot['amount'] < BREAD_STACK_SIZE:
+                can_add = BREAD_STACK_SIZE - slot['amount']
+                to_add = min(remaining, can_add)
+                slot['amount'] += to_add
+                remaining -= to_add
+                if remaining <= 0:
+                    return amount
+        
+        # Then, use empty slots
+        for i, slot in enumerate(char['inventory']):
+            if slot is None:
+                to_add = min(remaining, BREAD_STACK_SIZE)
+                char['inventory'][i] = {'type': 'bread', 'amount': to_add}
+                remaining -= to_add
+                if remaining <= 0:
+                    return amount
+        
+        return amount - remaining  # Return amount actually added
+    
+    def remove_bread(self, char, amount):
+        """Remove bread from character's inventory. Returns amount actually removed."""
+        remaining = amount
+        
+        # Remove from bread stacks (prefer smaller stacks first to consolidate)
+        bread_slots = [(i, slot) for i, slot in enumerate(char['inventory']) 
+                      if slot and slot['type'] == 'bread']
+        bread_slots.sort(key=lambda x: x[1]['amount'])
+        
+        for i, slot in bread_slots:
+            to_remove = min(remaining, slot['amount'])
+            slot['amount'] -= to_remove
+            remaining -= to_remove
+            
+            # Remove empty slot
+            if slot['amount'] <= 0:
+                char['inventory'][i] = None
+            
+            if remaining <= 0:
+                return amount
+        
+        return amount - remaining  # Return amount actually removed

@@ -28,7 +28,8 @@ from constants import (
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
-    ATTACK_ANIMATION_DURATION
+    ATTACK_ANIMATION_DURATION,
+    WHEAT_TO_BREAD_RATIO
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -222,6 +223,171 @@ class GameLogic:
         return self.state.is_inventory_full(char)
     
     # =========================================================================
+    # BREAD INVENTORY HELPERS (convenience wrappers around state methods)
+    # =========================================================================
+    
+    def get_bread(self, char):
+        """Get total bread from character's inventory."""
+        return self.state.get_bread(char)
+    
+    def add_bread(self, char, amount):
+        """Add bread to character's inventory."""
+        return self.state.add_bread(char, amount)
+    
+    def remove_bread(self, char, amount):
+        """Remove bread from character's inventory."""
+        return self.state.remove_bread(char, amount)
+    
+    def can_add_bread(self, char, amount=1):
+        """Check if character can add bread to inventory."""
+        return self.state.can_add_bread(char, amount)
+    
+    # =========================================================================
+    # STOVE / CAMPFIRE BAKING SYSTEM
+    # =========================================================================
+    
+    def get_adjacent_cooking_spot(self, char):
+        """Get any adjacent cooking spot (stove or campfire).
+        Returns a dict with 'type' ('stove' or 'camp'), 'name', and source object.
+        Returns None if no cooking spot is adjacent.
+        """
+        # Check for stove first
+        stove = self.state.get_adjacent_stove(char)
+        if stove:
+            return {
+                'type': 'stove',
+                'name': stove.get('name', 'stove'),
+                'source': stove
+            }
+        
+        # Check for any campfire
+        camp_pos, camp_owner = self.state.get_adjacent_camp(char)
+        if camp_pos:
+            owner_name = self.get_display_name(camp_owner) if camp_owner else 'unknown'
+            return {
+                'type': 'camp',
+                'name': f"{owner_name}'s campfire",
+                'source': camp_pos
+            }
+        
+        return None
+    
+    def can_bake_bread(self, char):
+        """Check if character can bake bread right now.
+        Requirements: adjacent to a stove or campfire, has wheat, has space for bread.
+        """
+        # Must be adjacent to a cooking spot (stove or camp)
+        cooking_spot = self.get_adjacent_cooking_spot(char)
+        if not cooking_spot:
+            return False
+        
+        # Must have wheat to convert
+        if self.get_wheat(char) < WHEAT_TO_BREAD_RATIO:
+            return False
+        
+        # Must have space for bread
+        if not self.can_add_bread(char, 1):
+            return False
+        
+        return True
+    
+    def bake_bread(self, char, amount=1):
+        """Convert wheat into bread at a stove or campfire.
+        Character must be adjacent to a cooking spot.
+        Returns the amount of bread actually baked.
+        """
+        cooking_spot = self.get_adjacent_cooking_spot(char)
+        if not cooking_spot:
+            return 0
+        
+        name = self.get_display_name(char)
+        wheat_available = self.get_wheat(char)
+        max_from_wheat = wheat_available // WHEAT_TO_BREAD_RATIO
+        
+        # Calculate how much we can actually bake
+        # Limited by: requested amount, available wheat, inventory space
+        to_bake = min(amount, max_from_wheat)
+        
+        # Check inventory space iteratively (in case we can only fit some)
+        actually_baked = 0
+        for _ in range(to_bake):
+            if not self.can_add_bread(char, 1):
+                break
+            if self.get_wheat(char) < WHEAT_TO_BREAD_RATIO:
+                break
+            
+            # Convert wheat to bread
+            self.remove_wheat(char, WHEAT_TO_BREAD_RATIO)
+            self.add_bread(char, 1)
+            actually_baked += 1
+        
+        if actually_baked > 0:
+            spot_name = cooking_spot['name']
+            self.state.log_action(f"{name} baked {actually_baked} bread at {spot_name}")
+        
+        return actually_baked
+    
+    def get_nearest_cooking_spot(self, char):
+        """Find the nearest cooking spot (stove or campfire).
+        Returns (cooking_spot_dict, position) or (None, None).
+        """
+        best_spot = None
+        best_pos = None
+        best_dist = float('inf')
+        
+        # Check stoves
+        for pos, stove in self.state.stoves.items():
+            sx, sy = pos
+            stove_cx = sx + 0.5
+            stove_cy = sy + 0.5
+            dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
+            if dist < best_dist:
+                best_dist = dist
+                best_spot = {
+                    'type': 'stove',
+                    'name': stove.get('name', 'stove'),
+                    'source': stove
+                }
+                best_pos = (stove_cx, stove_cy)
+        
+        # Check campfires
+        for other_char in self.state.characters:
+            camp_pos = other_char.get('camp_position')
+            if camp_pos:
+                cx, cy = camp_pos
+                camp_center = (cx + 0.5, cy + 0.5)
+                dist = math.sqrt((char['x'] - camp_center[0]) ** 2 + (char['y'] - camp_center[1]) ** 2)
+                if dist < best_dist:
+                    best_dist = dist
+                    owner_name = self.get_display_name(other_char)
+                    best_spot = {
+                        'type': 'camp',
+                        'name': f"{owner_name}'s campfire",
+                        'source': camp_pos
+                    }
+                    best_pos = camp_center
+        
+        return best_spot, best_pos
+    
+    def get_nearest_stove(self, char):
+        """Find the nearest stove to the character. Returns (stove, position) or (None, None)."""
+        best_stove = None
+        best_pos = None
+        best_dist = float('inf')
+        
+        for pos, stove in self.state.stoves.items():
+            sx, sy = pos
+            stove_cx = sx + 0.5
+            stove_cy = sy + 0.5
+            dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
+            if dist < best_dist:
+                best_dist = dist
+                best_stove = stove
+                best_pos = (stove_cx, stove_cy)
+        
+        return best_stove, best_pos
+    
+    # =========================================================================
     # STEWARD / TAX SYSTEM
     # =========================================================================
     
@@ -275,7 +441,8 @@ class GameLogic:
             else:
                 if farmer.get('tax_late_ticks', 0) == 0:
                     farmer['tax_late_ticks'] = 1
-                    self.state.log_action(f"F not present to pay tax! Late: 1 tick")
+                    name = self.get_display_name(farmer)
+                    self.state.log_action(f"{name} not present to pay tax! Late: 1 tick")
     
     # =========================================================================
     # TRADING SYSTEM
@@ -3568,6 +3735,30 @@ class GameLogic:
         else:
             self.state.log_action(f"{name} swings sword (missed)")
             return True
+    
+    def player_bake(self):
+        """Player bakes bread at adjacent stove or campfire. Returns True if baked."""
+        player = self.state.player
+        if not player:
+            return False
+        
+        name = self.get_display_name(player)
+        
+        # Check if we can bake
+        if not self.can_bake_bread(player):
+            # Give feedback on why we can't bake
+            cooking_spot = self.get_adjacent_cooking_spot(player)
+            if not cooking_spot:
+                self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
+            elif self.get_wheat(player) < WHEAT_TO_BREAD_RATIO:
+                self.state.log_action(f"{name} needs wheat to bake bread")
+            elif not self.can_add_bread(player, 1):
+                self.state.log_action(f"{name}'s inventory is full")
+            return False
+        
+        # Bake one bread
+        amount_baked = self.bake_bread(player, 1)
+        return amount_baked > 0
     
     def _facing_to_attack_direction(self, facing):
         """Convert facing direction to attack direction."""
