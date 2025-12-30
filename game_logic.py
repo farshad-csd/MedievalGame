@@ -1751,8 +1751,11 @@ class GameLogic:
             return False
     
     def needs_wheat_buffer(self, char):
-        """Check if character's wheat inventory is below the buffer target."""
-        return self.get_wheat(char) < BREAD_BUFFER_TARGET
+        """Check if character's food supply (wheat + bread) is below the buffer target.
+        Since wheat can be converted to bread, we count both together.
+        """
+        total_food = self.get_wheat(char) + self.get_bread(char)
+        return total_food < BREAD_BUFFER_TARGET
     
     def handle_wheat_need(self, char):
         """Handle a character's hunger needs. Returns True if action was taken."""
@@ -1802,7 +1805,7 @@ class GameLogic:
             # Soldiers don't actively seek wheat - they wait
             return False
         
-        # Option 4: Non-soldiers buy wheat from nearest vendor (Farmer, Trader, Innkeeper, etc.)
+        # Option 4: Non-soldiers buy wheat from nearest vendor (Farmer, Innkeeper, etc.)
         # Characters who sell wheat themselves don't buy from others
         if self.can_afford_any_wheat(char) and not self.is_vendor_of(char, 'wheat'):
             # Try to buy from adjacent vendor first
@@ -3300,7 +3303,7 @@ class GameLogic:
         needs_buffer = self.needs_wheat_buffer(char)
         
         if is_hungry or needs_buffer:
-            # Try to buy from adjacent vendor (Farmer, Trader, Innkeeper, etc.)
+            # Try to buy from adjacent vendor (Farmer, Innkeeper, etc.)
             if self.can_afford_any_wheat(char):
                 vendor = self.find_adjacent_vendor(char, 'wheat')
                 if vendor and self.vendor_willing_to_trade(vendor, char, 'wheat'):

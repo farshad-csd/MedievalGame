@@ -208,6 +208,9 @@ class _DebugWindowInternal:
     
     def _setup_ui(self):
         """Set up the UI components"""
+        import sys
+        is_mac = sys.platform == 'darwin'
+        
         # Configure style
         style = ttk.Style()
         style.configure('Debug.TFrame', background='#1a1a2e')
@@ -215,6 +218,15 @@ class _DebugWindowInternal:
                        font=('Consolas', 10, 'bold'))
         style.configure('Debug.TCheckbutton', background='#1a1a2e', foreground='#e0e0e0')
         style.configure('Control.TButton', font=('Arial', 10))
+        
+        # Configure styled buttons that work on Mac dark mode
+        # Use ttk.Button with custom styling for cross-platform compatibility
+        style.configure('Dark.TButton', 
+                       font=('Arial', 10, 'bold'),
+                       padding=(8, 4))
+        style.map('Dark.TButton',
+                 background=[('active', '#5a5a8a'), ('!active', '#3a3a5a')],
+                 foreground=[('active', 'white'), ('!active', 'white')])
         
         # Main container
         main_frame = ttk.Frame(self.root, style='Debug.TFrame')
@@ -224,26 +236,42 @@ class _DebugWindowInternal:
         control_frame = ttk.Frame(main_frame, style='Debug.TFrame')
         control_frame.pack(fill=tk.X, pady=(0, 5))
         
+        # Helper function to create buttons
+        # Use standard tk.Button - simpler and more reliable
+        def create_button(parent, text, command, width=12):
+            btn = tk.Button(
+                parent, text=text, command=command,
+                font=('Arial', 10, 'bold'),
+                width=width,
+                relief=tk.RAISED,
+                bd=2
+            )
+            # On Mac, we can't easily control colors, but at least it will work
+            if not is_mac:
+                btn.configure(
+                    bg='#3a3a5a', fg='white',
+                    activebackground='#5a5a8a', activeforeground='white'
+                )
+            return btn
+        
+        self.create_button = create_button  # Store for later use
+        self.is_mac = is_mac
+        
         # Speed button
-        self.speed_btn = tk.Button(
-            control_frame, text="Speed: 1x", command=self._toggle_speed,
-            bg='#3a3a5a', fg='white', font=('Arial', 10), width=12
-        )
+        self.speed_btn = create_button(control_frame, "Speed: 1x", self._toggle_speed, width=12)
         self.speed_btn.pack(side=tk.LEFT, padx=2)
         
         # Pause button
-        self.pause_btn = tk.Button(
-            control_frame, text="Pause", command=self._toggle_pause,
-            bg='#3a3a5a', fg='white', font=('Arial', 10), width=10
-        )
+        self.pause_btn = create_button(control_frame, "Pause", self._toggle_pause, width=10)
         self.pause_btn.pack(side=tk.LEFT, padx=2)
         
         # Skip year button
-        self.skip_btn = tk.Button(
-            control_frame, text="Skip 1 Year", command=self._skip_one_year,
-            bg='#3a3a5a', fg='white', font=('Arial', 10), width=12
-        )
+        self.skip_btn = create_button(control_frame, "Skip 1 Year", self._skip_one_year, width=12)
         self.skip_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Copy All button
+        self.copy_all_btn = create_button(control_frame, "📋 Copy All", self._copy_all, width=12)
+        self.copy_all_btn.pack(side=tk.LEFT, padx=2)
         
         # Status bar (player info, zoom, etc)
         self.status_label = ttk.Label(control_frame, text="", style='Debug.TLabel')
@@ -333,15 +361,24 @@ class _DebugWindowInternal:
     
     def _toggle_speed(self):
         """Send speed toggle command to main process"""
-        self.command_queue.put({'type': 'toggle_speed'})
+        try:
+            self.command_queue.put_nowait({'type': 'toggle_speed'})
+        except:
+            pass  # Queue full, command lost
     
     def _toggle_pause(self):
         """Send pause toggle command to main process"""
-        self.command_queue.put({'type': 'toggle_pause'})
+        try:
+            self.command_queue.put_nowait({'type': 'toggle_pause'})
+        except:
+            pass
     
     def _skip_one_year(self):
         """Send skip year command to main process"""
-        self.command_queue.put({'type': 'skip_year'})
+        try:
+            self.command_queue.put_nowait({'type': 'skip_year'})
+        except:
+            pass
     
     def _readonly_handler(self, event):
         """Allow copy but prevent editing"""
@@ -354,6 +391,41 @@ class _DebugWindowInternal:
     def _copy_selection(self, event=None):
         """Handle copy - let default behavior work"""
         pass
+    
+    def _copy_all(self):
+        """Copy everything from debug stats and action log to clipboard"""
+        # Get all text from debug stats
+        debug_content = self.debug_text.get('1.0', tk.END).strip()
+        
+        # Get all text from action log
+        log_content = self.log_text.get('1.0', tk.END).strip()
+        
+        # Combine with headers
+        separator = "=" * 80
+        combined = f"""DEBUG WINDOW - FULL EXPORT
+{separator}
+
+=== CHARACTER STATS ===
+{debug_content}
+
+{separator}
+
+=== ACTION LOG ===
+{log_content}
+"""
+        
+        # Copy to clipboard
+        self.root.clipboard_clear()
+        self.root.clipboard_append(combined)
+        self.root.update()  # Required for clipboard to persist
+        
+        # Flash the button to indicate success
+        self._flash_copy_button()
+    
+    def _flash_copy_button(self):
+        """Flash the copy button to indicate success"""
+        self.copy_all_btn.configure(text='✓ Copied!')
+        self.root.after(800, lambda: self.copy_all_btn.configure(text='📋 Copy All'))
     
     def _poll_data(self):
         """Poll for new data from main process"""
