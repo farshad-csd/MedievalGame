@@ -9,14 +9,14 @@ import random
 import math
 from collections import deque
 from constants import (
-    SIZE, DIRECTIONS,
+    SIZE, DIRECTIONS, ITEMS,
     MAX_HUNGER, HUNGER_DECAY, HUNGER_CRITICAL, HUNGER_CHANCE_THRESHOLD,
     STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL, 
     STARVATION_MORALITY_CHANCE, STARVATION_FREEZE_HEALTH,
-    INVENTORY_SLOTS, WHEAT_STACK_SIZE,
+    INVENTORY_SLOTS,
     FARM_CELL_YIELD,
     FARM_CELL_HARVEST_INTERVAL, FARM_HARVEST_TIME, FARM_REPLANT_TIME,
-    WHEAT_PRICE_PER_UNIT, FARMER_PERSONAL_RESERVE, TRADE_COOLDOWN,
+    TRADE_COOLDOWN,
     STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT, TAX_GRACE_PERIOD,
     ALLEGIANCE_WHEAT_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
     CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
@@ -24,13 +24,13 @@ from constants import (
     MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
-    VENDOR_GOODS, GOODS_PRICES, GOODS_STACK_SIZES, VENDOR_PERSONAL_RESERVE,
+    VENDOR_GOODS,
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
     ATTACK_ANIMATION_DURATION,
     WHEAT_TO_BREAD_RATIO,
-    BREAD_PER_BITE, HUNGER_PER_BREAD, BREAD_BUFFER_TARGET
+    BREAD_PER_BITE, BREAD_BUFFER_TARGET
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -443,25 +443,6 @@ class GameLogic:
             return True
         return self.state.get_barrel_wheat(barracks_barrel) < target
     
-    def collect_steward_tax(self):
-        """Called every tax interval - resets tax cycle for farmers who paid"""
-        steward = self.get_steward()
-        if not steward:
-            return
-        
-        farmers = [c for c in self.state.characters 
-                   if c.get('job') == 'Farmer' and c.get('allegiance') == PRIMARY_ALLEGIANCE]
-        
-        for farmer in farmers:
-            if farmer.get('tax_paid_this_cycle', False):
-                farmer['tax_paid_this_cycle'] = False
-                farmer['tax_late_ticks'] = 0
-            else:
-                if farmer.get('tax_late_ticks', 0) == 0:
-                    farmer['tax_late_ticks'] = 1
-                    name = self.get_display_name(farmer)
-                    self.state.log_action(f"{name} not present to pay tax! Late: 1 tick")
-    
     # =========================================================================
     # TRADING SYSTEM
     # =========================================================================
@@ -517,30 +498,31 @@ class GameLogic:
         return False
     
     def get_farmer_expected_production(self, farmer):
-        """Estimate how much wheat the farmer can produce before tax is due."""
-        # No tax obligation in year 1 - can sell freely
-        if self.state.ticks < STEWARD_TAX_INTERVAL:
-            return float('inf')
-        
-        # If already paid tax this cycle, no constraint
-        if farmer.get('tax_paid_this_cycle', False):
-            return float('inf')
-        
+        """Estimate how much wheat the farmer can produce before tax is due.
+        Returns an integer (or a very large number if no tax constraint).
+        """
         # Only VILLAGE allegiance farmers owe tax
         if farmer.get('allegiance') != PRIMARY_ALLEGIANCE:
-            return float('inf')
+            return 999999  # Effectively unlimited
+        
+        # Check if tax is due
+        tax_due_tick = farmer.get('tax_due_tick')
+        if tax_due_tick is None:
+            return 999999  # No tax due yet
+        
+        # If tax is already overdue, no selling allowed
+        if self.state.ticks >= tax_due_tick:
+            return 0
         
         # Calculate time until tax is due
-        ticks_into_cycle = self.state.ticks % STEWARD_TAX_INTERVAL
-        ticks_until_tax = STEWARD_TAX_INTERVAL - ticks_into_cycle
+        ticks_until_tax = tax_due_tick - self.state.ticks
         
-        # Estimate wheat production capacity
+        # Estimate wheat production capacity using integer math
         # Farmer works half the day, farm cells yield 1 wheat per harvest cycle
         # Rough estimate: 1 wheat per farm cell per day when working
         num_farm_cells = len(self.state.farm_cells)
-        days_until_tax = ticks_until_tax / TICKS_PER_DAY
-        # Farmer works half day, so halve production estimate
-        expected_production = (num_farm_cells * days_until_tax) / 2
+        # Integer calculation: (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
+        expected_production = (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
         
         return expected_production
     
@@ -549,27 +531,31 @@ class GameLogic:
         
         Logic: sellable = current_wheat + expected_future_production - tax_target
         Where tax_target includes a buffer for interruptions.
+        All calculations use integer math - items are always whole numbers.
+        
+        Note: Farmers don't keep a wheat reserve for personal consumption - they convert
+        wheat to bread and maintain a bread buffer like all other characters.
         """
-        # Get current wheat (inventory + barrel)
+        # Get current wheat (inventory + barrel) - these are always integers
         farmer_wheat = self.get_wheat(farmer)
         farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
         barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
-        current_wheat = farmer_wheat + barrel_wheat
+        current_wheat = int(farmer_wheat + barrel_wheat)
         
         expected_production = self.get_farmer_expected_production(farmer)
         
-        # No tax constraint - can sell anything above personal reserve
-        if expected_production == float('inf'):
-            return max(0, current_wheat - FARMER_PERSONAL_RESERVE)
+        # No tax constraint - can sell all wheat
+        if expected_production >= 999999:
+            return current_wheat
         
-        # Tax target with buffer for interruptions (1.5x tax amount)
-        tax_target = STEWARD_TAX_AMOUNT * 1.5
+        # Tax target with buffer for interruptions (1.5x = 3/2)
+        tax_target = (STEWARD_TAX_AMOUNT * 3) // 2
         
-        # Sellable = what we have + what we'll produce - what we need
+        # Sellable = what we have + what we'll produce - what we need for taxes
         sellable = current_wheat + expected_production - tax_target
         
-        # Also keep personal reserve for eating
-        sellable = min(sellable, current_wheat - FARMER_PERSONAL_RESERVE)
+        # Can't sell more than current stock
+        sellable = min(sellable, current_wheat)
         
         return max(0, sellable)
     
@@ -614,14 +600,15 @@ class GameLogic:
         """Calculate the maximum wheat that can be traded between farmer and buyer.
         Takes into account: farmer's sellable wheat, buyer's money, buyer's inventory space,
         and how much wheat the buyer actually wants.
+        All values are integers.
         """
         sellable = self.get_farmer_sellable_wheat(farmer)
         if sellable <= 0:
             return 0
         
-        # How much can buyer afford?
-        buyer_money = self.get_money(buyer)
-        affordable = int(buyer_money / WHEAT_PRICE_PER_UNIT)
+        # How much can buyer afford? (integer division)
+        buyer_money = int(self.get_money(buyer))
+        affordable = buyer_money // ITEMS["wheat"]["price"]
         
         # How much space does buyer have?
         buyer_space = self.state.get_inventory_space(buyer)
@@ -635,13 +622,14 @@ class GameLogic:
         """Calculate how much wheat a character wants to buy.
         Characters buy wheat as a raw material (for bread-making).
         They want enough to fill hunger (converted to bread) + buffer.
+        All values are integers.
         """
-        current_wheat = self.get_wheat(char)
-        current_bread = self.get_bread(char)
+        current_wheat = int(self.get_wheat(char))
+        current_bread = int(self.get_bread(char))
         
         # Want enough wheat to fill hunger deficit (will be converted to bread)
-        hunger_deficit = MAX_HUNGER - char['hunger']
-        wheat_for_hunger = max(0, int(hunger_deficit / HUNGER_PER_BREAD) + 1)
+        hunger_deficit = int(MAX_HUNGER - char['hunger'])
+        wheat_for_hunger = max(0, hunger_deficit // ITEMS["bread"]["hunger_value"] + 1)
         
         # Account for bread we already have
         wheat_for_hunger = max(0, wheat_for_hunger - current_bread)
@@ -653,7 +641,7 @@ class GameLogic:
     
     def can_afford_any_wheat(self, char):
         """Check if character can afford at least 1 wheat."""
-        return self.get_money(char) >= WHEAT_PRICE_PER_UNIT
+        return self.get_money(char) >= ITEMS["wheat"]["price"]
     
     def execute_trade(self, farmer, buyer, amount):
         """Execute a wheat trade between farmer and buyer.
@@ -662,7 +650,7 @@ class GameLogic:
         if amount <= 0:
             return
         
-        price = int(amount * WHEAT_PRICE_PER_UNIT)
+        price = int(amount * ITEMS["wheat"]["price"])
         amount_needed = amount
         
         # First take from farmer's inventory
@@ -765,6 +753,10 @@ class GameLogic:
         """Calculate how much of a goods type the vendor can sell.
         For farmers, uses the special tax-aware calculation.
         For other vendors, uses simpler inventory-based calculation.
+        All values are integers.
+        
+        Note: Vendors don't keep personal reserves of goods - they maintain a bread
+        buffer for personal consumption like all other characters.
         """
         job = vendor.get('job')
         
@@ -772,10 +764,9 @@ class GameLogic:
         if job == 'Farmer' and goods_type == 'wheat':
             return self.get_farmer_sellable_wheat(vendor)
         
-        # For other vendors, check inventory minus personal reserve
-        current_stock = self.get_goods_amount(vendor, goods_type)
-        reserve = VENDOR_PERSONAL_RESERVE.get(goods_type, 0)
-        return max(0, current_stock - reserve)
+        # For other vendors, can sell entire stock
+        current_stock = int(self.get_goods_amount(vendor, goods_type))
+        return current_stock
     
     def get_goods_amount(self, char, goods_type):
         """Get total amount of a goods type in character's inventory.
@@ -791,7 +782,7 @@ class GameLogic:
     
     def get_goods_price(self, goods_type, amount=1):
         """Get the price for a given amount of goods"""
-        unit_price = GOODS_PRICES.get(goods_type, 10)  # Default price if not defined
+        unit_price = ITEMS.get(goods_type, {}).get("price", 10)  # Default price if not defined
         return unit_price * amount
     
     def vendor_willing_to_trade(self, vendor, buyer, goods_type, amount=None):
@@ -837,15 +828,16 @@ class GameLogic:
     def get_max_vendor_trade_amount(self, vendor, buyer, goods_type):
         """Calculate maximum amount that can be traded for a goods type.
         Takes into account: vendor's stock, buyer's money, buyer's inventory space.
+        All values are integers.
         """
         sellable = self.get_vendor_sellable_goods(vendor, goods_type)
         if sellable <= 0:
             return 0
         
-        # How much can buyer afford?
-        buyer_money = self.get_money(buyer)
-        unit_price = GOODS_PRICES.get(goods_type, 10)
-        affordable = int(buyer_money / unit_price) if unit_price > 0 else 0
+        # How much can buyer afford? (integer division)
+        buyer_money = int(self.get_money(buyer))
+        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
+        affordable = buyer_money // unit_price if unit_price > 0 else 0
         
         # How much space does buyer have? (for wheat, use existing system)
         if goods_type == 'wheat':
@@ -904,7 +896,7 @@ class GameLogic:
         name = self.get_display_name(char)
         
         # Check if we can afford anything
-        unit_price = GOODS_PRICES.get(goods_type, 10)
+        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
         if self.get_money(char) < unit_price:
             return False
         
@@ -1171,6 +1163,7 @@ class GameLogic:
         char['job'] = 'Farmer'
         char['home'] = farm_name
         char['allegiance'] = PRIMARY_ALLEGIANCE
+        char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # First tax due 1 year after hire
         
         # Assign the farm barrel to this farmer
         farm_barrel = self.state.get_barrel_by_home(farm_name)
@@ -1765,7 +1758,7 @@ class GameLogic:
         # Option 1: Eat bread from inventory
         if self.get_bread(char) >= BREAD_PER_BITE:
             self.remove_bread(char, BREAD_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
+            char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
             char['wheat_seek_ticks'] = 0
             self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return True
@@ -1802,6 +1795,7 @@ class GameLogic:
             # Register request if not already done
             if not char.get('requested_wheat'):
                 char['requested_wheat'] = True
+                self.state.log_action(f"{name} is waiting for food from the Steward")
             # Soldiers don't actively seek wheat - they wait
             return False
         
@@ -2500,13 +2494,10 @@ class GameLogic:
         """Get farmer's movement goal. Returns float position."""
         steward = self.get_steward()
         if steward and char.get('allegiance') == PRIMARY_ALLEGIANCE:
-            # No taxes due in first year
-            if self.state.ticks >= STEWARD_TAX_INTERVAL:
-                ticks_until_tax = STEWARD_TAX_INTERVAL - (self.state.ticks % STEWARD_TAX_INTERVAL)
-                if ticks_until_tax == STEWARD_TAX_INTERVAL:
-                    ticks_until_tax = 0
-                if ticks_until_tax <= 5 or char.get('tax_late_ticks', 0) > 0:
-                    return (steward['x'], steward['y'])
+            # Go pay tax if tax is due (current tick >= tax_due_tick)
+            tax_due_tick = char.get('tax_due_tick')
+            if tax_due_tick is not None and self.state.ticks >= tax_due_tick:
+                return (steward['x'], steward['y'])
         
         # Priority: If hungry and have wheat but no bread, go cook
         if self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE:
@@ -2539,9 +2530,9 @@ class GameLogic:
                     return self._get_wander_goal(char, PRIMARY_ALLEGIANCE)
                 return self._nearest_in_area(char, PRIMARY_ALLEGIANCE, is_village=True)
             
-            # Check if has a full stack of excess wheat to deposit
+            # Check if has a full stack of wheat to deposit
             farmer_wheat = self.get_wheat(char)
-            if farmer_wheat >= FARMER_PERSONAL_RESERVE + WHEAT_STACK_SIZE:
+            if farmer_wheat >= ITEMS["wheat"]["stack_size"]:
                 farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
                 if farm_barrel and self.state.can_barrel_add_wheat(farm_barrel, 1):
                     barrel_pos = self.state.get_barrel_position(farm_barrel)
@@ -2577,11 +2568,11 @@ class GameLogic:
         
         Soldiers patrol the village perimeter in clockwise order.
         When blocked, they squeeze past obstacles without losing their patrol progress.
-        When hungry, they wait in barracks for the steward to bring them food.
+        When buffer is low (wheat + bread < target), they wait in barracks for the steward.
         """
-        is_hungry = char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE
+        needs_food = self.needs_wheat_buffer(char)
         
-        if is_hungry:
+        if needs_food:
             # If have wheat, go cook it first (don't request more)
             if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
                 char['requested_wheat'] = False  # Clear request - we have wheat to cook
@@ -3083,7 +3074,7 @@ class GameLogic:
         # Eat if hungry (bread only - wheat cannot be eaten)
         if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) >= BREAD_PER_BITE:
             self.remove_bread(char, BREAD_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
+            char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
             self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return
         
@@ -3123,9 +3114,10 @@ class GameLogic:
         steward = self.get_steward()
         farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
         
-        # Tax payment - only after first year
-        if steward and self.is_adjacent(char, steward) and self.state.ticks >= STEWARD_TAX_INTERVAL:
-            if not char.get('tax_paid_this_cycle', False) and char.get('allegiance') == PRIMARY_ALLEGIANCE:
+        # Tax payment - if tax is due (current tick >= tax_due_tick)
+        tax_due_tick = char.get('tax_due_tick')
+        if steward and self.is_adjacent(char, steward) and tax_due_tick is not None and self.state.ticks >= tax_due_tick:
+            if char.get('allegiance') == PRIMARY_ALLEGIANCE:
                 # Calculate total available wheat (inventory + barrel - farmer owns the barrel)
                 farmer_wheat = self.get_wheat(char)
                 barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
@@ -3142,29 +3134,26 @@ class GameLogic:
                         self.state.remove_barrel_wheat(farm_barrel, amount_needed)
                     
                     self.add_wheat(steward, STEWARD_TAX_AMOUNT)
-                    char['tax_late_ticks'] = 0
-                    char['tax_paid_this_cycle'] = True
+                    char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # Next tax due in 1 year
                     steward['tax_collection_target'] = None
                     self.state.log_action(f"{name} paid {STEWARD_TAX_AMOUNT} wheat tax")
                 else:
                     self.state.log_action(f"{name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
                     char['job'] = None
                     char['home'] = None
-                    char['tax_late_ticks'] = 0
-                    char['tax_paid_this_cycle'] = True
+                    char['tax_due_tick'] = None
                     steward['tax_collection_target'] = None
                     # Remove bed ownership
                     self.state.unassign_bed_owner(char['name'])
                 return
         
-        # Deposit excess wheat into farm barrel when adjacent to it (only full stacks)
+        # Deposit wheat into farm barrel when adjacent to it (only full stacks)
         if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
             farmer_wheat = self.get_wheat(char)
-            excess = farmer_wheat - FARMER_PERSONAL_RESERVE
-            # Only deposit if we have at least a full stack (15) excess
-            if excess >= WHEAT_STACK_SIZE and self.state.can_barrel_add_wheat(farm_barrel, excess):
-                self.remove_wheat(char, excess)
-                self.state.add_barrel_wheat(farm_barrel, excess)
+            # Only deposit if we have at least a full stack (15)
+            if farmer_wheat >= ITEMS["wheat"]["stack_size"] and self.state.can_barrel_add_wheat(farm_barrel, farmer_wheat):
+                self.remove_wheat(char, farmer_wheat)
+                self.state.add_barrel_wheat(farm_barrel, farmer_wheat)
     
     def _do_soldier_actions(self, char):
         """Soldier actions.
@@ -3174,8 +3163,8 @@ class GameLogic:
         The steward will come to them with food.
         """
         # Soldiers just wait - steward handles feeding them
-        # Clear the wheat request flag when no longer hungry (has bread) or has wheat to cook
-        if char['hunger'] > HUNGER_CHANCE_THRESHOLD or self.get_bread(char) >= BREAD_PER_BITE or self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+        # Clear the wheat request flag when buffer is satisfied
+        if not self.needs_wheat_buffer(char):
             char['requested_wheat'] = False
     
     def _do_steward_actions(self, char):
@@ -3232,23 +3221,37 @@ class GameLogic:
                         self.state.log_action(f"Steward {name} took {SOLDIER_WHEAT_PAYMENT} wheat from barracks barrel")
                         return
         
-        # Priority 4: Tax collection - only after first year
+        # Priority 4: Tax collection - if farmer has overdue tax
         target = char.get('tax_collection_target')
-        if target and target in self.state.characters and self.is_adjacent(char, target) and self.state.ticks >= STEWARD_TAX_INTERVAL:
+        if target and target in self.state.characters and self.is_adjacent(char, target):
             target_name = self.get_display_name(target)
-            if not target.get('tax_paid_this_cycle', False):
-                if self.get_wheat(target) >= STEWARD_TAX_AMOUNT:
-                    self.remove_wheat(target, STEWARD_TAX_AMOUNT)
+            tax_due_tick = target.get('tax_due_tick')
+            if tax_due_tick is not None and self.state.ticks >= tax_due_tick:
+                # Calculate total available wheat (inventory + barrel)
+                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
+                farmer_wheat = self.get_wheat(target)
+                barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
+                total_wheat = farmer_wheat + barrel_wheat
+                
+                if total_wheat >= STEWARD_TAX_AMOUNT:
+                    # Collect tax - take from inventory first, then barrel
+                    amount_needed = STEWARD_TAX_AMOUNT
+                    from_inventory = min(farmer_wheat, amount_needed)
+                    if from_inventory > 0:
+                        self.remove_wheat(target, from_inventory)
+                        amount_needed -= from_inventory
+                    if amount_needed > 0 and farm_barrel:
+                        self.state.remove_barrel_wheat(farm_barrel, amount_needed)
+                    
                     self.add_wheat(char, STEWARD_TAX_AMOUNT)
-                    target['tax_late_ticks'] = 0
-                    target['tax_paid_this_cycle'] = True
+                    target['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL
                     char['tax_collection_target'] = None
-                    self.state.log_action(f"Steward {name} collected tax from {target_name}")
+                    self.state.log_action(f"Steward {name} collected {STEWARD_TAX_AMOUNT} wheat tax from {target_name}")
                 else:
+                    self.state.log_action(f"{target_name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
                     target['job'] = None
                     target['home'] = None
-                    target['tax_late_ticks'] = 0
-                    target['tax_paid_this_cycle'] = True
+                    target['tax_due_tick'] = None
                     char['tax_collection_target'] = None
                     # Remove bed ownership
                     self.state.unassign_bed_owner(target['name'])
@@ -3274,7 +3277,7 @@ class GameLogic:
             if farmer and self.farmer_willing_to_trade(farmer, char):
                 amount = self.get_max_trade_amount(farmer, char)
                 if amount > 0:
-                    price = int(amount * WHEAT_PRICE_PER_UNIT)
+                    price = int(amount * ITEMS["wheat"]["price"])
                     self.execute_trade(farmer, char, amount)
                     self.state.log_action(f"Steward {name} bought {amount} wheat for ${price}")
     
@@ -3347,7 +3350,7 @@ class GameLogic:
                     # They have wheat but can't eat it - need bread to recover
                     if self.get_bread(char) >= BREAD_PER_BITE:
                         self.remove_bread(char, BREAD_PER_BITE)
-                        char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
+                        char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
                         char['is_starving'] = False
                         char['is_frozen'] = False
                         self.state.log_action(f"{name} ate bread and recovered from starvation!")
@@ -3409,30 +3412,23 @@ class GameLogic:
         # Update farm cells
         self._update_farm_cells()
         
-        # Tax collection check - skip first year (taxes due at end of each year, not start)
-        if self.state.ticks > 0 and self.state.ticks % STEWARD_TAX_INTERVAL == 0:
-            self.collect_steward_tax()
-            for char in self.state.characters:
-                if char.get('job') == 'Soldier':
-                    char['paid_this_cycle'] = False
-        
         # Age increment
         if self.state.ticks > 0 and self.state.ticks % TICKS_PER_YEAR == 0:
             for char in self.state.characters:
                 char['age'] += 1
             self.state.log_action(f"A new year begins! Everyone is one year older.")
         
-        # Check for late tax payments
+        # Tax grace period check - steward goes to collect if farmer is late
         steward = self.get_steward()
-        for char in self.state.characters:
-            if char.get('job') == 'Farmer' and char.get('allegiance') == PRIMARY_ALLEGIANCE and char.get('tax_late_ticks', 0) > 0:
-                if not char.get('tax_paid_this_cycle', False):
-                    char['tax_late_ticks'] += 1
-                    if char['tax_late_ticks'] >= TAX_GRACE_PERIOD and steward:
+        if steward:
+            for char in self.state.characters:
+                if char.get('job') == 'Farmer' and char.get('allegiance') == PRIMARY_ALLEGIANCE:
+                    tax_due_tick = char.get('tax_due_tick')
+                    if tax_due_tick is not None and self.state.ticks >= tax_due_tick + TAX_GRACE_PERIOD:
                         if steward.get('tax_collection_target') != char:
                             steward_name = self.get_display_name(steward)
                             char_name = self.get_display_name(char)
-                            self.state.log_action(f"Steward {steward_name} going to collect from {char_name}! (late {char['tax_late_ticks']} ticks)")
+                            self.state.log_action(f"Steward {steward_name} going to collect tax from {char_name}!")
                             steward['tax_collection_target'] = char
         
         # Handle deaths (now health-based, not hunger-based)
@@ -3722,7 +3718,7 @@ class GameLogic:
         
         if self.get_bread(player) >= BREAD_PER_BITE:
             self.remove_bread(player, BREAD_PER_BITE)
-            player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_BREAD)
+            player['hunger'] = min(MAX_HUNGER, player['hunger'] + ITEMS["bread"]["hunger_value"])
             
             # Check if this recovered from starvation
             if player['hunger'] > STARVATION_THRESHOLD:
@@ -3762,7 +3758,7 @@ class GameLogic:
                     # If starving/frozen, auto-eat bread to try to recover (wheat can't be eaten)
                     if (player.get('is_starving', False) or player.get('is_frozen', False)) and self.get_bread(player) >= BREAD_PER_BITE:
                         self.remove_bread(player, BREAD_PER_BITE)
-                        player['hunger'] = min(MAX_HUNGER, player['hunger'] + HUNGER_PER_BREAD)
+                        player['hunger'] = min(MAX_HUNGER, player['hunger'] + ITEMS["bread"]["hunger_value"])
                         if player['hunger'] > STARVATION_THRESHOLD:
                             player['is_starving'] = False
                             player['is_frozen'] = False

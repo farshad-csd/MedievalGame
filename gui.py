@@ -25,7 +25,7 @@ import pygame
 import pygame.freetype
 from constants import (
     SIZE, CELL_SIZE, UPDATE_INTERVAL,
-    FARM_CELL_COLORS, JOB_COLORS,
+    FARM_CELL_COLORS, JOB_TIERS,
     BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
@@ -841,10 +841,10 @@ class BoardGUI:
         if char.get('is_starving', False):
             return "#FF8C00"
         
-        # Job colors take priority
+        # Job colors take priority (if defined for this job)
         job = char.get('job')
-        if job in JOB_COLORS:
-            return JOB_COLORS[job]
+        if job in JOB_TIERS and "color" in JOB_TIERS[job]:
+            return JOB_TIERS[job]["color"]
         
         # Fall back to morality-based color
         morality = char.get('morality', 5)

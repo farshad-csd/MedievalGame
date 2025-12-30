@@ -7,8 +7,8 @@ It is purely a data container - no game logic, no rendering.
 import random
 import math
 from constants import (
-    SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL,
-    INVENTORY_SLOTS, WHEAT_STACK_SIZE, BREAD_STACK_SIZE, BARREL_SLOTS, BARREL_WHEAT_STACK_SIZE,
+    SIZE, MAX_HUNGER, FARM_CELL_HARVEST_INTERVAL, ITEMS,
+    INVENTORY_SLOTS, BARREL_SLOTS,
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
@@ -313,10 +313,10 @@ class GameState:
             inventory[slot_idx] = {'type': 'money', 'amount': money}
             slot_idx += 1
         
-        # Add wheat slots (stacks of WHEAT_STACK_SIZE)
+        # Add wheat slots (stacks of ITEMS["wheat"]["stack_size"])
         remaining_wheat = wheat
         while remaining_wheat > 0 and slot_idx < INVENTORY_SLOTS:
-            stack_amount = min(remaining_wheat, WHEAT_STACK_SIZE)
+            stack_amount = min(remaining_wheat, ITEMS["wheat"]["stack_size"])
             inventory[slot_idx] = {'type': 'wheat', 'amount': stack_amount}
             remaining_wheat -= stack_amount
             slot_idx += 1
@@ -710,9 +710,9 @@ class GameState:
         space = 0
         for slot in char['inventory']:
             if slot is None:
-                space += WHEAT_STACK_SIZE
-            elif slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
-                space += WHEAT_STACK_SIZE - slot['amount']
+                space += ITEMS["wheat"]["stack_size"]
+            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
+                space += ITEMS["wheat"]["stack_size"] - slot['amount']
         return space >= amount
     
     def can_add_money(self, char):
@@ -730,8 +730,8 @@ class GameState:
         
         # First, fill existing wheat stacks
         for slot in char['inventory']:
-            if slot and slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
-                can_add = WHEAT_STACK_SIZE - slot['amount']
+            if slot and slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
+                can_add = ITEMS["wheat"]["stack_size"] - slot['amount']
                 to_add = min(remaining, can_add)
                 slot['amount'] += to_add
                 remaining -= to_add
@@ -741,7 +741,7 @@ class GameState:
         # Then, use empty slots
         for i, slot in enumerate(char['inventory']):
             if slot is None:
-                to_add = min(remaining, WHEAT_STACK_SIZE)
+                to_add = min(remaining, ITEMS["wheat"]["stack_size"])
                 char['inventory'][i] = {'type': 'wheat', 'amount': to_add}
                 remaining -= to_add
                 if remaining <= 0:
@@ -822,9 +822,9 @@ class GameState:
         space = 0
         for slot in char['inventory']:
             if slot is None:
-                space += WHEAT_STACK_SIZE
-            elif slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
-                space += WHEAT_STACK_SIZE - slot['amount']
+                space += ITEMS["wheat"]["stack_size"]
+            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
+                space += ITEMS["wheat"]["stack_size"] - slot['amount']
         return space
     
     def is_inventory_full(self, char):
@@ -832,7 +832,7 @@ class GameState:
         for slot in char['inventory']:
             if slot is None:
                 return False
-            if slot['type'] == 'wheat' and slot['amount'] < WHEAT_STACK_SIZE:
+            if slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
                 return False
         return True
     
@@ -908,9 +908,9 @@ class GameState:
         space = 0
         for slot in barrel['inventory']:
             if slot is None:
-                space += BARREL_WHEAT_STACK_SIZE
-            elif slot['type'] == 'wheat' and slot['amount'] < BARREL_WHEAT_STACK_SIZE:
-                space += BARREL_WHEAT_STACK_SIZE - slot['amount']
+                space += ITEMS["wheat"]["stack_size"]
+            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
+                space += ITEMS["wheat"]["stack_size"] - slot['amount']
         return space >= amount
     
     def add_barrel_wheat(self, barrel, amount):
@@ -919,8 +919,8 @@ class GameState:
         
         # First, fill existing wheat stacks
         for slot in barrel['inventory']:
-            if slot and slot['type'] == 'wheat' and slot['amount'] < BARREL_WHEAT_STACK_SIZE:
-                can_add = BARREL_WHEAT_STACK_SIZE - slot['amount']
+            if slot and slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
+                can_add = ITEMS["wheat"]["stack_size"] - slot['amount']
                 to_add = min(remaining, can_add)
                 slot['amount'] += to_add
                 remaining -= to_add
@@ -930,7 +930,7 @@ class GameState:
         # Then, use empty slots
         for i, slot in enumerate(barrel['inventory']):
             if slot is None:
-                to_add = min(remaining, BARREL_WHEAT_STACK_SIZE)
+                to_add = min(remaining, ITEMS["wheat"]["stack_size"])
                 barrel['inventory'][i] = {'type': 'wheat', 'amount': to_add}
                 remaining -= to_add
                 if remaining <= 0:
@@ -1128,9 +1128,9 @@ class GameState:
         space = 0
         for slot in char['inventory']:
             if slot is None:
-                space += BREAD_STACK_SIZE
-            elif slot['type'] == 'bread' and slot['amount'] < BREAD_STACK_SIZE:
-                space += BREAD_STACK_SIZE - slot['amount']
+                space += ITEMS["bread"]["stack_size"]
+            elif slot['type'] == 'bread' and slot['amount'] < ITEMS["bread"]["stack_size"]:
+                space += ITEMS["bread"]["stack_size"] - slot['amount']
         return space >= amount
     
     def add_bread(self, char, amount):
@@ -1139,8 +1139,8 @@ class GameState:
         
         # First, fill existing bread stacks
         for slot in char['inventory']:
-            if slot and slot['type'] == 'bread' and slot['amount'] < BREAD_STACK_SIZE:
-                can_add = BREAD_STACK_SIZE - slot['amount']
+            if slot and slot['type'] == 'bread' and slot['amount'] < ITEMS["bread"]["stack_size"]:
+                can_add = ITEMS["bread"]["stack_size"] - slot['amount']
                 to_add = min(remaining, can_add)
                 slot['amount'] += to_add
                 remaining -= to_add
@@ -1150,7 +1150,7 @@ class GameState:
         # Then, use empty slots
         for i, slot in enumerate(char['inventory']):
             if slot is None:
-                to_add = min(remaining, BREAD_STACK_SIZE)
+                to_add = min(remaining, ITEMS["bread"]["stack_size"])
                 char['inventory'][i] = {'type': 'bread', 'amount': to_add}
                 remaining -= to_add
                 if remaining <= 0:

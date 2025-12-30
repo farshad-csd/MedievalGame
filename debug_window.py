@@ -502,8 +502,6 @@ class _DebugWindowInternal:
                     inv_parts.append('-')
                 elif slot['type'] == 'money':
                     inv_parts.append(f"${slot['amount']}")
-                elif slot['type'] == 'wheat':
-                    inv_parts.append(f"F{slot['amount']}")
                 else:
                     inv_parts.append(f"{slot['type'][:3]}{slot['amount']}")
             inv_display = '|'.join(inv_parts)
