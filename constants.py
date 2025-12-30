@@ -110,7 +110,6 @@ TRADE_COOLDOWN = 3 * TICK_MULTIPLIER  # 3 seconds worth of ticks (quick trading)
 # Each vendor type can sell one or more goods
 VENDOR_GOODS = {
     "Farmer": ["food"],
-    "Trader": ["food", "medicine", "tools", "clothing"],
     "Medicine Vendor": ["medicine"],
     "Alcohol Vendor": ["alcohol"],
     "Explosives Vendor": ["explosives"],

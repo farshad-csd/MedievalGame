@@ -15,11 +15,11 @@ CHARACTER_TEMPLATES = {
         "cunning": 9,
         "morality": 7,
         "starting_allegiance": "VILLAGE",
-        "starting_job": "Steward",
+        "starting_job": None,
         "starting_money": 200,
         "starting_food": 0,
         "starting_age": 45,
-        "starting_skills": {},
+        "starting_skills": {"mercantile": 70},
         "is_player": False
     },
     "Wulfred Barley": {

@@ -746,9 +746,71 @@ class GameLogic:
     
     def is_eligible_for_steward(self, char):
         """Check if character is eligible to be Steward.
-        Currently no one can become steward - it's a fixed position.
+        Requirements: VILLAGE allegiance + mercantile skill >= 50
+        Traders can also be promoted to steward.
         """
-        return False  # Steward position not open to enlistment
+        if char.get('allegiance') != PRIMARY_ALLEGIANCE:
+            return False
+        mercantile_skill = char.get('skills', {}).get('mercantile', 0)
+        return mercantile_skill >= 50
+    
+    def is_steward_job_available(self):
+        """Check if steward position is available (vacant)."""
+        return self.get_steward() is None
+    
+    def is_best_steward_candidate(self, char):
+        """Check if this character has the highest mercantile among eligible candidates."""
+        if not self.is_eligible_for_steward(char):
+            return False
+        
+        char_mercantile = char.get('skills', {}).get('mercantile', 0)
+        
+        for other in self.state.characters:
+            if other == char:
+                continue
+            if not self.is_eligible_for_steward(other):
+                continue
+            other_mercantile = other.get('skills', {}).get('mercantile', 0)
+            if other_mercantile > char_mercantile:
+                return False
+        
+        return True
+    
+    def can_become_steward(self, char):
+        """Check if character can become steward right now (in barracks + best candidate).
+        Works for both unemployed characters and traders seeking promotion.
+        """
+        if not self.is_steward_job_available():
+            return False
+        if not self.is_best_steward_candidate(char):
+            return False
+        military_area = self.state.get_area_by_role('military_housing')
+        return self.state.get_area_at(char['x'], char['y']) == military_area
+    
+    def become_steward(self, char):
+        """Promote a character to steward position."""
+        old_job = char.get('job')
+        
+        char['job'] = 'Steward'
+        char['home'] = self.state.get_area_by_role('military_housing')
+        char['allegiance'] = PRIMARY_ALLEGIANCE
+        
+        # Assign bed in barracks
+        self.state.unassign_bed_owner(char['name'])
+        bed = self.state.get_unowned_bed_by_home(self.state.get_area_by_role('military_housing'))
+        if bed:
+            self.state.assign_bed_owner(bed, char['name'])
+        
+        # Assign barracks barrel
+        barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+        if barracks_barrel:
+            barracks_barrel['owner'] = char['name']
+        
+        name = self.get_display_name(char)
+        if old_job:
+            self.state.log_action(f"{name} was promoted from {old_job} to STEWARD!")
+        else:
+            self.state.log_action(f"{name} became the village STEWARD!")
     
     def is_eligible_for_trader(self, char):
         """Check if character has the mercantile skill to become a Trader"""
@@ -795,8 +857,8 @@ class GameLogic:
         if char.get('job') is not None:
             return None
         
-        # Tier 2: Steward (currently not available for enlistment)
-        if self.is_eligible_for_steward(char):
+        # Tier 2: Steward - only if they're the best candidate
+        if self.is_eligible_for_steward(char) and self.is_steward_job_available() and self.is_best_steward_candidate(char):
             return 'Steward'
         
         # Tier 3: Trader, Soldier and Farmer - pick randomly if multiple available
@@ -1995,11 +2057,21 @@ class GameLogic:
             return self._get_soldier_goal(char)
         elif job == 'Steward':
             return self._get_steward_goal(char)
+        elif job == 'Trader':
+            # Traders can be promoted to steward - go to barracks if eligible
+            if self.is_steward_job_available() and self.is_best_steward_candidate(char):
+                military_area = self.state.get_area_by_role('military_housing')
+                if self.state.get_area_at(char['x'], char['y']) != military_area:
+                    return self._nearest_in_area(char, military_area)
         
         # Priority 6: Job seeking (unified system - seeks best available job by tier)
         if job is None and self.wants_job(char):
             best_job = self.get_best_available_job(char)
-            if best_job == 'Trader':
+            if best_job == 'Steward':
+                # Go to barracks to accept steward position
+                if self.state.get_area_at(char['x'], char['y']) != self.state.get_area_by_role('military_housing'):
+                    return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
+            elif best_job == 'Trader':
                 # Traders are self-employed - can start anywhere, no goal needed
                 # They'll become a trader in the action phase
                 pass
@@ -2721,6 +2793,13 @@ class GameLogic:
             self._do_soldier_actions(char)
         elif job == 'Steward':
             self._do_steward_actions(char)
+        elif job == 'Trader':
+            # Traders can be promoted to steward
+            if self.can_become_steward(char):
+                self.become_steward(char)
+            else:
+                # Otherwise behave like unemployed
+                self._do_unemployed_actions(char)
         else:
             self._do_unemployed_actions(char)
     
@@ -2851,7 +2930,10 @@ class GameLogic:
         # Try to get a job (unified system picks best available by tier)
         if self.wants_job(char):
             best_job = self.get_best_available_job(char)
-            if best_job == 'Trader' and self.can_become_trader(char):
+            if best_job == 'Steward' and self.can_become_steward(char):
+                self.become_steward(char)
+                return
+            elif best_job == 'Trader' and self.can_become_trader(char):
                 self.become_trader(char)
                 return
             elif best_job == 'Soldier' and self.can_enlist_as_soldier(char):
