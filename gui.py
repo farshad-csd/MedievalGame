@@ -9,6 +9,16 @@ It does NOT contain:
 - Game state (that's in game_state.py)
 """
 
+# IMPORTANT: Set multiprocessing start method BEFORE any other imports
+# This is required on macOS to avoid pygame/tkinter conflicts
+import multiprocessing
+import sys
+if sys.platform == 'darwin':
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        pass  # Already set
+
 import time
 import math
 import pygame
@@ -63,14 +73,28 @@ class BoardGUI:
         # Create debug window (separate Tkinter window) - pass logic for skip year
         self.debug_window = DebugWindow(self.state, self.logic)
         
-        # Calculate window dimensions - 16:9 aspect ratio
-        self.window_height = SIZE * CELL_SIZE + 20
-        self.window_width = int(self.window_height * 16 / 9)
+        # Get screen dimensions and calculate window size
+        # Window is half screen width with 16:9 aspect ratio
+        display_info = pygame.display.Info()
+        screen_width = display_info.current_w
+        screen_height = display_info.current_h
+        
+        self.window_width = screen_width // 2
+        self.window_height = int(self.window_width * 9 / 16)
+        
+        # Ensure window fits on screen
+        if self.window_height > screen_height - 100:  # Leave room for taskbar
+            self.window_height = screen_height - 100
+            self.window_width = int(self.window_height * 16 / 9)
+        
         self.canvas_width = self.window_width - 20
         self.canvas_height = self.window_height - 20
         
-        # Create window
-        self.screen = pygame.display.set_mode((self.window_width, self.window_height))
+        # Create resizable window
+        self.screen = pygame.display.set_mode(
+            (self.window_width, self.window_height),
+            pygame.RESIZABLE
+        )
         pygame.display.set_caption(f"{VILLAGE_NAME} - Village Simulation")
         
         # Load fonts
@@ -85,9 +109,13 @@ class BoardGUI:
         # Player movement state - which keys are currently held
         self.player_moving = False
         
-        # Camera state
-        self.camera_x = SIZE / 2  # Camera center in world coordinates
-        self.camera_y = SIZE / 2
+        # Camera state - center on player if exists
+        if self.state.player:
+            self.camera_x = self.state.player['x']
+            self.camera_y = self.state.player['y']
+        else:
+            self.camera_x = SIZE / 2
+            self.camera_y = SIZE / 2
         self.zoom = DEFAULT_ZOOM
         self.camera_following_player = True  # Whether camera follows player
         self.camera_dragging = False  # True while actively dragging
@@ -143,6 +171,9 @@ class BoardGUI:
             
             elif event.type == pygame.MOUSEWHEEL:
                 self._handle_mouse_wheel(event)
+            
+            elif event.type == pygame.VIDEORESIZE:
+                self._handle_resize(event)
         
         # Handle continuous player movement (check held keys every frame)
         self._handle_continuous_movement()
@@ -200,9 +231,17 @@ class BoardGUI:
         elif key == pygame.K_EQUALS or key == pygame.K_PLUS:
             # Zoom in
             self.zoom = min(MAX_ZOOM, self.zoom + ZOOM_SPEED)
+            # Maintain centering on player if following
+            if self.camera_following_player and self.state.player:
+                self.camera_x = self.state.player['x']
+                self.camera_y = self.state.player['y']
         elif key == pygame.K_MINUS:
             # Zoom out
             self.zoom = max(MIN_ZOOM, self.zoom - ZOOM_SPEED)
+            # Maintain centering on player if following
+            if self.camera_following_player and self.state.player:
+                self.camera_x = self.state.player['x']
+                self.camera_y = self.state.player['y']
         elif key == pygame.K_b:
             self._handle_bake()
     
@@ -250,6 +289,24 @@ class BoardGUI:
             self.zoom = min(MAX_ZOOM, self.zoom + ZOOM_SPEED)
         elif event.y < 0:  # Scroll down - zoom out
             self.zoom = max(MIN_ZOOM, self.zoom - ZOOM_SPEED)
+        
+        # If following player, ensure camera stays centered on player after zoom
+        if self.camera_following_player and self.state.player:
+            self.camera_x = self.state.player['x']
+            self.camera_y = self.state.player['y']
+    
+    def _handle_resize(self, event):
+        """Handle window resize event"""
+        self.window_width = event.w
+        self.window_height = event.h
+        self.canvas_width = self.window_width - 20
+        self.canvas_height = self.window_height - 20
+        
+        # Recreate the display surface with new size
+        self.screen = pygame.display.set_mode(
+            (self.window_width, self.window_height),
+            pygame.RESIZABLE
+        )
     
     # =========================================================================
     # INPUT HANDLERS (delegate to logic)

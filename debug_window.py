@@ -1,12 +1,180 @@
-# debug_window.py - Tkinter-based debug window with scrollable, selectable text
+# debug_window.py - Tkinter-based debug window running in separate process
+# This solves the pygame/tkinter macOS conflict by complete process isolation
 import tkinter as tk
 from tkinter import ttk, scrolledtext
+import multiprocessing
 from constants import TICKS_PER_YEAR, TICKS_PER_DAY, SKILLS, SPEED_OPTIONS, UPDATE_INTERVAL
 from scenario_characters import CHARACTER_TEMPLATES
 
 
-class DebugWindow:
-    """A separate Tkinter window for debug info and action log.
+class DebugWindowProcess:
+    """
+    Wrapper that spawns the debug window in a separate process.
+    Used by the main game to communicate with the tkinter debug window.
+    """
+    
+    def __init__(self, state, logic=None):
+        self.state = state
+        self.logic = logic
+        
+        # Queues for inter-process communication
+        self.data_queue = multiprocessing.Queue()  # Main -> Debug window
+        self.command_queue = multiprocessing.Queue()  # Debug window -> Main
+        
+        # Start the debug window process
+        self.process = multiprocessing.Process(
+            target=_run_debug_window,
+            args=(self.data_queue, self.command_queue),
+            daemon=True
+        )
+        self.process.start()
+        
+        # Track speed index locally
+        self.speed_index = 0
+    
+    def set_status(self, status_text):
+        """Send status update to debug window"""
+        # This gets included in the state snapshot
+        pass
+    
+    def update(self):
+        """Send current state to debug window and process any commands"""
+        # Build state snapshot to send
+        snapshot = self._build_snapshot()
+        
+        # Send to debug window (non-blocking)
+        try:
+            self.data_queue.put_nowait(snapshot)
+        except:
+            pass  # Queue full, skip this update
+        
+        # Process commands from debug window
+        self._process_commands()
+    
+    def _build_snapshot(self):
+        """Build a serializable snapshot of game state for the debug window"""
+        # Build character data
+        characters = []
+        for char in self.state.characters:
+            char_data = {
+                'name': char['name'],
+                'x': char['x'],
+                'y': char['y'],
+                'age': char['age'],
+                'health': char['health'],
+                'hunger': char['hunger'],
+                'inventory': char['inventory'][:],  # Copy
+                'home': char.get('home'),
+                'job': char.get('job'),
+                'allegiance': char.get('allegiance'),
+                'morality': char.get('morality', 5),
+                'skills': dict(char.get('skills', {})),
+                'is_frozen': char.get('is_frozen', False),
+                'is_starving': char.get('is_starving', False),
+                'is_murderer': char.get('is_murderer', False),
+                'is_thief': char.get('is_thief', False),
+                'known_crimes': dict(char.get('known_crimes', {})),
+                'camp_position': char.get('camp_position'),
+            }
+            characters.append(char_data)
+        
+        # Build barrel data
+        barrels = {}
+        for pos, barrel in self.state.barrels.items():
+            barrels[pos] = {
+                'name': barrel['name'],
+                'home': barrel['home'],
+                'owner': barrel['owner'],
+                'inventory': barrel['inventory'][:],
+            }
+        
+        # Build bed data
+        beds = {}
+        for pos, bed in self.state.beds.items():
+            beds[pos] = {
+                'name': bed['name'],
+                'home': bed['home'],
+                'owner': bed['owner'],
+            }
+        
+        # Player info for status
+        player_status = ""
+        if self.state.player:
+            p = self.state.player
+            player_food = self.state.get_wheat(p)
+            player_money = self.state.get_money(p)
+            player_status = f"Pos:({p['x']:.1f},{p['y']:.1f}) Wheat:{player_food} ${player_money} HP:{p['health']}"
+        
+        return {
+            'ticks': self.state.ticks,
+            'game_speed': self.state.game_speed,
+            'paused': self.state.paused,
+            'characters': characters,
+            'barrels': barrels,
+            'beds': beds,
+            'action_log': list(self.state.action_log),
+            'log_total_count': self.state.log_total_count,
+            'player_status': player_status,
+        }
+    
+    def _process_commands(self):
+        """Process commands sent from debug window"""
+        while True:
+            try:
+                cmd = self.command_queue.get_nowait()
+            except:
+                break
+            
+            if cmd['type'] == 'toggle_speed':
+                self.speed_index = (self.speed_index + 1) % len(SPEED_OPTIONS)
+                self.state.game_speed = SPEED_OPTIONS[self.speed_index]
+            
+            elif cmd['type'] == 'toggle_pause':
+                self.state.paused = not self.state.paused
+            
+            elif cmd['type'] == 'skip_year':
+                if self.logic:
+                    self._skip_one_year()
+    
+    def _skip_one_year(self):
+        """Skip forward one year"""
+        self.state.log_action("=== SKIPPING 1 YEAR ===")
+        
+        tick_duration = UPDATE_INTERVAL / 1000.0
+        
+        for _ in range(TICKS_PER_YEAR):
+            self.logic.process_tick()
+            
+            remaining = tick_duration
+            while remaining > 0:
+                step = min(remaining, 0.05)
+                self.logic.update_player_position(step)
+                self.logic.update_npc_positions(step)
+                remaining -= step
+        
+        self.state.log_action("=== SKIP COMPLETE ===")
+    
+    def is_open(self):
+        """Check if the debug window process is still running"""
+        return self.process.is_alive()
+    
+    def close(self):
+        """Close the debug window"""
+        try:
+            self.data_queue.put_nowait({'shutdown': True})
+        except:
+            pass
+        self.process.terminate()
+
+
+def _run_debug_window(data_queue, command_queue):
+    """Entry point for the debug window process"""
+    window = _DebugWindowInternal(data_queue, command_queue)
+    window.run()
+
+
+class _DebugWindowInternal:
+    """The actual Tkinter debug window (runs in separate process).
     
     Supports:
     - Scrolling with mouse wheel and scrollbars
@@ -16,23 +184,28 @@ class DebugWindow:
     - Game controls (speed, pause, skip)
     """
     
-    def __init__(self, state, logic=None):
-        self.state = state
-        self.logic = logic  # GameLogic instance for skip year
+    def __init__(self, data_queue, command_queue):
+        self.data_queue = data_queue
+        self.command_queue = command_queue
+        
+        # Current state snapshot
+        self.snapshot = None
+        
+        # Track total log entries seen
+        self._last_log_total = 0
+        self._auto_scroll_log = True
+        
+        # Create window
         self.root = tk.Tk()
         self.root.title("Debug Console")
         self.root.geometry("900x750")
         self.root.configure(bg='#1a1a2e')
         
-        # Track total log entries seen (syncs with state.log_total_count)
-        self._last_log_total = 0
-        self._auto_scroll_log = True
-        
-        # Speed control
-        self.speed_index = 0
-        
         self._setup_ui()
         
+        # Schedule periodic updates
+        self.root.after(50, self._poll_data)
+    
     def _setup_ui(self):
         """Set up the UI components"""
         # Configure style
@@ -150,7 +323,7 @@ class DebugWindow:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
         
-        # Bind copy shortcut (works by default but ensure it's there)
+        # Bind copy shortcut
         self.debug_text.bind('<Control-c>', self._copy_selection)
         self.log_text.bind('<Control-c>', self._copy_selection)
         
@@ -159,98 +332,93 @@ class DebugWindow:
         self.log_text.bind('<Key>', lambda e: self._readonly_handler(e))
     
     def _toggle_speed(self):
-        """Cycle through speed options"""
-        self.speed_index = (self.speed_index + 1) % len(SPEED_OPTIONS)
-        self.state.game_speed = SPEED_OPTIONS[self.speed_index]
-        self.speed_btn.configure(text=f"Speed: {self.state.game_speed}x")
+        """Send speed toggle command to main process"""
+        self.command_queue.put({'type': 'toggle_speed'})
     
     def _toggle_pause(self):
-        """Toggle pause state"""
-        self.state.paused = not self.state.paused
-        self.pause_btn.configure(text="Resume" if self.state.paused else "Pause")
+        """Send pause toggle command to main process"""
+        self.command_queue.put({'type': 'toggle_pause'})
     
     def _skip_one_year(self):
-        """Skip forward one year"""
-        if not self.logic:
-            return
-            
-        self.state.log_action("=== SKIPPING 1 YEAR ===")
-        
-        # Time per tick in seconds
-        tick_duration = UPDATE_INTERVAL / 1000.0
-        
-        for _ in range(TICKS_PER_YEAR):
-            # Process game logic (sets velocities)
-            self.logic.process_tick()
-            
-            # Move characters for this tick
-            remaining = tick_duration
-            while remaining > 0:
-                step = min(remaining, 0.05)
-                self.logic.update_player_position(step)
-                self.logic.update_npc_positions(step)
-                remaining -= step
-        
-        self.state.log_action("=== SKIP COMPLETE ===")
-        
+        """Send skip year command to main process"""
+        self.command_queue.put({'type': 'skip_year'})
+    
     def _readonly_handler(self, event):
         """Allow copy but prevent editing"""
-        # Allow Ctrl+C, Ctrl+A, arrow keys, etc.
         if event.state & 0x4:  # Ctrl held
-            return  # Allow
+            return
         if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Home', 'End', 'Prior', 'Next'):
-            return  # Allow navigation
-        return 'break'  # Block other keys
+            return
+        return 'break'
     
     def _copy_selection(self, event=None):
         """Handle copy - let default behavior work"""
-        pass  # Default Tkinter copy works fine
+        pass
     
-    def set_status(self, status_text):
-        """Update the status label (called from GUI)"""
-        self.status_label.configure(text=status_text)
+    def _poll_data(self):
+        """Poll for new data from main process"""
+        # Get latest snapshot (skip old ones)
+        latest = None
+        while True:
+            try:
+                data = self.data_queue.get_nowait()
+                if data.get('shutdown'):
+                    self.root.quit()
+                    return
+                latest = data
+            except:
+                break
+        
+        if latest:
+            self.snapshot = latest
+            self._update_display()
+        
+        # Schedule next poll
+        self.root.after(50, self._poll_data)
     
-    def update(self):
-        """Update the window contents. Call this from the game loop."""
-        try:
-            self._update_tick_info()
-            self._update_debug_stats()
-            self._update_action_log()
-            self._update_button_states()
-            self.root.update()
-        except tk.TclError:
-            # Window was closed
-            pass
+    def _update_display(self):
+        """Update all display elements from current snapshot"""
+        if not self.snapshot:
+            return
+        
+        self._update_tick_info()
+        self._update_debug_stats()
+        self._update_action_log()
+        self._update_button_states()
+        self._update_status()
+    
+    def _update_status(self):
+        """Update status label"""
+        status = self.snapshot.get('player_status', '')
+        self.status_label.configure(text=status)
     
     def _update_button_states(self):
         """Update button text to reflect current state"""
-        self.speed_btn.configure(text=f"Speed: {self.state.game_speed}x")
-        self.pause_btn.configure(text="Resume" if self.state.paused else "Pause")
+        self.speed_btn.configure(text=f"Speed: {self.snapshot['game_speed']}x")
+        self.pause_btn.configure(text="Resume" if self.snapshot['paused'] else "Pause")
     
     def _update_tick_info(self):
         """Update the tick/time display"""
-        year = (self.state.ticks // TICKS_PER_YEAR) + 1
-        day = ((self.state.ticks % TICKS_PER_YEAR) // TICKS_PER_DAY) + 1
-        day_progress = (self.state.ticks % TICKS_PER_DAY) / TICKS_PER_DAY * 100
+        ticks = self.snapshot['ticks']
+        year = (ticks // TICKS_PER_YEAR) + 1
+        day = ((ticks % TICKS_PER_YEAR) // TICKS_PER_DAY) + 1
+        day_progress = (ticks % TICKS_PER_DAY) / TICKS_PER_DAY * 100
         
-        paused_str = " [PAUSED]" if self.state.paused else ""
-        tick_text = f"Year {year}, Day {day}/3 | {day_progress:.0f}% through day | Tick {self.state.ticks}{paused_str}"
+        paused_str = " [PAUSED]" if self.snapshot['paused'] else ""
+        tick_text = f"Year {year}, Day {day}/3 | {day_progress:.0f}% through day | Tick {ticks}{paused_str}"
         self.tick_label.configure(text=tick_text)
     
     def _update_debug_stats(self):
         """Update the character stats display"""
-        # Save scroll position
         scroll_pos = self.debug_text.yview()
         
-        # Build content
         lines = []
         header = f"{'Name':<18}{'Pos':<12}{'Age':<5}{'HP':<6}{'Hunger':<7}{'Inventory':<28}{'Home':<10}{'Job':<10}{'Alleg':<8}{'Traits':<12}{'Status':<12}"
         lines.append(header)
         lines.append("=" * 140)
         
-        for char in self.state.characters:
+        for char in self.snapshot['characters']:
             name = char['name']
-            # Get position - show as float
             pos = f"({char['x']:.1f},{char['y']:.1f})"
             home = char.get('home', '-') or '-'
             job = char.get('job', '-') or '-'
@@ -305,14 +473,23 @@ class DebugWindow:
         lines.append("BARRELS")
         lines.append("-" * 80)
         
-        for pos, barrel in self.state.barrels.items():
+        for pos, barrel in self.snapshot['barrels'].items():
             barrel_name = barrel['name']
             barrel_pos = f"({pos[0]},{pos[1]})"
             barrel_home = barrel['home']
             barrel_owner = barrel['owner'] if barrel['owner'] else "(unowned)"
-            barrel_wheat = self.state.get_barrel_wheat(barrel)
-            barrel_money = self.state.get_barrel_money(barrel)
-            used_slots = sum(1 for slot in barrel['inventory'] if slot is not None)
+            
+            # Calculate barrel contents
+            barrel_wheat = 0
+            barrel_money = 0
+            used_slots = 0
+            for slot in barrel['inventory']:
+                if slot is not None:
+                    used_slots += 1
+                    if slot['type'] == 'wheat':
+                        barrel_wheat += slot['amount']
+                    elif slot['type'] == 'money':
+                        barrel_money += slot['amount']
             total_slots = len(barrel['inventory'])
             
             line = f"{barrel_name:<20} Pos:{barrel_pos:<10} Home:{barrel_home:<10} Owner:{barrel_owner:<18} Wheat:{barrel_wheat:<5} ${barrel_money:<5} Slots:{used_slots}/{total_slots}"
@@ -324,7 +501,7 @@ class DebugWindow:
         lines.append("BEDS")
         lines.append("-" * 80)
         
-        for pos, bed in self.state.beds.items():
+        for pos, bed in self.snapshot['beds'].items():
             bed_name = bed['name']
             bed_pos = f"({pos[0]},{pos[1]})"
             bed_home = bed['home']
@@ -333,7 +510,7 @@ class DebugWindow:
             lines.append(line)
         
         # Camps section
-        camps = [(char['name'], char['camp_position']) for char in self.state.characters if char.get('camp_position')]
+        camps = [(char['name'], char['camp_position']) for char in self.snapshot['characters'] if char.get('camp_position')]
         if camps:
             lines.append("")
             lines.append("=" * 80)
@@ -348,7 +525,7 @@ class DebugWindow:
         
         # Skills section
         chars_with_skills = []
-        for char in self.state.characters:
+        for char in self.snapshot['characters']:
             skills = char.get('skills', {})
             nonzero_skills = {k: v for k, v in skills.items() if v > 0}
             if nonzero_skills:
@@ -383,59 +560,42 @@ class DebugWindow:
         self.debug_text.yview_moveto(scroll_pos[0])
     
     def _update_action_log(self):
-        """Update the action log display.
-        
-        Uses log_total_count to track how many entries have been added total,
-        which correctly handles the case where old entries are trimmed from
-        the log when it exceeds the max size.
-        """
-        current_total = getattr(self.state, 'log_total_count', len(self.state.action_log))
-        current_len = len(self.state.action_log)
+        """Update the action log display"""
+        current_total = self.snapshot.get('log_total_count', 0)
+        current_log = self.snapshot.get('action_log', [])
+        current_len = len(current_log)
         
         if current_total != self._last_log_total:
             self.log_text.configure(state=tk.NORMAL)
             
             if current_total == 0:
-                # Log was reset - clear display
                 self.log_text.delete('1.0', tk.END)
             elif current_total > self._last_log_total:
-                # New entries added
                 new_count = current_total - self._last_log_total
-                
-                # Get the new entries from the end of the log
-                # (they're always at the end, even if old ones were trimmed)
-                new_entries = self.state.action_log[-new_count:] if new_count <= current_len else self.state.action_log
+                new_entries = current_log[-new_count:] if new_count <= current_len else current_log
                 
                 for entry in new_entries:
                     self.log_text.insert(tk.END, entry + '\n')
                 
-                # Trim the display if it gets too long (keep last 1000 lines)
+                # Trim display if too long
                 line_count = int(self.log_text.index('end-1c').split('.')[0])
                 if line_count > 1000:
                     self.log_text.delete('1.0', f'{line_count - 1000}.0')
             else:
-                # Total went down - full reset occurred, rebuild from current log
                 self.log_text.delete('1.0', tk.END)
-                for entry in self.state.action_log:
+                for entry in current_log:
                     self.log_text.insert(tk.END, entry + '\n')
             
             self.log_text.configure(state=tk.DISABLED)
             self._last_log_total = current_total
             
-            # Auto-scroll to bottom if enabled
             if self.auto_scroll_var.get():
                 self.log_text.see(tk.END)
     
-    def is_open(self):
-        """Check if the window is still open"""
-        try:
-            return self.root.winfo_exists()
-        except tk.TclError:
-            return False
-    
-    def close(self):
-        """Close the window"""
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
+    def run(self):
+        """Run the tkinter main loop"""
+        self.root.mainloop()
+
+
+# Backwards compatibility: alias for existing code
+DebugWindow = DebugWindowProcess
