@@ -1066,6 +1066,27 @@ class GameState:
                 return stove
         return None
     
+    def can_use_stove(self, char, stove):
+        """Check if character can use this stove.
+        A character can use a stove if their home matches the stove's home.
+        """
+        char_home = char.get('home')
+        stove_home = stove.get('home')
+        
+        # If character has no home, they can't use any stove
+        if char_home is None:
+            return False
+        
+        return char_home == stove_home
+    
+    def get_stoves_for_char(self, char):
+        """Get all stoves this character can use (home matches)."""
+        result = []
+        for pos, stove in self.stoves.items():
+            if self.can_use_stove(char, stove):
+                result.append((pos, stove))
+        return result
+    
     # =========================================================================
     # CAMP/CAMPFIRE METHODS
     # =========================================================================

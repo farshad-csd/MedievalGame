@@ -14,7 +14,7 @@ from constants import (
     STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL, 
     STARVATION_MORALITY_CHANCE, STARVATION_FREEZE_HEALTH,
     INVENTORY_SLOTS, WHEAT_STACK_SIZE,
-    WHEAT_PER_BITE, HUNGER_PER_WHEAT, WHEAT_BUFFER_TARGET, FARM_CELL_YIELD,
+    FARM_CELL_YIELD,
     FARM_CELL_HARVEST_INTERVAL, FARM_HARVEST_TIME, FARM_REPLANT_TIME,
     WHEAT_PRICE_PER_UNIT, FARMER_PERSONAL_RESERVE, TRADE_COOLDOWN,
     STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT, TAX_GRACE_PERIOD,
@@ -30,7 +30,7 @@ from constants import (
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
     ATTACK_ANIMATION_DURATION,
     WHEAT_TO_BREAD_RATIO,
-    BREAD_PER_BITE, HUNGER_PER_BREAD
+    BREAD_PER_BITE, HUNGER_PER_BREAD, BREAD_BUFFER_TARGET
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -248,20 +248,20 @@ class GameLogic:
     # =========================================================================
     
     def get_adjacent_cooking_spot(self, char):
-        """Get any adjacent cooking spot (stove or campfire).
+        """Get any adjacent cooking spot (stove the char can use, or any campfire).
         Returns a dict with 'type' ('stove' or 'camp'), 'name', and source object.
         Returns None if no cooking spot is adjacent.
         """
-        # Check for stove first
+        # Check for stove first - must be one the character can use
         stove = self.state.get_adjacent_stove(char)
-        if stove:
+        if stove and self.state.can_use_stove(char, stove):
             return {
                 'type': 'stove',
                 'name': stove.get('name', 'stove'),
                 'source': stove
             }
         
-        # Check for any campfire
+        # Check for any campfire (anyone can use any campfire)
         camp_pos, camp_owner = self.state.get_adjacent_camp(char)
         if camp_pos:
             owner_name = self.get_display_name(camp_owner) if camp_owner else 'unknown'
@@ -275,7 +275,7 @@ class GameLogic:
     
     def can_bake_bread(self, char):
         """Check if character can bake bread right now.
-        Requirements: adjacent to a stove or campfire, has wheat, has space for bread.
+        Requirements: adjacent to a stove (that they can use) or campfire, has wheat, has space for bread.
         """
         # Must be adjacent to a cooking spot (stove or camp)
         cooking_spot = self.get_adjacent_cooking_spot(char)
@@ -294,7 +294,7 @@ class GameLogic:
     
     def bake_bread(self, char, amount=1):
         """Convert wheat into bread at a stove or campfire.
-        Character must be adjacent to a cooking spot.
+        Character must be adjacent to a cooking spot they can use.
         Returns the amount of bread actually baked.
         """
         cooking_spot = self.get_adjacent_cooking_spot(char)
@@ -329,15 +329,17 @@ class GameLogic:
         return actually_baked
     
     def get_nearest_cooking_spot(self, char):
-        """Find the nearest cooking spot (stove or campfire).
+        """Find the nearest cooking spot the character can use (their stoves or any campfire).
         Returns (cooking_spot_dict, position) or (None, None).
         """
         best_spot = None
         best_pos = None
         best_dist = float('inf')
         
-        # Check stoves
+        # Check stoves the character can use (home matches)
         for pos, stove in self.state.stoves.items():
+            if not self.state.can_use_stove(char, stove):
+                continue
             sx, sy = pos
             stove_cx = sx + 0.5
             stove_cy = sy + 0.5
@@ -351,7 +353,7 @@ class GameLogic:
                 }
                 best_pos = (stove_cx, stove_cy)
         
-        # Check campfires
+        # Check campfires (anyone can use any campfire)
         for other_char in self.state.characters:
             camp_pos = other_char.get('camp_position')
             if camp_pos:
@@ -371,12 +373,14 @@ class GameLogic:
         return best_spot, best_pos
     
     def get_nearest_stove(self, char):
-        """Find the nearest stove to the character. Returns (stove, position) or (None, None)."""
+        """Find the nearest stove the character can use. Returns (stove, position) or (None, None)."""
         best_stove = None
         best_pos = None
         best_dist = float('inf')
         
         for pos, stove in self.state.stoves.items():
+            if not self.state.can_use_stove(char, stove):
+                continue
             sx, sy = pos
             stove_cx = sx + 0.5
             stove_cy = sy + 0.5
@@ -387,6 +391,19 @@ class GameLogic:
                 best_pos = (stove_cx, stove_cy)
         
         return best_stove, best_pos
+    
+    def has_access_to_cooking(self, char):
+        """Check if character has access to any cooking spot (stove they can use or any camp)."""
+        # Check for stoves they can use
+        if self.state.get_stoves_for_char(char):
+            return True
+        
+        # Check for any campfire
+        for other_char in self.state.characters:
+            if other_char.get('camp_position'):
+                return True
+        
+        return False
     
     # =========================================================================
     # STEWARD / TAX SYSTEM
@@ -616,16 +633,21 @@ class GameLogic:
     
     def get_desired_wheat_amount(self, char):
         """Calculate how much wheat a character wants to buy.
-        Based on hunger level and wheat buffer target.
+        Characters buy wheat as a raw material (for bread-making).
+        They want enough to fill hunger (converted to bread) + buffer.
         """
         current_wheat = self.get_wheat(char)
+        current_bread = self.get_bread(char)
         
-        # Want enough wheat to fill hunger + buffer
+        # Want enough wheat to fill hunger deficit (will be converted to bread)
         hunger_deficit = MAX_HUNGER - char['hunger']
-        wheat_for_hunger = max(0, int(hunger_deficit / HUNGER_PER_WHEAT) + 1)
+        wheat_for_hunger = max(0, int(hunger_deficit / HUNGER_PER_BREAD) + 1)
         
-        # Also want buffer (WHEAT_BUFFER_TARGET days worth)
-        buffer_want = max(0, WHEAT_BUFFER_TARGET - current_wheat)
+        # Account for bread we already have
+        wheat_for_hunger = max(0, wheat_for_hunger - current_bread)
+        
+        # Also want buffer (BREAD_BUFFER_TARGET worth of wheat)
+        buffer_want = max(0, BREAD_BUFFER_TARGET - current_wheat - current_bread)
         
         return wheat_for_hunger + buffer_want
     
@@ -1729,15 +1751,15 @@ class GameLogic:
             return False
     
     def needs_wheat_buffer(self, char):
-        """Check if character's wheat inventory is below the 1-day buffer target."""
-        return self.get_wheat(char) < WHEAT_BUFFER_TARGET
+        """Check if character's wheat inventory is below the buffer target."""
+        return self.get_wheat(char) < BREAD_BUFFER_TARGET
     
     def handle_wheat_need(self, char):
-        """Handle a character's wheat needs. Returns True if action was taken."""
+        """Handle a character's hunger needs. Returns True if action was taken."""
         job = char.get('job')
         name = self.get_display_name(char)
         
-        # Option 1: Eat from inventory (bread only - wheat cannot be eaten)
+        # Option 1: Eat bread from inventory
         if self.get_bread(char) >= BREAD_PER_BITE:
             self.remove_bread(char, BREAD_PER_BITE)
             char['hunger'] = min(MAX_HUNGER, char['hunger'] + HUNGER_PER_BREAD)
@@ -1745,7 +1767,33 @@ class GameLogic:
             self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return True
         
-        # Option 2: Soldiers wait for steward to bring wheat (passive)
+        # Option 2: If have wheat but no bread, go cook it
+        if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+            # Try to bake if adjacent to cooking spot
+            if self.can_bake_bread(char):
+                amount_to_bake = min(self.get_wheat(char), BREAD_BUFFER_TARGET)
+                self.bake_bread(char, amount_to_bake)
+                return True
+            
+            # Move toward nearest cooking spot
+            cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
+            if cooking_spot and cooking_pos:
+                # Move toward the cooking spot
+                char['move_target'] = cooking_pos
+                return True
+            
+            # No cooking spot available - need to make a camp
+            if self.can_make_camp_at(char['x'], char['y']):
+                self.make_camp(char)
+                return True
+            else:
+                # Move to find a camp spot
+                camp_spot = self._find_camp_spot(char)
+                if camp_spot:
+                    char['move_target'] = camp_spot
+                    return True
+        
+        # Option 3: Soldiers wait for steward to bring wheat (passive)
         # The steward will come to them - soldiers just need to register their request
         if job == 'Soldier':
             # Register request if not already done
@@ -1754,7 +1802,7 @@ class GameLogic:
             # Soldiers don't actively seek wheat - they wait
             return False
         
-        # Option 3: Non-soldiers buy wheat from nearest vendor (Farmer, Trader, Innkeeper, etc.)
+        # Option 4: Non-soldiers buy wheat from nearest vendor (Farmer, Trader, Innkeeper, etc.)
         # Characters who sell wheat themselves don't buy from others
         if self.can_afford_any_wheat(char) and not self.is_vendor_of(char, 'wheat'):
             # Try to buy from adjacent vendor first
@@ -1788,7 +1836,7 @@ class GameLogic:
                         self.state.log_action(f"{name} LOST allegiance to {old_allegiance} - no one will sell wheat!")
                         return True
         
-        # Option 4: Resort to crime (only if can't legitimately buy wheat)
+        # Option 5: Resort to crime (only if can't legitimately buy wheat)
         # Characters with money and access to a willing vendor should NEVER steal
         can_buy_wheat = self.can_afford_any_wheat(char) and self.find_willing_vendor(char, 'wheat') is not None
         
@@ -2203,8 +2251,8 @@ class GameLogic:
                 else:
                     return self._get_flee_goal(char, criminal)
         
-        # Priority 4: Critical hunger
-        if char['hunger'] <= HUNGER_CRITICAL and self.get_wheat(char) < WHEAT_PER_BITE:
+        # Priority 4: Critical hunger (need bread to eat, but they'll seek wheat to make bread)
+        if char['hunger'] <= HUNGER_CRITICAL and self.get_bread(char) < BREAD_PER_BITE:
             wheat_goal = self._get_wheat_goal(char)
             if wheat_goal:
                 return wheat_goal
@@ -2245,8 +2293,8 @@ class GameLogic:
                 if steward:
                     return (steward['x'], steward['y'])
         
-        # Priority 7: Non-critical hunger OR low wheat buffer
-        if (self.should_seek_wheat(char) and self.get_wheat(char) < WHEAT_PER_BITE) or self.needs_wheat_buffer(char):
+        # Priority 7: Non-critical hunger (no bread to eat) OR low wheat buffer
+        if (self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE) or self.needs_wheat_buffer(char):
             wheat_goal = self._get_wheat_goal(char)
             if wheat_goal:
                 return wheat_goal
@@ -2405,8 +2453,32 @@ class GameLogic:
         return best_spot
     
     def _get_wheat_goal(self, char):
-        """Get position to move toward for wheat. Returns float position."""
+        """Get position to move toward for hunger needs. Returns float position.
+        
+        Priority:
+        1. If have wheat but no bread -> go to cooking spot (or make camp)
+        2. If no wheat -> go buy wheat
+        """
         job = char.get('job')
+        
+        # If we have wheat but no bread, we need to cook
+        if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO and self.get_bread(char) < BREAD_PER_BITE:
+            # Find nearest cooking spot
+            cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
+            if cooking_spot and cooking_pos:
+                return cooking_pos
+            
+            # No cooking spot - need to make a camp
+            # If we can camp here, we'll do it in handle_wheat_need
+            # Otherwise find a spot to camp
+            if not self.can_make_camp_at(char['x'], char['y']):
+                camp_spot = self._find_camp_spot(char)
+                if camp_spot:
+                    return camp_spot
+            # Can camp here, return None to let handle_wheat_need make the camp
+            return None
+        
+        # Need to get wheat
         if job == 'Soldier':
             # Go to barracks barrel position
             barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
@@ -2432,6 +2504,20 @@ class GameLogic:
                     ticks_until_tax = 0
                 if ticks_until_tax <= 5 or char.get('tax_late_ticks', 0) > 0:
                     return (steward['x'], steward['y'])
+        
+        # Priority: If hungry and have wheat but no bread, go cook
+        if self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE:
+            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+                # Have wheat, need to cook it
+                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
+                if cooking_spot and cooking_pos:
+                    return cooking_pos
+                # No cooking spot - farmer has a stove at home, should go there
+                # This shouldn't happen for farmers but fallback to camp
+                if not self.can_make_camp_at(char['x'], char['y']):
+                    camp_spot = self._find_camp_spot(char)
+                    if camp_spot:
+                        return camp_spot
         
         day_tick = self.state.ticks % TICKS_PER_DAY
         is_work_time = day_tick < TICKS_PER_DAY // 2  # Work first half of day
@@ -2490,12 +2576,18 @@ class GameLogic:
         When blocked, they squeeze past obstacles without losing their patrol progress.
         When hungry, they wait in barracks for the steward to bring them food.
         """
-        is_hungry = char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) < WHEAT_PER_BITE
+        is_hungry = char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE
         
         if is_hungry:
-            # Going to wait for food - clear patrol target
+            # If have wheat, go cook it first (don't request more)
+            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+                char['requested_wheat'] = False  # Clear request - we have wheat to cook
+                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
+                if cooking_spot and cooking_pos:
+                    return cooking_pos
+            
+            # No wheat - request from steward and wait
             char['patrol_target'] = None
-            # Register wheat request if not already registered
             if not char.get('requested_wheat'):
                 char['requested_wheat'] = True
                 name = self.get_display_name(char)
@@ -2599,8 +2691,15 @@ class GameLogic:
                         return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
                 # No wheat available - fall through to other priorities
         
-        # Priority 3: Go to barrel to eat when hungry and low on personal wheat
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) < WHEAT_PER_BITE:
+        # Priority 3: Go to barrel to get wheat when hungry and low on bread
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE:
+            # If have wheat, go cook it
+            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
+                if cooking_spot and cooking_pos:
+                    return cooking_pos
+            
+            # Otherwise get wheat from barrel
             barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
             if barracks_barrel and self.state.get_barrel_wheat(barracks_barrel) >= SOLDIER_WHEAT_PAYMENT:
                 barrel_pos = self.state.get_barrel_position(barracks_barrel)
@@ -2985,6 +3084,19 @@ class GameLogic:
             self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return
         
+        # Cook if hungry, have wheat, no bread, and at a cooking spot
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO and self.get_bread(char) < BREAD_PER_BITE:
+            if self.can_bake_bread(char):
+                # Bake enough to eat and maintain buffer
+                amount_to_bake = min(self.get_wheat(char), BREAD_BUFFER_TARGET)
+                self.bake_bread(char, amount_to_bake)
+                return
+            
+            # If at a valid camp spot and no cooking available, make a camp
+            if not self.has_access_to_cooking(char) and self.can_make_camp_at(char['x'], char['y']):
+                self.make_camp(char)
+                return
+        
         # Job-specific actions
         if job == 'Farmer':
             self._do_farmer_actions(char)
@@ -3059,8 +3171,8 @@ class GameLogic:
         The steward will come to them with food.
         """
         # Soldiers just wait - steward handles feeding them
-        # Clear the wheat request flag when no longer hungry
-        if char['hunger'] > HUNGER_CHANCE_THRESHOLD or self.get_wheat(char) >= WHEAT_PER_BITE:
+        # Clear the wheat request flag when no longer hungry (has bread) or has wheat to cook
+        if char['hunger'] > HUNGER_CHANCE_THRESHOLD or self.get_bread(char) >= BREAD_PER_BITE or self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
             char['requested_wheat'] = False
     
     def _do_steward_actions(self, char):
@@ -3106,8 +3218,8 @@ class GameLogic:
                         self.state.log_action(f"Steward {name} took {amount_to_take} wheat from barrel for soldiers")
                         return  # One action per tick
         
-        # Priority 3: Get wheat from barracks barrel when adjacent to it and hungry
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) < WHEAT_PER_BITE:
+        # Priority 3: Get wheat from barracks barrel when adjacent to it and hungry (no bread)
+        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE:
             barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
             if barracks_barrel and self.state.is_adjacent_to_barrel(char, barracks_barrel):
                 if self.state.get_barrel_wheat(barracks_barrel) >= SOLDIER_WHEAT_PAYMENT:
@@ -3183,8 +3295,8 @@ class GameLogic:
                 self.enlist_as_farmer(char)
                 return
         
-        # Seek wheat if hungry OR if wheat buffer is low
-        is_hungry = self.should_seek_wheat(char) and self.get_wheat(char) < WHEAT_PER_BITE
+        # Seek wheat if hungry (no bread) OR if wheat buffer is low
+        is_hungry = self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE
         needs_buffer = self.needs_wheat_buffer(char)
         
         if is_hungry or needs_buffer:
@@ -3754,7 +3866,12 @@ class GameLogic:
             # Give feedback on why we can't bake
             cooking_spot = self.get_adjacent_cooking_spot(player)
             if not cooking_spot:
-                self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
+                # Check if there's a stove nearby that we can't use
+                stove = self.state.get_adjacent_stove(player)
+                if stove and not self.state.can_use_stove(player, stove):
+                    self.state.log_action(f"{name} can't use this stove (not your home)")
+                else:
+                    self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
             elif self.get_wheat(player) < WHEAT_TO_BREAD_RATIO:
                 self.state.log_action(f"{name} needs wheat to bake bread")
             elif not self.can_add_bread(player, 1):

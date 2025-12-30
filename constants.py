@@ -82,7 +82,6 @@ ITEMS = {
         "name": "Wheat",
         "price": 5,
         "stack_size": 15,
-        "hunger_value": 33,  # How much hunger restored per unit
     },
     "gold": {
         "name": "Gold",
@@ -98,15 +97,10 @@ ITEMS = {
 }
 
 # =============================================================================
-# WHEAT AND EATING SETTINGS
+# WHEAT SETTINGS
 # =============================================================================
-WHEAT_ITEM = "wheat"  # Which item is used for eating
-WHEAT_PER_BITE = 1
-HUNGER_PER_WHEAT = ITEMS[WHEAT_ITEM]["hunger_value"]
-WHEAT_TO_EAT = 3
-WHEAT_BUFFER_TARGET = 3  # Characters want 1 day of wheat in inventory
-WHEAT_STACK_SIZE = ITEMS[WHEAT_ITEM]["stack_size"]
-WHEAT_PRICE_PER_UNIT = ITEMS[WHEAT_ITEM]["price"]
+WHEAT_STACK_SIZE = ITEMS["wheat"]["stack_size"]
+WHEAT_PRICE_PER_UNIT = ITEMS["wheat"]["price"]
 
 # =============================================================================
 # BREAD SETTINGS
@@ -116,12 +110,13 @@ BREAD_PRICE_PER_UNIT = ITEMS["bread"]["price"]
 WHEAT_TO_BREAD_RATIO = 1  # 1 wheat -> 1 bread
 BREAD_PER_BITE = 1
 HUNGER_PER_BREAD = ITEMS["bread"]["hunger_value"]
+BREAD_BUFFER_TARGET = 3  # Characters want this much bread in inventory
 
 # =============================================================================
 # BARREL SETTINGS
 # =============================================================================
 BARREL_SLOTS = 30
-BARREL_WHEAT_STACK_SIZE = ITEMS[WHEAT_ITEM]["stack_size"]
+BARREL_WHEAT_STACK_SIZE = ITEMS["wheat"]["stack_size"]
 
 # =============================================================================
 # FARM SETTINGS
