@@ -494,7 +494,7 @@ class FarmerJob(Job):
         char.job = 'Farmer'
         char.home = farm_name
         char.allegiance = allegiance
-        char.tax_due_tick = state.ticks + TAX_GRACE_PERIOD
+        char.tax_due_tick = state.ticks + STEWARD_TAX_INTERVAL  # First tax due after 1 year
         
         # Assign farm barrel
         farm_barrel = state.interactables.get_barrel_by_home(farm_name)

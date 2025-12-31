@@ -151,6 +151,11 @@ class GameLogic:
             target.health -= damage
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
+            # Set attacker's robbery_target so victim can detect and respond
+            # Only set if attacker doesn't already have a target (first hit)
+            if attacker.get('robbery_target') is None and target.health > 0:
+                attacker.robbery_target = target
+            
             # Check if target was a criminal
             target_was_criminal = (
                 target.get('is_aggressor', False) or 
@@ -177,6 +182,10 @@ class GameLogic:
                 
                 # Transfer items to attacker
                 attacker.transfer_all_items_from(target)
+                
+                # Clear robbery_target if this was the target
+                if attacker.get('robbery_target') == target:
+                    attacker.robbery_target = None
         
         return targets_hit
     
@@ -343,7 +352,7 @@ class GameLogic:
         if stove and stove.can_use(char):
             return {
                 'type': 'stove',
-                'name': stove.get('name', 'stove'),
+                'name': stove.name,
                 'source': stove
             }
         
@@ -434,7 +443,7 @@ class GameLogic:
                 best_dist = dist
                 best_spot = {
                     'type': 'stove',
-                    'name': stove.get('name', 'stove'),
+                    'name': stove.name,
                     'source': stove
                 }
                 best_pos = (stove_cx, stove_cy)
@@ -1592,7 +1601,6 @@ class GameLogic:
         
         return False
     
-
     # =========================================================================
     # MOVEMENT SYSTEM
     # =========================================================================
@@ -2244,20 +2252,32 @@ class GameLogic:
         
         Args:
             char: The character looking for a cell
-            home: Filter to only cells owned by this farm. If None, searches all.
+            home: Filter to only cells owned by this farm area name. If None, searches all.
         """
+        from scenario_world import AREAS
+        
         # Check if character is already on a farm cell being worked
         char_cell = (int(char['x']), int(char['y']))
         cell = self.state.get_farm_cell_state(char_cell[0], char_cell[1])
         if cell and cell['state'] in ('ready', 'harvesting', 'replanting'):
             return None
         
+        # If home is specified, get the farm cells for that specific farm area
+        valid_cells = set()
+        if home:
+            for area in AREAS:
+                if area.get('name') == home and area.get('has_farm_cells'):
+                    # Get the explicit farm cell list from the area definition
+                    for cell_coord in area.get('farm_cells', []):
+                        valid_cells.add((cell_coord[0], cell_coord[1]))
+                    break
+        
         best = None
         best_dist = float('inf')
         for (cx, cy), data in self.state.farm_cells.items():
             if data['state'] == 'ready':
-                # Filter by home (owning farm) if specified
-                if home and data.get('home') != home:
+                # Filter by home farm if specified
+                if home and (cx, cy) not in valid_cells:
                     continue
                 # Distance to cell center
                 center_x, center_y = cx + 0.5, cy + 0.5
@@ -2434,7 +2454,6 @@ class GameLogic:
             attacker['robbery_target'] = None
             attacker['is_aggressor'] = False
 
-    
     # =========================================================================
     # TICK PROCESSING
     # =========================================================================
