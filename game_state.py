@@ -1,7 +1,10 @@
-# game_state.py - Pure data model for game state (no logic, no UI)
+# game_state.py - Pure data model for game state (no game rules, no UI)
 """
 This module contains the GameState class which holds ALL mutable game state.
-It is purely a data container - no game logic, no rendering.
+It is a data container with pure query methods - no game rules, no rendering.
+
+Query methods here are pure lookups (get_character, get_area_at, is_sleep_time).
+Game rules and behavior logic live in game_logic.py.
 """
 
 import random
@@ -14,16 +17,19 @@ from constants import (
 )
 from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE
 from scenario_characters import CHARACTER_TEMPLATES
+from character import Character, create_character
+from static_interactables import InteractableManager
 
 
 class GameState:
     """
-    Pure data container for all game state.
+    Data container for all game state with pure query methods.
     
     This class:
-    - Holds all mutable game data
-    - Provides methods to initialize/reset the world
-    - Does NOT contain game logic (that's in game_logic.py)
+    - Holds all mutable game data (characters, areas, ticks, etc.)
+    - Provides pure query methods (lookups, distance, etc.)
+    - Provides simple modification methods (remove_character, log_action)
+    - Does NOT contain game rules/behavior (that's in game_logic.py)
     - Does NOT contain rendering code (that's in gui.py)
     """
     
@@ -36,13 +42,16 @@ class GameState:
         # World data
         self.area_map = [[None for _ in range(SIZE)] for _ in range(SIZE)]
         self.farm_cells = {}  # (x, y) -> {'state': str, 'timer': int}
-        self.barrels = {}  # (x, y) -> {'name': str, 'home': str, 'owner': str, 'inventory': list}
-        self.beds = {}  # (x, y) -> {'name': str, 'home': str, 'owner': str}
-        self.stoves = {}  # (x, y) -> {'name': str, 'home': str}
+        
+        # Interactable objects (barrels, beds, stoves, campfires)
+        self.interactables = InteractableManager()
         
         # Character data
-        self.characters = []  # List of character dicts
-        self.player = None    # Reference to player character dict
+        self.characters = []  # List of Character instances
+        self.player = None    # Reference to player Character
+        
+        # Death animations (purely visual - characters are removed from game logic immediately)
+        self.death_animations = []  # List of {'x': float, 'y': float, 'name': str, 'start_time': float, 'facing': str, 'job': str, 'morality': int}
         
         # Action log
         self.action_log = []
@@ -51,9 +60,7 @@ class GameState:
         # Initialize world
         self._init_areas()
         self._init_farm_cells()
-        self._init_barrels()
-        self._init_beds()
-        self._init_stoves()
+        self._init_interactables()
         self._init_characters()
     
     def _init_areas(self):
@@ -77,7 +84,6 @@ class GameState:
             if area.get("has_farm_cells"):
                 allegiance = area.get("allegiance")  # Farm's allegiance (e.g., "Dunmere" or None)
                 
-                # New format: explicit list of cell coordinates
                 if "farm_cells" in area:
                     for cell in area["farm_cells"]:
                         x, y = cell[0], cell[1]
@@ -87,52 +93,12 @@ class GameState:
                                 'timer': 0,
                                 'allegiance': allegiance
                             }
-                # Legacy format: rectangular bounds
-                else:
-                    bounds = area.get("farm_cell_bounds", area["bounds"])
-                    y_start, x_start, y_end, x_end = bounds
-                    for y in range(y_start, y_end):
-                        for x in range(x_start, x_end):
-                            if 0 <= y < SIZE and 0 <= x < SIZE:
-                                self.farm_cells[(x, y)] = {
-                                    'state': 'ready',
-                                    'timer': 0,
-                                    'allegiance': allegiance
-                                }
     
-    def _init_barrels(self):
-        """Initialize barrels from BARRELS configuration.
-        Ownership is assigned at runtime based on jobs, not from config.
-        """
-        for barrel_def in BARRELS:
-            x, y = barrel_def["position"]
-            self.barrels[(x, y)] = {
-                'name': barrel_def["name"],
-                'home': barrel_def["home"],
-                'owner': None,  # Assigned at runtime based on jobs
-                'inventory': [None] * BARREL_SLOTS
-            }
-    
-    def _init_beds(self):
-        """Initialize beds from BEDS configuration.
-        Ownership is assigned at runtime based on jobs, not from config.
-        """
-        for bed_def in BEDS:
-            x, y = bed_def["position"]
-            self.beds[(x, y)] = {
-                'name': bed_def["name"],
-                'home': bed_def["home"],
-                'owner': None  # Assigned at runtime based on jobs
-            }
-    
-    def _init_stoves(self):
-        """Initialize stoves from STOVES configuration."""
-        for stove_def in STOVES:
-            x, y = stove_def["position"]
-            self.stoves[(x, y)] = {
-                'name': stove_def["name"],
-                'home': stove_def["home"]
-            }
+    def _init_interactables(self):
+        """Initialize all interactable objects (barrels, beds, stoves)."""
+        self.interactables.init_barrels(BARRELS)
+        self.interactables.init_beds(BEDS)
+        self.interactables.init_stoves(STOVES)
     
     def _init_characters(self):
         """Initialize characters from templates.
@@ -140,60 +106,46 @@ class GameState:
         """
         occupied = set()
         
-        # Get default spawn area (residential area)
-        default_spawn_area = self.get_area_by_role('residential')
-        
         for name, template in CHARACTER_TEMPLATES.items():
             # Determine home area based on job
             starting_job = template.get('starting_job')
-            home_area = self._get_home_for_job(starting_job, template.get('starting_home'))
-            
+
             # Find spawn location in home area (or default if no home)
-            spawn_area = home_area or default_spawn_area
-            x, y = self._find_spawn_location(spawn_area, occupied)
+            home_area = template.get('starting_home')
+            x, y = self._find_spawn_location(home_area, occupied)
             occupied.add((x, y))
             
-            # Create character dict with all state
-            char = self._create_character(name, template, x, y, home_area)
+            # Create Character object (not dict)
+            char = create_character(name, x, y, home_area)
             self.characters.append(char)
             
             # Assign bed and barrel based on job
             if starting_job:
                 self._assign_job_resources(char, starting_job, home_area)
             
-            if template.get('is_player', False):
+            if char.is_player:
                 self.player = char
     
-    def _get_home_for_job(self, job, fallback_home):
-        """Get the appropriate home area for a job."""
-        if job == 'Steward':
-            return self.get_area_by_role('military_housing')
-        elif job == 'Soldier':
-            return self.get_area_by_role('military_housing')
-        elif job == 'Farmer':
-            return self.get_area_by_role('farm')
-        else:
-            return fallback_home  # Unemployed use starting_home from template
     
     def _assign_job_resources(self, char, job, home_area):
         """Assign bed and barrel ownership based on job."""
-        char_name = char['name']
+        char_name = char.name
         
         # Assign an unowned bed in the home area
-        bed = self.get_unowned_bed_by_home(home_area)
+        bed = self.interactables.get_unowned_bed_by_home(home_area)
         if bed:
-            self.assign_bed_owner(bed, char_name)
+            self.interactables.assign_bed_owner(bed, char_name)
         
         # Steward owns the barracks barrel
         if job == 'Steward':
-            barrel = self.get_barrel_by_home(home_area)
+            barrel = self.interactables.get_barrel_by_home(home_area)
             if barrel:
-                barrel['owner'] = char_name
+                barrel.owner = char_name
         # Farmer owns the farm barrel
         elif job == 'Farmer':
-            barrel = self.get_barrel_by_home(home_area)
+            barrel = self.interactables.get_barrel_by_home(home_area)
             if barrel:
-                barrel['owner'] = char_name
+                barrel.owner = char_name
     
     def _find_spawn_location(self, area_name, occupied):
         """Find a valid spawn location in the given area"""
@@ -219,127 +171,6 @@ class GameState:
         
         # Last resort: just return something
         return random.randint(0, SIZE - 1), random.randint(0, SIZE - 1)
-    
-    def _create_character(self, name, template, x, y, home_area):
-        """Create a character dict from template"""
-        # Build initial inventory from starting money/wheat
-        inventory = self._build_initial_inventory(
-            template['starting_money'], 
-            template['starting_wheat']
-        )
-        
-        # Initialize skills - all start at 0, then apply starting_skills from template
-        skills = {skill_id: 0 for skill_id in SKILLS}
-        for skill_id, value in template.get('starting_skills', {}).items():
-            skills[skill_id] = value
-        
-        return {
-            # Identity
-            'name': name,
-            
-            # Position (float-based for smooth ALTTP-style movement)
-            # Characters spawn at the CENTER of their starting cell
-            'x': float(x) + 0.5,
-            'y': float(y) + 0.5,
-            
-            # Velocity for continuous movement (cells per second)
-            'vx': 0.0,
-            'vy': 0.0,
-            
-            # Hitbox dimensions (can be customized per character later)
-            'width': CHARACTER_WIDTH,
-            'height': CHARACTER_HEIGHT,
-            
-            # Core stats (mutable)
-            'age': template['starting_age'],
-            'health': 100,
-            'hunger': MAX_HUNGER,
-            'inventory': inventory,  # New inventory system
-            'morality': template['morality'],  # Mutable copy of morality trait
-            'skills': skills,  # Skill levels (0-100)
-            
-            # Current state (can change during game)
-            'job': template['starting_job'],
-            'allegiance': template['starting_allegiance'],
-            'home': home_area,  # Determined by job, not hardcoded in template
-            
-            # Combat/social state
-            'robbery_target': None,
-            'theft_target': None,  # Farm cell being targeted for theft
-            'flee_from': None,  # Character to flee from (set when witnessing crime)
-            'is_murderer': False,
-            'is_thief': False,  # Has stolen from farm
-            'is_aggressor': False,
-            
-            # Crime knowledge - unified system
-            # known_crimes: {criminal_id: [{'intensity': int, 'allegiance': str/None}, ...]}
-            'known_crimes': {},
-            # unreported_crimes: {(criminal_id, intensity, crime_allegiance), ...}
-            'unreported_crimes': set(),
-            
-            # Starvation state
-            'is_starving': False,
-            'is_frozen': False,  # True when starving + health <= 20
-            'starvation_health_lost': 0,  # Tracks health lost for morality checks
-            'ticks_starving': 0,  # How long character has been starving (for robbery escalation)
-            
-            # Sleep state
-            'is_sleeping': False,
-            'camp_position': None,  # (x, y) of camp if character has made one
-            
-            # Job-specific state
-            'tax_late_ticks': 0,
-            'tax_collection_target': None,
-            'tax_paid_this_cycle': False,
-            'paid_this_cycle': False,
-            'soldier_stopped': False,
-            'asked_steward_for_wheat': False,
-            'wheat_seek_ticks': 0,
-            
-            # Logging flags (to avoid spam)
-            '_idle_logged': False,
-            '_work_logged': False,
-            
-            # Idle/wandering state
-            'idle_state': 'choosing',  # 'choosing', 'moving', 'waiting', 'paused'
-            'idle_destination': None,  # (x, y) float position
-            'idle_wait_ticks': 0,  # Ticks remaining to wait
-            'idle_is_idle': False,  # True when character is in idle behavior (for speed)
-            
-            # Squeeze/pathfinding state (for getting past obstacles)
-            'blocked_ticks': 0,  # How many ticks character has been blocked
-            'squeeze_direction': 0,  # -1 or 1 for which way to slide, 0 for none
-            
-            # Patrol state (for soldiers)
-            'patrol_target': None,  # (x, y) cell tuple - current patrol destination
-            
-            # Attack animation state
-            'attack_animation_start': None,  # Tick when attack animation started (None = not attacking)
-            'attack_direction': None,  # Direction of the attack swing
-            
-            # Visual state
-            'facing': 'down',  # 'up', 'down', 'left', 'right'
-        }
-    
-    def _build_initial_inventory(self, money, wheat):
-        """Build inventory from starting money and wheat amounts."""
-        inventory = [None] * INVENTORY_SLOTS
-        slot_idx = 0
-        
-        # Add money slot if any
-        if money > 0 and slot_idx < INVENTORY_SLOTS:
-            inventory[slot_idx] = {'type': 'money', 'amount': money}
-            slot_idx += 1
-        
-        # Add wheat slots (stacks of ITEMS["wheat"]["stack_size"])
-        remaining_wheat = wheat
-        while remaining_wheat > 0 and slot_idx < INVENTORY_SLOTS:
-            stack_amount = min(remaining_wheat, ITEMS["wheat"]["stack_size"])
-            inventory[slot_idx] = {'type': 'wheat', 'amount': stack_amount}
-            remaining_wheat -= stack_amount
-            slot_idx += 1
-        
-        return inventory
     
     # =========================================================================
     # QUERY METHODS (pure data access, no side effects)
@@ -387,11 +218,6 @@ class GameState:
         Villages define allegiances - the village name IS the allegiance.
         """
         return [area_def["name"] for area_def in AREAS if area_def.get("role") == "village"]
-    
-    def get_first_village(self):
-        """Get the first/primary village. For single-village scenarios."""
-        villages = self.get_villages()
-        return villages[0] if villages else None
     
     def is_village_area(self, area_name):
         """Check if an area is a village (has role='village')."""
@@ -789,16 +615,58 @@ class GameState:
         """Get the static template for a character by name"""
         return CHARACTER_TEMPLATES.get(name)
     
+    def get_distance(self, char1, char2):
+        """Euclidean distance between two characters (float-based)."""
+        import math
+        return math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
+    
+    def get_steward(self):
+        """Get the steward character, or None if no steward exists."""
+        for char in self.characters:
+            if char.get('job') == 'Steward':
+                return char
+        return None
+    
+    def get_allegiance_count(self, allegiance):
+        """Count all characters with a specific allegiance."""
+        return sum(1 for c in self.characters if c.get('allegiance') == allegiance)
+    
+    def get_character_bed(self, char):
+        """Get the bed owned by this character, if any."""
+        return self.interactables.get_bed_by_owner(char['name'])
+    
+    def is_sleep_time(self):
+        """Check if it's currently sleep time (latter portion of day)."""
+        from constants import TICKS_PER_DAY, SLEEP_START_FRACTION
+        day_tick = self.ticks % TICKS_PER_DAY
+        return day_tick >= TICKS_PER_DAY * SLEEP_START_FRACTION
+    
     # =========================================================================
     # MODIFICATION METHODS (simple state changes)
     # =========================================================================
     
     def remove_character(self, char):
-        """Remove a character from the game"""
+        """Remove a character from the game and clear all references to them"""
         if char in self.characters:
             self.characters.remove(char)
         if char == self.player:
             self.player = None
+        
+        # Get the id before clearing references (needed for known_crimes lookup)
+        char_id = id(char)
+        
+        # Clear all references to this character from other characters
+        for other in self.characters:
+            if other.get('robbery_target') == char:
+                other['robbery_target'] = None
+                other['is_aggressor'] = False
+            if other.get('flee_from') == char:
+                other['flee_from'] = None
+            if other.get('tax_collection_target') == char:
+                other['tax_collection_target'] = None
+            # Clear from known_crimes memory (uses id() as key)
+            if 'known_crimes' in other and char_id in other['known_crimes']:
+                del other['known_crimes'][char_id]
     
     def log_action(self, message):
         """Add a message to the action log"""
@@ -824,514 +692,12 @@ class GameState:
         self.characters = []
         self.player = None
         self.farm_cells = {}
-        self.barrels = {}
+        self.death_animations = []
         self.action_log = []
-        self.log_total_count = 0  # Reset log counter
+        self.log_total_count = 0
         self.area_map = [[None for _ in range(SIZE)] for _ in range(SIZE)]
         
         self._init_areas()
         self._init_farm_cells()
-        self._init_barrels()
+        self._init_interactables()
         self._init_characters()
-    
-    # =========================================================================
-    # INVENTORY METHODS
-    # =========================================================================
-    
-    def get_wheat(self, char):
-        """Get total wheat from character's inventory."""
-        total = 0
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'wheat':
-                total += slot['amount']
-        return total
-    
-    def get_money(self, char):
-        """Get total money from character's inventory."""
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'money':
-                return slot['amount']
-        return 0
-    
-    def has_money_slot(self, char):
-        """Check if character has a money slot in inventory."""
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'money':
-                return True
-        return False
-    
-    def can_add_wheat(self, char, amount):
-        """Check if character can add this much wheat to inventory."""
-        space = 0
-        for slot in char['inventory']:
-            if slot is None:
-                space += ITEMS["wheat"]["stack_size"]
-            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                space += ITEMS["wheat"]["stack_size"] - slot['amount']
-        return space >= amount
-    
-    def can_add_money(self, char):
-        """Check if character can add money (has money slot or empty slot)."""
-        for slot in char['inventory']:
-            if slot is None:
-                return True
-            if slot['type'] == 'money':
-                return True
-        return False
-    
-    def add_wheat(self, char, amount):
-        """Add wheat to character's inventory. Returns amount actually added."""
-        remaining = amount
-        
-        # First, fill existing wheat stacks
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                can_add = ITEMS["wheat"]["stack_size"] - slot['amount']
-                to_add = min(remaining, can_add)
-                slot['amount'] += to_add
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        # Then, use empty slots
-        for i, slot in enumerate(char['inventory']):
-            if slot is None:
-                to_add = min(remaining, ITEMS["wheat"]["stack_size"])
-                char['inventory'][i] = {'type': 'wheat', 'amount': to_add}
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        return amount - remaining  # Return amount actually added
-    
-    def remove_wheat(self, char, amount):
-        """Remove wheat from character's inventory. Returns amount actually removed."""
-        remaining = amount
-        
-        # Remove from wheat stacks (prefer smaller stacks first to consolidate)
-        wheat_slots = [(i, slot) for i, slot in enumerate(char['inventory']) 
-                      if slot and slot['type'] == 'wheat']
-        wheat_slots.sort(key=lambda x: x[1]['amount'])
-        
-        for i, slot in wheat_slots:
-            to_remove = min(remaining, slot['amount'])
-            slot['amount'] -= to_remove
-            remaining -= to_remove
-            
-            # Remove empty slot
-            if slot['amount'] <= 0:
-                char['inventory'][i] = None
-            
-            if remaining <= 0:
-                return amount
-        
-        return amount - remaining  # Return amount actually removed
-    
-    def add_money(self, char, amount):
-        """Add money to character's inventory. Returns amount actually added."""
-        # Find existing money slot
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'money':
-                slot['amount'] += amount
-                return amount
-        
-        # Find empty slot
-        for i, slot in enumerate(char['inventory']):
-            if slot is None:
-                char['inventory'][i] = {'type': 'money', 'amount': amount}
-                return amount
-        
-        return 0  # No space
-    
-    def remove_money(self, char, amount):
-        """Remove money from character's inventory. Returns amount actually removed."""
-        for i, slot in enumerate(char['inventory']):
-            if slot and slot['type'] == 'money':
-                to_remove = min(amount, slot['amount'])
-                slot['amount'] -= to_remove
-                
-                # Remove empty money slot
-                if slot['amount'] <= 0:
-                    char['inventory'][i] = None
-                
-                return to_remove
-        
-        return 0  # No money to remove
-    
-    def transfer_all_items(self, from_char, to_char):
-        """Transfer all items from one character to another (for looting)."""
-        # Transfer money
-        money = self.get_money(from_char)
-        if money > 0:
-            self.remove_money(from_char, money)
-            self.add_money(to_char, money)
-        
-        # Transfer wheat
-        wheat = self.get_wheat(from_char)
-        if wheat > 0:
-            self.remove_wheat(from_char, wheat)
-            self.add_wheat(to_char, wheat)
-    
-    def get_inventory_space(self, char):
-        """Get remaining wheat capacity in inventory."""
-        space = 0
-        for slot in char['inventory']:
-            if slot is None:
-                space += ITEMS["wheat"]["stack_size"]
-            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                space += ITEMS["wheat"]["stack_size"] - slot['amount']
-        return space
-    
-    def is_inventory_full(self, char):
-        """Check if inventory has no empty slots and all wheat stacks are full."""
-        for slot in char['inventory']:
-            if slot is None:
-                return False
-            if slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                return False
-        return True
-    
-    # =========================================================================
-    # BARREL METHODS
-    # =========================================================================
-    
-    def get_barrel_at(self, x, y):
-        """Get barrel at position, if any"""
-        return self.barrels.get((x, y))
-    
-    def get_barrel_by_home(self, home):
-        """Get barrel in the given home area"""
-        for pos, barrel in self.barrels.items():
-            if barrel['home'] == home:
-                return barrel
-        return None
-    
-    def get_barrel_by_owner(self, owner_name):
-        """Get barrel owned by the given character name"""
-        for pos, barrel in self.barrels.items():
-            if barrel['owner'] == owner_name:
-                return barrel
-        return None
-    
-    def get_barrel_position(self, barrel):
-        """Get the (x, y) position of a barrel"""
-        for pos, b in self.barrels.items():
-            if b is barrel:
-                return pos
-        return None
-    
-    def is_adjacent_to_barrel(self, char, barrel):
-        """Check if character is adjacent to the barrel. Works with float positions.
-        Character is adjacent if their center is within ADJACENCY_DISTANCE of barrel center.
-        """
-        pos = self.get_barrel_position(barrel)
-        if not pos:
-            return False
-        # Barrel center is at (bx + 0.5, by + 0.5)
-        bx, by = pos
-        barrel_cx = bx + 0.5
-        barrel_cy = by + 0.5
-        # Calculate distance from character center to barrel center
-        dist = math.sqrt((char['x'] - barrel_cx) ** 2 + (char['y'] - barrel_cy) ** 2)
-        return dist <= ADJACENCY_DISTANCE
-    
-    def can_use_barrel(self, char, barrel):
-        """Check if character can use (take from) this barrel.
-        Owner can always use it. Others can use if their home matches barrel's home.
-        """
-        if barrel['owner'] == char['name']:
-            return True
-        return char.get('home') == barrel['home']
-    
-    def get_barrel_wheat(self, barrel):
-        """Get total wheat from barrel's inventory."""
-        total = 0
-        for slot in barrel['inventory']:
-            if slot and slot['type'] == 'wheat':
-                total += slot['amount']
-        return total
-    
-    def get_barrel_money(self, barrel):
-        """Get total money from barrel's inventory."""
-        for slot in barrel['inventory']:
-            if slot and slot['type'] == 'money':
-                return slot['amount']
-        return 0
-    
-    def can_barrel_add_wheat(self, barrel, amount):
-        """Check if barrel can add this much wheat to inventory."""
-        space = 0
-        for slot in barrel['inventory']:
-            if slot is None:
-                space += ITEMS["wheat"]["stack_size"]
-            elif slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                space += ITEMS["wheat"]["stack_size"] - slot['amount']
-        return space >= amount
-    
-    def add_barrel_wheat(self, barrel, amount):
-        """Add wheat to barrel's inventory. Returns amount actually added."""
-        remaining = amount
-        
-        # First, fill existing wheat stacks
-        for slot in barrel['inventory']:
-            if slot and slot['type'] == 'wheat' and slot['amount'] < ITEMS["wheat"]["stack_size"]:
-                can_add = ITEMS["wheat"]["stack_size"] - slot['amount']
-                to_add = min(remaining, can_add)
-                slot['amount'] += to_add
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        # Then, use empty slots
-        for i, slot in enumerate(barrel['inventory']):
-            if slot is None:
-                to_add = min(remaining, ITEMS["wheat"]["stack_size"])
-                barrel['inventory'][i] = {'type': 'wheat', 'amount': to_add}
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        return amount - remaining  # Return amount actually added
-    
-    def remove_barrel_wheat(self, barrel, amount):
-        """Remove wheat from barrel's inventory. Returns amount actually removed."""
-        remaining = amount
-        
-        # Remove from wheat stacks (prefer smaller stacks first to consolidate)
-        wheat_slots = [(i, slot) for i, slot in enumerate(barrel['inventory']) 
-                      if slot and slot['type'] == 'wheat']
-        wheat_slots.sort(key=lambda x: x[1]['amount'])
-        
-        for i, slot in wheat_slots:
-            to_remove = min(remaining, slot['amount'])
-            slot['amount'] -= to_remove
-            remaining -= to_remove
-            
-            # Remove empty slot
-            if slot['amount'] <= 0:
-                barrel['inventory'][i] = None
-            
-            if remaining <= 0:
-                return amount
-        
-        return amount - remaining  # Return amount actually removed
-    
-    def add_barrel_money(self, barrel, amount):
-        """Add money to barrel's inventory. Returns amount actually added."""
-        # Find existing money slot
-        for slot in barrel['inventory']:
-            if slot and slot['type'] == 'money':
-                slot['amount'] += amount
-                return amount
-        
-        # Find empty slot
-        for i, slot in enumerate(barrel['inventory']):
-            if slot is None:
-                barrel['inventory'][i] = {'type': 'money', 'amount': amount}
-                return amount
-        
-        return 0  # No space
-    
-    def remove_barrel_money(self, barrel, amount):
-        """Remove money from barrel's inventory. Returns amount actually removed."""
-        for i, slot in enumerate(barrel['inventory']):
-            if slot and slot['type'] == 'money':
-                to_remove = min(amount, slot['amount'])
-                slot['amount'] -= to_remove
-                
-                # Remove empty money slot
-                if slot['amount'] <= 0:
-                    barrel['inventory'][i] = None
-                
-                return to_remove
-        
-        return 0  # No money to remove
-    
-    # =========================================================================
-    # BED METHODS
-    # =========================================================================
-    
-    def get_bed_at(self, x, y):
-        """Get bed at position, if any"""
-        return self.beds.get((x, y))
-    
-    def get_bed_by_owner(self, owner_name):
-        """Get bed owned by the given character name"""
-        for pos, bed in self.beds.items():
-            if bed['owner'] == owner_name:
-                return bed
-        return None
-    
-    def get_bed_position(self, bed):
-        """Get the (x, y) position of a bed"""
-        for pos, b in self.beds.items():
-            if b is bed:
-                return pos
-        return None
-    
-    def get_unowned_bed_by_home(self, home):
-        """Get an unowned bed in the given home area"""
-        for pos, bed in self.beds.items():
-            if bed['home'] == home and bed['owner'] is None:
-                return bed
-        return None
-    
-    def assign_bed_owner(self, bed, owner_name):
-        """Assign an owner to a bed"""
-        bed['owner'] = owner_name
-    
-    def unassign_bed_owner(self, owner_name):
-        """Remove bed ownership from a character. Returns the bed if found."""
-        for pos, bed in self.beds.items():
-            if bed['owner'] == owner_name:
-                bed['owner'] = None
-                return bed
-        return None
-    
-    # =========================================================================
-    # STOVE METHODS
-    # =========================================================================
-    
-    def get_stove_at(self, x, y):
-        """Get stove at position, if any"""
-        return self.stoves.get((x, y))
-    
-    def get_stove_position(self, stove):
-        """Get the (x, y) position of a stove"""
-        for pos, s in self.stoves.items():
-            if s is stove:
-                return pos
-        return None
-    
-    def is_adjacent_to_stove(self, char, stove):
-        """Check if character is adjacent to the stove."""
-        pos = self.get_stove_position(stove)
-        if not pos:
-            return False
-        sx, sy = pos
-        stove_cx = sx + 0.5
-        stove_cy = sy + 0.5
-        dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
-        return dist <= ADJACENCY_DISTANCE
-    
-    def get_adjacent_stove(self, char):
-        """Get any stove adjacent to the character, or None."""
-        for pos, stove in self.stoves.items():
-            if self.is_adjacent_to_stove(char, stove):
-                return stove
-        return None
-    
-    def can_use_stove(self, char, stove):
-        """Check if character can use this stove.
-        A character can use a stove if their home matches the stove's home.
-        """
-        char_home = char.get('home')
-        stove_home = stove.get('home')
-        
-        # If character has no home, they can't use any stove
-        if char_home is None:
-            return False
-        
-        return char_home == stove_home
-    
-    def get_stoves_for_char(self, char):
-        """Get all stoves this character can use (home matches)."""
-        result = []
-        for pos, stove in self.stoves.items():
-            if self.can_use_stove(char, stove):
-                result.append((pos, stove))
-        return result
-    
-    # =========================================================================
-    # CAMP/CAMPFIRE METHODS
-    # =========================================================================
-    
-    def is_adjacent_to_camp(self, char, camp_position):
-        """Check if character is adjacent to a camp position."""
-        if not camp_position:
-            return False
-        cx, cy = camp_position
-        camp_center_x = cx + 0.5
-        camp_center_y = cy + 0.5
-        dist = math.sqrt((char['x'] - camp_center_x) ** 2 + (char['y'] - camp_center_y) ** 2)
-        return dist <= ADJACENCY_DISTANCE
-    
-    def get_adjacent_camp(self, char):
-        """Get any camp adjacent to the character (from any character), or None.
-        Returns (camp_position, owner_char) tuple or (None, None).
-        """
-        for other_char in self.characters:
-            camp_pos = other_char.get('camp_position')
-            if camp_pos and self.is_adjacent_to_camp(char, camp_pos):
-                return camp_pos, other_char
-        return None, None
-    
-    # =========================================================================
-    # BREAD INVENTORY METHODS
-    # =========================================================================
-    
-    def get_bread(self, char):
-        """Get total bread from character's inventory."""
-        total = 0
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'bread':
-                total += slot['amount']
-        return total
-    
-    def can_add_bread(self, char, amount):
-        """Check if character can add this much bread to inventory."""
-        space = 0
-        for slot in char['inventory']:
-            if slot is None:
-                space += ITEMS["bread"]["stack_size"]
-            elif slot['type'] == 'bread' and slot['amount'] < ITEMS["bread"]["stack_size"]:
-                space += ITEMS["bread"]["stack_size"] - slot['amount']
-        return space >= amount
-    
-    def add_bread(self, char, amount):
-        """Add bread to character's inventory. Returns amount actually added."""
-        remaining = amount
-        
-        # First, fill existing bread stacks
-        for slot in char['inventory']:
-            if slot and slot['type'] == 'bread' and slot['amount'] < ITEMS["bread"]["stack_size"]:
-                can_add = ITEMS["bread"]["stack_size"] - slot['amount']
-                to_add = min(remaining, can_add)
-                slot['amount'] += to_add
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        # Then, use empty slots
-        for i, slot in enumerate(char['inventory']):
-            if slot is None:
-                to_add = min(remaining, ITEMS["bread"]["stack_size"])
-                char['inventory'][i] = {'type': 'bread', 'amount': to_add}
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        return amount - remaining  # Return amount actually added
-    
-    def remove_bread(self, char, amount):
-        """Remove bread from character's inventory. Returns amount actually removed."""
-        remaining = amount
-        
-        # Remove from bread stacks (prefer smaller stacks first to consolidate)
-        bread_slots = [(i, slot) for i, slot in enumerate(char['inventory']) 
-                      if slot and slot['type'] == 'bread']
-        bread_slots.sort(key=lambda x: x[1]['amount'])
-        
-        for i, slot in bread_slots:
-            to_remove = min(remaining, slot['amount'])
-            slot['amount'] -= to_remove
-            remaining -= to_remove
-            
-            # Remove empty slot
-            if slot['amount'] <= 0:
-                char['inventory'][i] = None
-            
-            if remaining <= 0:
-                return amount
-        
-        return amount - remaining  # Return amount actually removed

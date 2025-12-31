@@ -20,7 +20,6 @@ if sys.platform == 'darwin':
         pass  # Already set
 
 import time
-import math
 import pygame
 import pygame.freetype
 from constants import (
@@ -28,13 +27,13 @@ from constants import (
     FARM_CELL_COLORS, JOB_TIERS,
     BG_COLOR, GRID_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
-    MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_EYE_POSITION,
-    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
-    ATTACK_ANIMATION_DURATION
+    MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
+    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE
 from game_state import GameState
 from game_logic import GameLogic
+from player_controller import PlayerController
 from debug_window import DebugWindow
 from sprites import get_sprite_manager
 import os
@@ -71,6 +70,7 @@ class BoardGUI:
         # Create game state and logic
         self.state = GameState()
         self.logic = GameLogic(self.state)
+        self.player_controller = PlayerController(self.state, self.logic)
         
         # Create debug window (separate Tkinter window) - pass logic for skip year
         self.debug_window = DebugWindow(self.state, self.logic)
@@ -144,9 +144,9 @@ class BoardGUI:
                 # Build status string for debug window
                 player = self.state.player
                 if player:
-                    player_food = self.state.get_wheat(player)
-                    player_money = self.state.get_money(player)
-                    status = f"Pos:({player['x']:.1f},{player['y']:.1f}) Wheat:{player_food} ${player_money} HP:{player['health']} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
+                    player_food = player.get_item('wheat')
+                    player_money = player.get_item('money')
+                    status = f"Pos:({player.x:.1f},{player.y:.1f}) Wheat:{player_food} ${player_money} HP:{player.health} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
                 else:
                     status = f"No player | Zoom:{self.zoom:.1f}x"
                 self.debug_window.set_status(status)
@@ -209,13 +209,13 @@ class BoardGUI:
         sprinting = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
         
         if dx != 0 or dy != 0:
-            # Set player velocity (logic handles normalization for diagonal)
-            self.logic.move_player(dx, dy, sprinting)
+            # Set player velocity via controller
+            self.player_controller.handle_movement_input(dx, dy, sprinting)
             self.player_moving = True
         else:
             # No movement keys held - stop player
             if self.player_moving:
-                self.logic.stop_player()
+                self.player_controller.stop_movement()
                 self.player_moving = False
     
     def _handle_keydown(self, event):
@@ -321,19 +321,19 @@ class BoardGUI:
     
     def _handle_eat(self):
         """Handle player eat input"""
-        self.logic.player_eat()
+        self.player_controller.handle_eat_input()
     
     def _handle_trade(self):
         """Handle player trade input"""
-        self.logic.player_trade()
+        self.player_controller.handle_trade_input()
     
     def _handle_attack(self):
         """Handle player attack input"""
-        self.logic.player_attack()
+        self.player_controller.handle_attack_input()
     
     def _handle_bake(self):
         """Handle player bake input"""
-        self.logic.player_bake()
+        self.player_controller.handle_bake_input()
     
     # =========================================================================
     # GAME LOOP
@@ -377,7 +377,7 @@ class BoardGUI:
             remaining = tick_duration
             while remaining > 0:
                 step = min(remaining, 0.05)
-                self.logic.update_player_position(step)
+                self.player_controller.update_position(step)
                 self.logic.update_npc_positions(step)
                 remaining -= step
             
@@ -386,13 +386,13 @@ class BoardGUI:
         # Handle any remaining fractional time for smooth rendering
         if self._accumulated_time > 0:
             step = min(self._accumulated_time, 0.05)
-            self.logic.update_player_position(step)
+            self.player_controller.update_position(step)
             self.logic.update_npc_positions(step)
         
         # Center camera on player (if following)
         if self.camera_following_player and self.state.player:
-            self.camera_x = self.state.player['x']
-            self.camera_y = self.state.player['y']
+            self.camera_x = self.state.player.x
+            self.camera_y = self.state.player.y
     
     # =========================================================================
     # RENDERING
@@ -479,6 +479,9 @@ class BoardGUI:
         # Draw characters
         self._draw_characters()
         
+        # Draw death animations (visual only - characters already removed from game logic)
+        self._draw_death_animations()
+        
         # Remove clipping
         self.screen.set_clip(None)
     
@@ -491,7 +494,7 @@ class BoardGUI:
     def _draw_barrels(self):
         """Draw all barrels"""
         cell_size = self._cam_cell_size
-        for pos, barrel in self.state.barrels.items():
+        for pos, barrel in self.state.interactables.barrels.items():
             x, y = pos
             screen_x, screen_y = self._world_to_screen(x, y)
             
@@ -511,7 +514,7 @@ class BoardGUI:
     def _draw_beds(self):
         """Draw all beds"""
         cell_size = self._cam_cell_size
-        for pos, bed in self.state.beds.items():
+        for pos, bed in self.state.interactables.beds.items():
             x, y = pos
             screen_x, screen_y = self._world_to_screen(x, y)
             
@@ -532,7 +535,7 @@ class BoardGUI:
     def _draw_stoves(self):
         """Draw all stoves"""
         cell_size = self._cam_cell_size
-        for pos, stove in self.state.stoves.items():
+        for pos, stove in self.state.interactables.stoves.items():
             x, y = pos
             screen_x, screen_y = self._world_to_screen(x, y)
             
@@ -592,30 +595,25 @@ class BoardGUI:
             # Get the appropriate sprite frame
             frame, should_flip = self.sprite_manager.get_frame(char, current_time)
             
-            if frame is not None:
-                # Scale the frame to match character size
-                scaled_frame = self.sprite_manager.scale_frame(frame, sprite_width, sprite_height)
-                
-                # Flip horizontally if needed (for right-facing)
-                if should_flip:
-                    scaled_frame = pygame.transform.flip(scaled_frame, True, False)
-                
-                # Calculate blit position (sprite centered on character position)
-                blit_x = int(pixel_cx - sprite_width / 2)
-                blit_y = int(pixel_cy - sprite_height / 2)
-                
-                # Draw the sprite
-                self.screen.blit(scaled_frame, (blit_x, blit_y))
-            else:
-                # Fallback to colored rectangle if no sprite
-                color = self._get_character_color(char)
-                color_rgb = hex_to_rgb(color)
-                rect_left = int(pixel_cx - sprite_width / 2)
-                rect_top = int(pixel_cy - sprite_height / 2)
-                pygame.draw.rect(self.screen, color_rgb, 
-                               (rect_left, rect_top, sprite_width, sprite_height))
-                pygame.draw.rect(self.screen, (0, 0, 0),
-                               (rect_left, rect_top, sprite_width, sprite_height), 1)
+            # Get the character's color (based on job or morality)
+            char_color = self._get_character_color(char)
+            
+            # Recolor the red clothing to the character's color
+            recolored_frame = self.sprite_manager.recolor_red_to_color(frame, char_color)
+            
+            # Scale the frame to match character size
+            scaled_frame = self.sprite_manager.scale_frame(recolored_frame, sprite_width, sprite_height)
+            
+            # Flip horizontally if needed (for right-facing)
+            if should_flip:
+                scaled_frame = pygame.transform.flip(scaled_frame, True, False)
+            
+            # Calculate blit position (sprite centered on character position)
+            blit_x = int(pixel_cx - sprite_width / 2)
+            blit_y = int(pixel_cy - sprite_height / 2)
+            
+            # Draw the sprite
+            self.screen.blit(scaled_frame, (blit_x, blit_y))
             
             # Draw first name below sprite
             first_name = char['name'].split()[0]
@@ -656,180 +654,67 @@ class BoardGUI:
                 pygame.draw.rect(self.screen, (0, 0, 0),
                                (hp_bar_x, hp_bar_y, hp_bar_width, hp_bar_height), 1)
     
-    def _draw_sword_swing(self, char, cx, cy, rect_width, rect_height):
-        """Draw sword swing animation arc if character is attacking."""
-        anim_start = char.get('attack_animation_start')
-        if anim_start is None:
-            return
+    def _draw_death_animations(self):
+        """Draw death animations for characters that have died.
         
-        # Calculate animation progress (0.0 to 1.0)
-        elapsed = time.time() - anim_start
-        if elapsed > ATTACK_ANIMATION_DURATION:
-            # Animation finished - clear it
-            char['attack_animation_start'] = None
-            char['attack_direction'] = None
-            return
+        Death animations are purely visual - the characters have already been
+        removed from game logic. This renders the death sprite at their last position.
+        """
+        DEATH_ANIMATION_DURATION = 0.9  # 6 frames at 150ms each
+        current_time = time.time()
+        cell_size = self._cam_cell_size
         
-        progress = elapsed / ATTACK_ANIMATION_DURATION
+        # Remove expired animations
+        self.state.death_animations = [
+            anim for anim in self.state.death_animations
+            if current_time - anim['start_time'] < DEATH_ANIMATION_DURATION
+        ]
         
-        # Sword parameters
-        sword_length = int(rect_height * 1.2)  # Sword is slightly longer than character height
-        sword_width = max(2, int(3 * self.zoom))
-        
-        # Attack direction determines swing arc
-        attack_dir = char.get('attack_direction', 'right')
-        
-        # Calculate swing angle based on progress
-        # Swing goes from -60 degrees to +60 degrees (120 degree arc)
-        # Using eased animation for snappy feel
-        ease_progress = 1 - (1 - progress) ** 3  # Ease out cubic
-        swing_angle = -60 + (120 * ease_progress)
-        
-        # Base angle depends on attack direction
-        if attack_dir == 'right':
-            base_angle = 0
-            origin_x = cx + rect_width // 2
-            origin_y = cy
-        elif attack_dir == 'left':
-            base_angle = 180
-            origin_x = cx - rect_width // 2
-            origin_y = cy
-        elif attack_dir == 'down':
-            base_angle = 90
-            origin_x = cx
-            origin_y = cy + rect_height // 2
-        else:  # up
-            base_angle = -90
-            origin_x = cx
-            origin_y = cy - rect_height // 2
-        
-        # Calculate sword endpoint
-        total_angle = math.radians(base_angle + swing_angle)
-        end_x = origin_x + int(sword_length * math.cos(total_angle))
-        end_y = origin_y + int(sword_length * math.sin(total_angle))
-        
-        # Draw sword blade (silver/gray)
-        pygame.draw.line(self.screen, (180, 180, 200), 
-                        (int(origin_x), int(origin_y)), 
-                        (int(end_x), int(end_y)), 
-                        sword_width)
-        
-        # Draw sword edge highlight
-        pygame.draw.line(self.screen, (220, 220, 240),
-                        (int(origin_x), int(origin_y)),
-                        (int(end_x), int(end_y)),
-                        max(1, sword_width // 2))
-        
-        # Draw swing trail (motion blur effect)
-        if progress < 0.8:
-            trail_alpha = int(100 * (1 - progress))
-            # Draw a few trail lines behind the current position
-            for i in range(3):
-                trail_progress = max(0, ease_progress - (i + 1) * 0.15)
-                trail_angle = math.radians(base_angle + (-60 + 120 * trail_progress))
-                trail_end_x = origin_x + int(sword_length * math.cos(trail_angle))
-                trail_end_y = origin_y + int(sword_length * math.sin(trail_angle))
-                trail_color = (150, 150, 170)
-                pygame.draw.line(self.screen, trail_color,
-                               (int(origin_x), int(origin_y)),
-                               (int(trail_end_x), int(trail_end_y)),
-                               max(1, sword_width - i - 1))
-    
-    def _draw_character_eyes(self, char, cx, eye_y, rect_width):
-        """Draw eyes based on facing direction. Eyes are always at eye_y (10% from top)."""
-        facing = char.get('facing', 'down')
-        eye_radius = 2
-        eye_color = (255, 255, 255)
-        pupil_color = (0, 0, 0)
-        
-        # Eye spread based on rectangle width
-        eye_spread = rect_width // 4
-        
-        if facing == 'down':
-            left_eye_x = cx - eye_spread
-            right_eye_x = cx + eye_spread
-            pupil_offset_x, pupil_offset_y = 0, 1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y, 
-                                          eye_radius, eye_color, pupil_color, 
-                                          pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'up':
-            left_eye_x = cx - eye_spread
-            right_eye_x = cx + eye_spread
-            pupil_offset_x, pupil_offset_y = 0, -1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
-                                          eye_radius, eye_color, pupil_color,
-                                          pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'left':
-            eye_x = cx - eye_spread
-            top_eye_y = eye_y - 2
-            bottom_eye_y = eye_y + 4
-            pupil_offset_x, pupil_offset_y = -1, 0
-            self._draw_eye_pair_vertical(eye_x, top_eye_y, bottom_eye_y,
-                                        eye_radius, eye_color, pupil_color,
-                                        pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'right':
-            eye_x = cx + eye_spread
-            top_eye_y = eye_y - 2
-            bottom_eye_y = eye_y + 4
-            pupil_offset_x, pupil_offset_y = 1, 0
-            self._draw_eye_pair_vertical(eye_x, top_eye_y, bottom_eye_y,
-                                        eye_radius, eye_color, pupil_color,
-                                        pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'up-left':
-            left_eye_x = cx - eye_spread
-            right_eye_x = cx + eye_spread // 2
-            pupil_offset_x, pupil_offset_y = -1, -1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
-                                          eye_radius, eye_color, pupil_color,
-                                          pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'up-right':
-            left_eye_x = cx - eye_spread // 2
-            right_eye_x = cx + eye_spread
-            pupil_offset_x, pupil_offset_y = 1, -1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
-                                          eye_radius, eye_color, pupil_color,
-                                          pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'down-left':
-            left_eye_x = cx - eye_spread
-            right_eye_x = cx + eye_spread // 2
-            pupil_offset_x, pupil_offset_y = -1, 1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
-                                          eye_radius, eye_color, pupil_color,
-                                          pupil_offset_x, pupil_offset_y)
-        
-        elif facing == 'down-right':
-            left_eye_x = cx - eye_spread // 2
-            right_eye_x = cx + eye_spread
-            pupil_offset_x, pupil_offset_y = 1, 1
-            self._draw_eye_pair_horizontal(left_eye_x, right_eye_x, eye_y,
-                                          eye_radius, eye_color, pupil_color,
-                                          pupil_offset_x, pupil_offset_y)
-    
-    def _draw_eye_pair_horizontal(self, left_x, right_x, y, radius, eye_color, pupil_color, pupil_dx, pupil_dy):
-        """Draw horizontally arranged eyes"""
-        # Left eye
-        pygame.draw.circle(self.screen, eye_color, (left_x, y), radius)
-        pygame.draw.circle(self.screen, pupil_color, (left_x + pupil_dx, y + pupil_dy), 1)
-        
-        # Right eye
-        pygame.draw.circle(self.screen, eye_color, (right_x, y), radius)
-        pygame.draw.circle(self.screen, pupil_color, (right_x + pupil_dx, y + pupil_dy), 1)
-    
-    def _draw_eye_pair_vertical(self, x, top_y, bottom_y, radius, eye_color, pupil_color, pupil_dx, pupil_dy):
-        """Draw vertically arranged eyes"""
-        # Top eye
-        pygame.draw.circle(self.screen, eye_color, (x, top_y), radius)
-        pygame.draw.circle(self.screen, pupil_color, (x + pupil_dx, top_y + pupil_dy), 1)
-        
-        # Bottom eye
-        pygame.draw.circle(self.screen, eye_color, (x, bottom_y), radius)
-        pygame.draw.circle(self.screen, pupil_color, (x + pupil_dx, bottom_y + pupil_dy), 1)
+        for anim in self.state.death_animations:
+            # Transform world position to screen position
+            pixel_cx, pixel_cy = self._world_to_screen(anim['x'], anim['y'])
+            
+            # Sprite dimensions scaled by zoom
+            sprite_height = int(CHARACTER_HEIGHT * cell_size)
+            sprite_width = int(CHARACTER_WIDTH * cell_size)
+            
+            # Create a fake char dict for the sprite manager
+            fake_char = {
+                'name': anim['name'],
+                'facing': anim['facing'],
+                'health': 0,  # Marks as dead for death animation
+                'death_animation_start': anim['start_time'],
+                'vx': 0, 'vy': 0
+            }
+            
+            # Get the death animation frame
+            frame, should_flip = self.sprite_manager.get_frame(fake_char, current_time)
+            
+            # Get color based on job/morality (same logic as _get_character_color)
+            job = anim.get('job')
+            if job in JOB_TIERS and "color" in JOB_TIERS[job]:
+                color = JOB_TIERS[job]["color"]
+            else:
+                morality = anim.get('morality', 5)
+                t = (morality - 1) / 9.0
+                r = int(0 + t * 173)
+                g = int(0 + t * 216)
+                b = int(139 + t * (230 - 139))
+                color = f"#{r:02x}{g:02x}{b:02x}"
+            
+            # Recolor and scale the frame
+            recolored_frame = self.sprite_manager.recolor_red_to_color(frame, color)
+            scaled_frame = self.sprite_manager.scale_frame(recolored_frame, sprite_width, sprite_height)
+            
+            if should_flip:
+                scaled_frame = pygame.transform.flip(scaled_frame, True, False)
+            
+            # Calculate blit position
+            blit_x = int(pixel_cx - sprite_width / 2)
+            blit_y = int(pixel_cy - sprite_height / 2)
+            
+            # Draw the death animation sprite
+            self.screen.blit(scaled_frame, (blit_x, blit_y))
     
     def _get_cell_color(self, x, y):
         """Get the background color for a cell"""

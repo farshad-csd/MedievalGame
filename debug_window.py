@@ -80,30 +80,30 @@ class DebugWindowProcess:
         
         # Build barrel data
         barrels = {}
-        for pos, barrel in self.state.barrels.items():
+        for pos, barrel in self.state.interactables.barrels.items():
             barrels[pos] = {
-                'name': barrel['name'],
-                'home': barrel['home'],
-                'owner': barrel['owner'],
-                'inventory': barrel['inventory'][:],
+                'name': barrel.name,
+                'home': barrel.home,
+                'owner': barrel.owner,
+                'inventory': barrel.inventory[:],
             }
         
         # Build bed data
         beds = {}
-        for pos, bed in self.state.beds.items():
+        for pos, bed in self.state.interactables.beds.items():
             beds[pos] = {
-                'name': bed['name'],
-                'home': bed['home'],
-                'owner': bed['owner'],
+                'name': bed.name,
+                'home': bed.home,
+                'owner': bed.owner,
             }
         
         # Player info for status
         player_status = ""
         if self.state.player:
             p = self.state.player
-            player_food = self.state.get_wheat(p)
-            player_money = self.state.get_money(p)
-            player_status = f"Pos:({p['x']:.1f},{p['y']:.1f}) Wheat:{player_food} ${player_money} HP:{p['health']}"
+            player_food = p.get_item('wheat')
+            player_money = p.get_item('money')
+            player_status = f"Pos:({p.x:.1f},{p.y:.1f}) Wheat:{player_food} ${player_money} HP:{p.health}"
         
         return {
             'ticks': self.state.ticks,
@@ -145,10 +145,10 @@ class DebugWindowProcess:
         for _ in range(TICKS_PER_YEAR):
             self.logic.process_tick()
             
+            # Update NPC positions (player doesn't move during skip - no input)
             remaining = tick_duration
             while remaining > 0:
                 step = min(remaining, 0.05)
-                self.logic.update_player_position(step)
                 self.logic.update_npc_positions(step)
                 remaining -= step
         

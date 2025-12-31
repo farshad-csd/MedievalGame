@@ -9,7 +9,7 @@ import json
 # =============================================================================
 # RAW WORLD DATA (JSON-serializable)
 # =============================================================================
-WORLD_DATA = generate_areas(30, 0, 1, seed=4, name="Dunmere", trees=0.0)
+WORLD_DATA = generate_areas(30, 0, 2, seed=4, name="Dunmere", trees=0.0)
 print(json.dumps(WORLD_DATA, indent=2))
 
 # =============================================================================

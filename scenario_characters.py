@@ -68,7 +68,6 @@ CHARACTER_TEMPLATES = {
         "morality": 4,
         "starting_allegiance": None,
         "starting_job": None,
-        "starting_home": None,
         "starting_money": 0,
         "starting_wheat": 0,
         "starting_age": 32,

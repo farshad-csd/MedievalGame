@@ -21,6 +21,7 @@ from constants import (
     STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT, TAX_GRACE_PERIOD,
     ALLEGIANCE_WHEAT_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
     CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
+    THEFT_PATIENCE_TICKS, THEFT_COOLDOWN_TICKS,
     SLEEP_START_FRACTION,
     MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
@@ -37,6 +38,7 @@ from constants import (
 )
 from scenario_world import SIZE
 from scenario_characters import CHARACTER_TEMPLATES
+from jobs import get_job
 
 
 class GameLogic:
@@ -62,24 +64,6 @@ class GameLogic:
     # HELPER METHODS
     # =========================================================================
     
-    def get_display_name(self, char):
-        """Get a short display name for logging (first name only)"""
-        return char['name'].split()[0]
-    
-    def is_player(self, char):
-        """Check if a character is player-controlled"""
-        template = CHARACTER_TEMPLATES.get(char['name'], {})
-        return template.get('is_player', False)
-    
-    def get_trait(self, char, trait_name):
-        """Get a trait value for a character. Morality is mutable, others are static."""
-        # Morality is stored on the character and can change
-        if trait_name == 'morality':
-            return char.get('morality', 5)
-        # Other traits are static from template
-        template = CHARACTER_TEMPLATES.get(char['name'], {})
-        return template.get(trait_name, 0)
-    
     def is_adjacent(self, char1, char2):
         """Check if two characters are adjacent (close enough to interact).
         Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
@@ -101,16 +85,169 @@ class GameLogic:
         last_attack_tick = char.get('last_attack_tick', -ATTACK_COOLDOWN_TICKS)
         return self.state.ticks - last_attack_tick >= ATTACK_COOLDOWN_TICKS
     
+    def resolve_attack(self, attacker, attack_direction=None):
+        """Resolve an attack from a character.
+        
+        This is the unified attack resolution used by BOTH player and NPCs.
+        Handles: finding targets, dealing damage, witnesses, death, loot.
+        
+        Args:
+            attacker: Character performing the attack
+            attack_direction: Optional direction ('up', 'down', 'left', 'right')
+                            If None, uses attacker's current facing
+        
+        Returns:
+            List of characters that were hit
+        """
+        if attack_direction is None:
+            attack_direction = attacker.get('facing', 'down')
+        
+        attacker_name = attacker.get_display_name()
+        
+        # Get direction vector
+        dx, dy = self._get_direction_vector(attack_direction)
+        
+        # Find targets in attack arc
+        targets_hit = []
+        for char in self.state.characters:
+            if char is attacker:
+                continue
+            
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Calculate relative position
+            rel_x = char.x - attacker.x
+            rel_y = char.y - attacker.y
+            
+            # Project onto attack direction
+            if dx != 0 or dy != 0:
+                proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
+                perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
+                
+                # Hit if within range in attack direction and within swing width
+                if 0 < proj_dist <= COMBAT_RANGE and perp_dist < 0.7:
+                    targets_hit.append(char)
+        
+        # Log miss if no targets
+        if not targets_hit:
+            self.state.log_action(f"{attacker_name} swings sword (missed)")
+            return []
+        
+        # Determine if attacker is a criminal
+        attacker_is_criminal = (
+            attacker.get('is_aggressor', False) or 
+            attacker.get('is_murderer', False) or 
+            attacker.get('is_thief', False)
+        )
+        
+        # Deal damage to all targets
+        for target in targets_hit:
+            target_name = target.get_display_name()
+            
+            # Calculate and apply damage
+            damage = random.randint(2, 5)
+            target.health -= damage
+            self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
+            
+            # Check if target was a criminal
+            target_was_criminal = (
+                target.get('is_aggressor', False) or 
+                target.get('is_murderer', False) or 
+                target.get('is_thief', False)
+            )
+            
+            # If attacking an innocent, mark as aggressor
+            if not target_was_criminal and not attacker_is_criminal:
+                attacker.is_aggressor = True
+                attacker_is_criminal = True
+                # Witness non-lethal attack if target survives
+                if target.health > 0:
+                    self.witness_murder(attacker, target, is_lethal=False)
+            
+            # Handle death
+            if target.health <= 0:
+                if target_was_criminal and not attacker_is_criminal:
+                    # Justified kill
+                    self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
+                else:
+                    attacker.is_murderer = True
+                    self.witness_murder(attacker, target, is_lethal=True)
+                
+                # Transfer items to attacker
+                attacker.transfer_all_items_from(target)
+        
+        return targets_hit
+    
+    def resolve_melee_attack(self, attacker, target):
+        """Resolve a direct melee attack against a specific target.
+        
+        Used by NPCs who have a specific target (robbery, combat).
+        
+        Args:
+            attacker: Character performing the attack
+            target: Character being attacked
+            
+        Returns:
+            dict with 'hit', 'damage', 'killed' keys
+        """
+        result = {'hit': False, 'damage': 0, 'killed': False}
+        
+        if target is None or target not in self.state.characters:
+            return result
+        
+        if target.get('health', 100) <= 0:
+            return result
+        
+        attacker_name = attacker.get_display_name()
+        target_name = target.get_display_name()
+        
+        # Check if in range
+        if not self.is_adjacent(attacker, target):
+            return result
+        
+        result['hit'] = True
+        
+        # Apply damage
+        damage = random.randint(2, 5)
+        result['damage'] = damage
+        target.health -= damage
+        self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
+        
+        # Check criminal status
+        attacker_is_criminal = (
+            attacker.get('is_aggressor', False) or 
+            attacker.get('is_murderer', False) or 
+            attacker.get('is_thief', False)
+        )
+        target_was_criminal = (
+            target.get('is_aggressor', False) or 
+            target.get('is_murderer', False) or 
+            target.get('is_thief', False)
+        )
+        
+        # Handle death
+        if target.health <= 0:
+            result['killed'] = True
+            
+            if not attacker_is_criminal and target_was_criminal:
+                self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
+            else:
+                attacker.is_murderer = True
+                self.witness_murder(attacker, target, is_lethal=True)
+            
+            # Transfer items
+            attacker.transfer_all_items_from(target)
+        
+        return result
+    
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
         for other in self.state.characters:
             if other != char and self.is_adjacent(char, other):
                 return other
         return None
-    
-    def get_distance(self, char1, char2):
-        """Euclidean distance between two characters (float-based)."""
-        return math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
     
     def _update_facing(self, char, dx, dy):
         """Update character's facing direction based on movement delta"""
@@ -135,23 +272,14 @@ class GameLogic:
     # SLEEP HELPERS
     # =========================================================================
     
-    def is_sleep_time(self):
-        """Check if it's currently sleep time (latter 1/3 of day)"""
-        day_tick = self.state.ticks % TICKS_PER_DAY
-        return day_tick >= TICKS_PER_DAY * SLEEP_START_FRACTION
-    
-    def get_character_bed(self, char):
-        """Get the bed owned by this character, if any"""
-        return self.state.get_bed_by_owner(char['name'])
-    
     def get_sleep_position(self, char):
         """Get the position where this character should sleep.
         Returns bed position if they own one, camp position if they have one, None otherwise.
         """
         # Check for owned bed
-        bed = self.get_character_bed(char)
+        bed = self.state.get_character_bed(char)
         if bed:
-            return self.state.get_bed_position(bed)
+            return bed.position
         
         # Check for existing camp
         if char.get('camp_position'):
@@ -185,78 +313,25 @@ class GameLogic:
         cell_y = int(char['y'])
         if self.can_make_camp_at(cell_x, cell_y):
             char['camp_position'] = (cell_x, cell_y)
-            name = self.get_display_name(char)
+            name = char.get_display_name()
             self.state.log_action(f"{name} made a camp at ({cell_x}, {cell_y})")
             return True
         return False
-
-    # =========================================================================
-    # INVENTORY HELPERS (convenience wrappers around state methods)
-    # =========================================================================
-    
-    def get_wheat(self, char):
-        """Get total wheat from character's inventory."""
-        return self.state.get_wheat(char)
-    
-    def get_money(self, char):
-        """Get total money from character's inventory."""
-        return self.state.get_money(char)
-    
-    def add_wheat(self, char, amount):
-        """Add wheat to character's inventory."""
-        return self.state.add_wheat(char, amount)
-    
-    def remove_wheat(self, char, amount):
-        """Remove wheat from character's inventory."""
-        return self.state.remove_wheat(char, amount)
-    
-    def add_money(self, char, amount):
-        """Add money to character's inventory."""
-        return self.state.add_money(char, amount)
-    
-    def remove_money(self, char, amount):
-        """Remove money from character's inventory."""
-        return self.state.remove_money(char, amount)
-    
-    def can_add_wheat(self, char, amount=1):
-        """Check if character can add wheat to inventory."""
-        return self.state.can_add_wheat(char, amount)
-    
-    def can_add_money(self, char):
-        """Check if character can add money to inventory."""
-        return self.state.can_add_money(char)
-    
-    def has_money_slot(self, char):
-        """Check if character has a money slot."""
-        return self.state.has_money_slot(char)
-    
-    def is_inventory_full(self, char):
-        """Check if inventory is full."""
-        return self.state.is_inventory_full(char)
-    
-    # =========================================================================
-    # BREAD INVENTORY HELPERS (convenience wrappers around state methods)
-    # =========================================================================
-    
-    def get_bread(self, char):
-        """Get total bread from character's inventory."""
-        return self.state.get_bread(char)
-    
-    def add_bread(self, char, amount):
-        """Add bread to character's inventory."""
-        return self.state.add_bread(char, amount)
-    
-    def remove_bread(self, char, amount):
-        """Remove bread from character's inventory."""
-        return self.state.remove_bread(char, amount)
-    
-    def can_add_bread(self, char, amount=1):
-        """Check if character can add bread to inventory."""
-        return self.state.can_add_bread(char, amount)
     
     # =========================================================================
     # STOVE / CAMPFIRE BAKING SYSTEM
     # =========================================================================
+    
+    def get_adjacent_camp(self, char):
+        """Get any camp adjacent to the character.
+        Returns (camp_position, owner_char) tuple or (None, None).
+        Note: Camps are stored on characters, not in interactables.
+        """
+        for other_char in self.state.characters:
+            camp_pos = other_char.get('camp_position')
+            if camp_pos and self.state.interactables.is_adjacent_to_camp(char, camp_pos):
+                return camp_pos, other_char
+        return None, None
     
     def get_adjacent_cooking_spot(self, char):
         """Get any adjacent cooking spot (stove the char can use, or any campfire).
@@ -264,8 +339,8 @@ class GameLogic:
         Returns None if no cooking spot is adjacent.
         """
         # Check for stove first - must be one the character can use
-        stove = self.state.get_adjacent_stove(char)
-        if stove and self.state.can_use_stove(char, stove):
+        stove = self.state.interactables.get_adjacent_stove(char)
+        if stove and stove.can_use(char):
             return {
                 'type': 'stove',
                 'name': stove.get('name', 'stove'),
@@ -273,9 +348,9 @@ class GameLogic:
             }
         
         # Check for any campfire (anyone can use any campfire)
-        camp_pos, camp_owner = self.state.get_adjacent_camp(char)
+        camp_pos, camp_owner = self.get_adjacent_camp(char)
         if camp_pos:
-            owner_name = self.get_display_name(camp_owner) if camp_owner else 'unknown'
+            owner_name = camp_owner.get_display_name() if camp_owner else 'unknown'
             return {
                 'type': 'camp',
                 'name': f"{owner_name}'s campfire",
@@ -294,11 +369,11 @@ class GameLogic:
             return False
         
         # Must have wheat to convert
-        if self.get_wheat(char) < WHEAT_TO_BREAD_RATIO:
+        if char.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
             return False
         
         # Must have space for bread
-        if not self.can_add_bread(char, 1):
+        if not char.can_add_item('bread', 1):
             return False
         
         return True
@@ -312,8 +387,8 @@ class GameLogic:
         if not cooking_spot:
             return 0
         
-        name = self.get_display_name(char)
-        wheat_available = self.get_wheat(char)
+        name = char.get_display_name()
+        wheat_available = char.get_item('wheat')
         max_from_wheat = wheat_available // WHEAT_TO_BREAD_RATIO
         
         # Calculate how much we can actually bake
@@ -323,14 +398,14 @@ class GameLogic:
         # Check inventory space iteratively (in case we can only fit some)
         actually_baked = 0
         for _ in range(to_bake):
-            if not self.can_add_bread(char, 1):
+            if not char.can_add_item('bread', 1):
                 break
-            if self.get_wheat(char) < WHEAT_TO_BREAD_RATIO:
+            if char.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
                 break
             
             # Convert wheat to bread
-            self.remove_wheat(char, WHEAT_TO_BREAD_RATIO)
-            self.add_bread(char, 1)
+            char.remove_item('wheat', WHEAT_TO_BREAD_RATIO)
+            char.add_item('bread', 1)
             actually_baked += 1
         
         if actually_baked > 0:
@@ -348,8 +423,8 @@ class GameLogic:
         best_dist = float('inf')
         
         # Check stoves the character can use (home matches)
-        for pos, stove in self.state.stoves.items():
-            if not self.state.can_use_stove(char, stove):
+        for pos, stove in self.state.interactables.stoves.items():
+            if not stove.can_use(char):
                 continue
             sx, sy = pos
             stove_cx = sx + 0.5
@@ -373,7 +448,7 @@ class GameLogic:
                 dist = math.sqrt((char['x'] - camp_center[0]) ** 2 + (char['y'] - camp_center[1]) ** 2)
                 if dist < best_dist:
                     best_dist = dist
-                    owner_name = self.get_display_name(other_char)
+                    owner_name = other_char.get_display_name()
                     best_spot = {
                         'type': 'camp',
                         'name': f"{owner_name}'s campfire",
@@ -389,8 +464,8 @@ class GameLogic:
         best_pos = None
         best_dist = float('inf')
         
-        for pos, stove in self.state.stoves.items():
-            if not self.state.can_use_stove(char, stove):
+        for pos, stove in self.state.interactables.stoves.items():
+            if not stove.can_use(char):
                 continue
             sx, sy = pos
             stove_cx = sx + 0.5
@@ -406,7 +481,7 @@ class GameLogic:
     def has_access_to_cooking(self, char):
         """Check if character has access to any cooking spot (stove they can use or any camp)."""
         # Check for stoves they can use
-        if self.state.get_stoves_for_char(char):
+        if self.state.interactables.get_stoves_for_char(char):
             return True
         
         # Check for any campfire
@@ -420,21 +495,10 @@ class GameLogic:
     # STEWARD / TAX SYSTEM
     # =========================================================================
     
-    def get_steward(self):
-        """Get the steward character"""
-        for char in self.state.characters:
-            if char.get('job') == 'Steward':
-                return char
-        return None
-    
     def steward_has_wheat(self):
         """Check if barracks barrel has wheat to pay soldiers"""
-        barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-        return barracks_barrel is not None and self.state.get_barrel_wheat(barracks_barrel) > 0
-    
-    def get_allegiance_count(self, allegiance):
-        """Count all characters with a specific allegiance"""
-        return sum(1 for c in self.state.characters if c.get('allegiance') == allegiance)
+        barracks_barrel = self.state.interactables.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+        return barracks_barrel is not None and barracks_barrel.get_item('wheat') > 0
     
     def get_steward_wheat_target(self, steward):
         """Calculate how much wheat steward wants to stockpile.
@@ -442,7 +506,7 @@ class GameLogic:
         (~3 wheat per person per day to maintain hunger)
         """
         allegiance = steward.get('allegiance')
-        village_mouths = self.get_allegiance_count(allegiance) if allegiance else 0
+        village_mouths = self.state.get_allegiance_count(allegiance) if allegiance else 0
         wheat_per_person_per_day = 3
         days_to_stockpile = 2
         return village_mouths * wheat_per_person_per_day * days_to_stockpile
@@ -450,248 +514,19 @@ class GameLogic:
     def steward_needs_to_buy_wheat(self, steward):
         """Check if barracks barrel wheat supply is below target"""
         target = self.get_steward_wheat_target(steward)
-        barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+        barracks_barrel = self.state.interactables.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
         if not barracks_barrel:
             return True
-        return self.state.get_barrel_wheat(barracks_barrel) < target
+        return barracks_barrel.get_item('wheat') < target
     
     # =========================================================================
     # TRADING SYSTEM
     # =========================================================================
-    
-    def find_adjacent_farmer(self, char):
-        """Find a farmer adjacent to this character (within ADJACENCY_DISTANCE)"""
-        for other in self.state.characters:
-            if other != char and other.get('job') == 'Farmer':
-                if self.is_adjacent(char, other):
-                    return other
-        return None
-    
-    def find_nearest_farmer(self, char):
-        """Find the nearest farmer"""
-        best_farmer = None
-        best_dist = float('inf')
-        
-        for other in self.state.characters:
-            if other.get('job') == 'Farmer':
-                dist = self.get_distance(char, other)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_farmer = other
-        
-        return best_farmer
-    
-    def find_willing_farmer(self, char):
-        """Find the nearest farmer who is willing to trade with this character"""
-        best_farmer = None
-        best_dist = float('inf')
-        
-        for other in self.state.characters:
-            if other.get('job') == 'Farmer':
-                if self.farmer_willing_to_trade(other, char):
-                    dist = self.get_distance(char, other)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_farmer = other
-        
-        return best_farmer
-    
-    def any_valid_wheat_seller_exists(self, char):
-        """Check if any farmer exists who could potentially sell to this character"""
-        char_allegiance = char.get('allegiance')
-        
-        for other in self.state.characters:
-            if other.get('job') == 'Farmer':
-                farmer_allegiance = other.get('allegiance')
-                if char_allegiance is None or farmer_allegiance is None:
-                    return True
-                if char_allegiance == farmer_allegiance:
-                    return True
-        return False
-    
-    def get_farmer_expected_production(self, farmer):
-        """Estimate how much wheat the farmer can produce before tax is due.
-        Returns an integer (or a very large number if no tax constraint).
-        """
-        # Only farmers with an allegiance owe tax
-        if not farmer.get('allegiance'):
-            return 999999  # No allegiance = no tax = effectively unlimited
-        
-        # Check if tax is due
-        tax_due_tick = farmer.get('tax_due_tick')
-        if tax_due_tick is None:
-            return 999999  # No tax due yet
-        
-        # If tax is already overdue, no selling allowed
-        if self.state.ticks >= tax_due_tick:
-            return 0
-        
-        # Calculate time until tax is due
-        ticks_until_tax = tax_due_tick - self.state.ticks
-        
-        # Estimate wheat production capacity using integer math
-        # Farmer works half the day, farm cells yield 1 wheat per harvest cycle
-        # Rough estimate: 1 wheat per farm cell per day when working
-        num_farm_cells = len(self.state.farm_cells)
-        # Integer calculation: (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
-        expected_production = (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
-        
-        return expected_production
-    
-    def get_farmer_sellable_wheat(self, farmer):
-        """Calculate how much wheat the farmer can sell while staying on track for taxes.
-        
-        Logic: sellable = current_wheat + expected_future_production - tax_target
-        Where tax_target includes a buffer for interruptions.
-        All calculations use integer math - items are always whole numbers.
-        
-        Note: Farmers don't keep a wheat reserve for personal consumption - they convert
-        wheat to bread and maintain a bread buffer like all other characters.
-        """
-        # Get current wheat (inventory + barrel) - these are always integers
-        farmer_wheat = self.get_wheat(farmer)
-        farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-        barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
-        current_wheat = int(farmer_wheat + barrel_wheat)
-        
-        expected_production = self.get_farmer_expected_production(farmer)
-        
-        # No tax constraint - can sell all wheat
-        if expected_production >= 999999:
-            return current_wheat
-        
-        # Tax target with buffer for interruptions (1.5x = 3/2)
-        tax_target = (STEWARD_TAX_AMOUNT * 3) // 2
-        
-        # Sellable = what we have + what we'll produce - what we need for taxes
-        sellable = current_wheat + expected_production - tax_target
-        
-        # Can't sell more than current stock
-        sellable = min(sellable, current_wheat)
-        
-        return max(0, sellable)
-    
-    def farmer_willing_to_trade(self, farmer, buyer, amount=None):
-        """Check if farmer is willing to trade with this buyer.
-        If amount is None, checks if farmer can sell at least 1 wheat.
-        If amount is specified, checks if farmer can sell that exact amount.
-        """
-        # Check buyer's trade cooldown
-        last_trade = buyer.get('last_trade_tick', -TRADE_COOLDOWN)
-        if self.state.ticks - last_trade < TRADE_COOLDOWN:
-            return False
-        
-        # Don't trade with known criminals the farmer cares about
-        if self.cares_about_criminal(farmer, buyer):
-            return False
-        
-        buyer_allegiance = buyer.get('allegiance')
-        farmer_allegiance = farmer.get('allegiance')
-        
-        if buyer_allegiance is not None:
-            if farmer_allegiance != buyer_allegiance:
-                return False
-        
-        # Check if farmer can afford to sell this amount
-        sellable = self.get_farmer_sellable_wheat(farmer)
-        min_amount = amount if amount is not None else 1
-        if sellable < min_amount:
-            return False
-        
-        # Check if farmer has space for money
-        if not self.can_add_money(farmer):
-            return False
-        
-        # Check if buyer has space for wheat (if amount specified)
-        if amount is not None and not self.can_add_wheat(buyer, amount):
-            return False
-        
-        return True
-    
-    def get_max_trade_amount(self, farmer, buyer):
-        """Calculate the maximum wheat that can be traded between farmer and buyer.
-        Takes into account: farmer's sellable wheat, buyer's money, buyer's inventory space,
-        and how much wheat the buyer actually wants.
-        All values are integers.
-        """
-        sellable = self.get_farmer_sellable_wheat(farmer)
-        if sellable <= 0:
-            return 0
-        
-        # How much can buyer afford? (integer division)
-        buyer_money = int(self.get_money(buyer))
-        affordable = buyer_money // ITEMS["wheat"]["price"]
-        
-        # How much space does buyer have?
-        buyer_space = self.state.get_inventory_space(buyer)
-        
-        # How much does buyer actually want?
-        desired = self.get_desired_wheat_amount(buyer)
-        
-        return max(0, min(sellable, affordable, buyer_space, desired))
-    
-    def get_desired_wheat_amount(self, char):
-        """Calculate how much wheat a character wants to buy.
-        Characters buy wheat as a raw material (for bread-making).
-        They want enough to fill hunger (converted to bread) + buffer.
-        All values are integers.
-        """
-        current_wheat = int(self.get_wheat(char))
-        current_bread = int(self.get_bread(char))
-        
-        # Want enough wheat to fill hunger deficit (will be converted to bread)
-        hunger_deficit = int(MAX_HUNGER - char['hunger'])
-        wheat_for_hunger = max(0, hunger_deficit // ITEMS["bread"]["hunger_value"] + 1)
-        
-        # Account for bread we already have
-        wheat_for_hunger = max(0, wheat_for_hunger - current_bread)
-        
-        # Also want buffer (BREAD_BUFFER_TARGET worth of wheat)
-        buffer_want = max(0, BREAD_BUFFER_TARGET - current_wheat - current_bread)
-        
-        return wheat_for_hunger + buffer_want
-    
-    def can_afford_any_wheat(self, char):
-        """Check if character can afford at least 1 wheat."""
-        return self.get_money(char) >= ITEMS["wheat"]["price"]
-    
-    def execute_trade(self, farmer, buyer, amount):
-        """Execute a wheat trade between farmer and buyer.
-        Farmer sells from inventory first, then from barrel if needed.
-        """
-        if amount <= 0:
-            return
-        
-        price = int(amount * ITEMS["wheat"]["price"])
-        amount_needed = amount
-        
-        # First take from farmer's inventory
-        farmer_wheat = self.get_wheat(farmer)
-        from_inventory = min(farmer_wheat, amount_needed)
-        if from_inventory > 0:
-            self.remove_wheat(farmer, from_inventory)
-            amount_needed -= from_inventory
-        
-        # If still need more, take from barrel
-        if amount_needed > 0:
-            farm_barrel = self.state.get_barrel_by_home(farmer.get('home', self.state.get_area_by_role('farm')))
-            if farm_barrel:
-                self.state.remove_barrel_wheat(farm_barrel, amount_needed)
-        
-        self.add_money(farmer, price)
-        self.remove_money(buyer, price)
-        self.add_wheat(buyer, amount)
-        
-        # Set buyer's trade cooldown
-        buyer['last_trade_tick'] = self.state.ticks
-    
-    # =========================================================================
-    # GENERALIZED VENDOR SYSTEM
-    # =========================================================================
-    # Characters buy goods from the nearest vendor that sells what they need
+    # Unified vendor system - all characters buy goods from vendors
+    # Vendors are defined by VENDOR_GOODS mapping (job -> [goods_types])
     
     def get_vendors_selling(self, goods_type):
-        """Get list of all characters who sell a specific goods type"""
+        """Get list of all characters who sell a specific goods type."""
         vendors = []
         for char in self.state.characters:
             job = char.get('job')
@@ -701,21 +536,21 @@ class GameLogic:
         return vendors
     
     def is_vendor_of(self, char, goods_type):
-        """Check if a character sells a specific goods type"""
+        """Check if a character sells a specific goods type."""
         job = char.get('job')
         if not job or job not in VENDOR_GOODS:
             return False
         return goods_type in VENDOR_GOODS[job]
     
     def find_nearest_vendor(self, char, goods_type):
-        """Find the nearest vendor selling a specific goods type"""
+        """Find the nearest vendor selling a specific goods type."""
         best_vendor = None
         best_dist = float('inf')
         
         for vendor in self.get_vendors_selling(goods_type):
             if vendor == char:  # Can't buy from self
                 continue
-            dist = self.get_distance(char, vendor)
+            dist = self.state.get_distance(char, vendor)
             if dist < best_dist:
                 best_dist = dist
                 best_vendor = vendor
@@ -723,7 +558,7 @@ class GameLogic:
         return best_vendor
     
     def find_adjacent_vendor(self, char, goods_type):
-        """Find an adjacent vendor selling a specific goods type (within ADJACENCY_DISTANCE)"""
+        """Find an adjacent vendor selling a specific goods type."""
         for vendor in self.state.characters:
             if vendor != char and self.is_vendor_of(vendor, goods_type):
                 if self.is_adjacent(char, vendor):
@@ -731,7 +566,7 @@ class GameLogic:
         return None
     
     def find_willing_vendor(self, char, goods_type):
-        """Find the nearest vendor willing to trade this goods type with this character"""
+        """Find the nearest vendor willing to trade this goods type."""
         best_vendor = None
         best_dist = float('inf')
         
@@ -739,7 +574,7 @@ class GameLogic:
             if vendor == char:
                 continue
             if self.vendor_willing_to_trade(vendor, char, goods_type):
-                dist = self.get_distance(char, vendor)
+                dist = self.state.get_distance(char, vendor)
                 if dist < best_dist:
                     best_dist = dist
                     best_vendor = vendor
@@ -747,7 +582,7 @@ class GameLogic:
         return best_vendor
     
     def any_valid_vendor_exists(self, char, goods_type):
-        """Check if any vendor exists who could potentially sell to this character"""
+        """Check if any vendor exists who could potentially sell to this character."""
         char_allegiance = char.get('allegiance')
         
         for vendor in self.get_vendors_selling(goods_type):
@@ -763,44 +598,125 @@ class GameLogic:
     
     def get_vendor_sellable_goods(self, vendor, goods_type):
         """Calculate how much of a goods type the vendor can sell.
-        For farmers, uses the special tax-aware calculation.
-        For other vendors, uses simpler inventory-based calculation.
-        All values are integers.
         
-        Note: Vendors don't keep personal reserves of goods - they maintain a bread
-        buffer for personal consumption like all other characters.
+        For farmers selling wheat, uses tax-aware calculation.
+        For other vendors, returns entire stock.
         """
         job = vendor.get('job')
         
         # Farmers have special tax-aware wheat selling logic
         if job == 'Farmer' and goods_type == 'wheat':
-            return self.get_farmer_sellable_wheat(vendor)
+            return self._get_farmer_sellable_wheat(vendor)
         
         # For other vendors, can sell entire stock
-        current_stock = int(self.get_goods_amount(vendor, goods_type))
-        return current_stock
+        return int(self.get_goods_amount(vendor, goods_type))
+    
+    def _get_farmer_sellable_wheat(self, farmer):
+        """Calculate how much wheat a farmer can sell while staying on track for taxes.
+        
+        Logic: sellable = current_wheat + expected_future_production - tax_target
+        Internal helper - use get_vendor_sellable_goods(vendor, 'wheat') instead.
+        """
+        # Get current wheat (inventory + barrel)
+        farmer_wheat = farmer.get_item('wheat')
+        farm_barrel = self.state.interactables.get_barrel_by_home(farmer.get('home'))
+        barrel_wheat = farm_barrel.get_item('wheat') if farm_barrel else 0
+        current_wheat = int(farmer_wheat + barrel_wheat)
+        
+        # Calculate expected production before tax is due
+        expected_production = self._get_farmer_expected_production(farmer)
+        
+        # No tax constraint - can sell all wheat
+        if expected_production >= 999999:
+            return current_wheat
+        
+        # Tax target with buffer for interruptions (1.5x)
+        tax_target = (STEWARD_TAX_AMOUNT * 3) // 2
+        
+        # Sellable = what we have + what we'll produce - what we need for taxes
+        sellable = current_wheat + expected_production - tax_target
+        
+        # Can't sell more than current stock
+        return max(0, min(sellable, current_wheat))
+    
+    def _get_farmer_expected_production(self, farmer):
+        """Estimate how much wheat the farmer can produce before tax is due.
+        Internal helper for tax calculations.
+        """
+        # Only farmers with an allegiance owe tax
+        if not farmer.get('allegiance'):
+            return 999999  # No allegiance = no tax
+        
+        tax_due_tick = farmer.get('tax_due_tick')
+        if tax_due_tick is None:
+            return 999999  # No tax due yet
+        
+        # If tax is already overdue, no selling allowed
+        if self.state.ticks >= tax_due_tick:
+            return 0
+        
+        # Calculate time until tax is due
+        ticks_until_tax = tax_due_tick - self.state.ticks
+        
+        # Count farm cells belonging to this farmer's home
+        farmer_home = farmer.get('home')
+        num_farm_cells = sum(1 for cell in self.state.farm_cells.values() 
+                           if cell.get('home') == farmer_home)
+        
+        # Rough estimate: 1 wheat per farm cell per day when working half the day
+        expected_production = (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
+        
+        return expected_production
     
     def get_goods_amount(self, char, goods_type):
-        """Get total amount of a goods type in character's inventory.
-        Currently only 'wheat' and 'money' are implemented in inventory.
-        Other goods types return 0 (placeholder for future expansion).
-        """
+        """Get total amount of a goods type in character's inventory."""
         if goods_type == 'wheat':
-            return self.get_wheat(char)
+            return char.get_item('wheat')
         elif goods_type == 'money':
-            return self.get_money(char)
-        # Placeholder for other goods - would need inventory system expansion
+            return char.get_item('money')
+        # Placeholder for other goods
         return char.get(f'{goods_type}_stock', 0)
     
     def get_goods_price(self, goods_type, amount=1):
-        """Get the price for a given amount of goods"""
-        unit_price = ITEMS.get(goods_type, {}).get("price", 10)  # Default price if not defined
+        """Get the price for a given amount of goods."""
+        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
         return unit_price * amount
+    
+    def can_afford_goods(self, char, goods_type):
+        """Check if character can afford at least 1 unit of goods."""
+        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
+        return char.get_item('money') >= unit_price
+    
+    def get_desired_goods_amount(self, char, goods_type):
+        """Calculate how much of a goods type a character wants to buy.
+        
+        For wheat: enough to fill hunger deficit + buffer.
+        For other goods: 1 unit (placeholder).
+        """
+        if goods_type == 'wheat':
+            current_wheat = int(char.get_item('wheat'))
+            current_bread = int(char.get_item('bread'))
+            
+            # Want enough wheat to fill hunger deficit (will be converted to bread)
+            hunger_deficit = int(MAX_HUNGER - char['hunger'])
+            wheat_for_hunger = max(0, hunger_deficit // ITEMS["bread"]["hunger_value"] + 1)
+            
+            # Account for bread we already have
+            wheat_for_hunger = max(0, wheat_for_hunger - current_bread)
+            
+            # Also want buffer
+            buffer_want = max(0, BREAD_BUFFER_TARGET - current_wheat - current_bread)
+            
+            return wheat_for_hunger + buffer_want
+        
+        # Default for other goods
+        return 1
     
     def vendor_willing_to_trade(self, vendor, buyer, goods_type, amount=None):
         """Check if vendor is willing to trade goods with this buyer.
-        If amount is None, checks if vendor can sell at least 1 unit.
-        Traders are self-employed and will trade with anyone regardless of allegiance.
+        
+        Checks: trade cooldown, criminal status, allegiance, stock, money space.
+        Traders are self-employed and trade with anyone regardless of allegiance.
         """
         if vendor == buyer:
             return False
@@ -810,14 +726,13 @@ class GameLogic:
         if self.state.ticks - last_trade < TRADE_COOLDOWN:
             return False
         
-        # Don't trade with known criminals the vendor cares about
+        # Don't trade with known criminals
         if self.cares_about_criminal(vendor, buyer):
             return False
         
         # Check allegiance compatibility (Traders trade with anyone)
         vendor_job = vendor.get('job')
         if vendor_job != 'Trader':
-            # Non-traders require allegiance compatibility
             buyer_allegiance = buyer.get('allegiance')
             vendor_allegiance = vendor.get('allegiance')
             
@@ -832,69 +747,78 @@ class GameLogic:
             return False
         
         # Check if vendor has space for money
-        if not self.can_add_money(vendor):
+        if not vendor.can_add_item('money'):
             return False
         
         return True
     
     def get_max_vendor_trade_amount(self, vendor, buyer, goods_type):
-        """Calculate maximum amount that can be traded for a goods type.
-        Takes into account: vendor's stock, buyer's money, buyer's inventory space.
-        All values are integers.
+        """Calculate maximum amount that can be traded.
+        
+        Considers: vendor stock, buyer money, buyer inventory space, buyer desire.
         """
         sellable = self.get_vendor_sellable_goods(vendor, goods_type)
         if sellable <= 0:
             return 0
         
-        # How much can buyer afford? (integer division)
-        buyer_money = int(self.get_money(buyer))
+        # How much can buyer afford?
+        buyer_money = int(buyer.get_item('money'))
         unit_price = ITEMS.get(goods_type, {}).get("price", 10)
         affordable = buyer_money // unit_price if unit_price > 0 else 0
         
-        # How much space does buyer have? (for wheat, use existing system)
+        # How much space does buyer have?
         if goods_type == 'wheat':
-            buyer_space = self.state.get_inventory_space(buyer)
+            buyer_space = buyer.get_inventory_space()
         else:
-            # For other goods, simplified space check
             buyer_space = INVENTORY_SLOTS  # Placeholder
         
         # How much does buyer want?
-        if goods_type == 'wheat':
-            desired = self.get_desired_wheat_amount(buyer)
-        else:
-            desired = 1  # Default to buying 1 unit for other goods
+        desired = self.get_desired_goods_amount(buyer, goods_type)
         
         return max(0, min(sellable, affordable, buyer_space, desired))
     
     def execute_vendor_trade(self, vendor, buyer, goods_type, amount):
-        """Execute a trade between vendor and buyer for any goods type.
-        For wheat from farmers, uses the existing barrel-aware system.
+        """Execute a trade between vendor and buyer.
+        
+        For farmers selling wheat, also draws from their barrel if needed.
         """
         if amount <= 0:
             return False
         
         price = self.get_goods_price(goods_type, amount)
         
-        # Special handling for farmer wheat (uses barrel system)
-        if vendor.get('job') == 'Farmer' and goods_type == 'wheat':
-            self.execute_trade(vendor, buyer, amount)
-            return True
-        
-        # Generic goods trade
+        # Handle wheat specially - farmers may use barrel
         if goods_type == 'wheat':
-            # Remove from vendor, add to buyer
-            self.remove_wheat(vendor, amount)
-            self.add_wheat(buyer, amount)
+            amount_needed = amount
+            
+            # For farmers, take from inventory first, then barrel
+            if vendor.get('job') == 'Farmer':
+                vendor_wheat = vendor.get_item('wheat')
+                from_inventory = min(vendor_wheat, amount_needed)
+                if from_inventory > 0:
+                    vendor.remove_item('wheat', from_inventory)
+                    amount_needed -= from_inventory
+                
+                # If still need more, take from barrel
+                if amount_needed > 0:
+                    farm_barrel = self.state.interactables.get_barrel_by_home(vendor.get('home'))
+                    if farm_barrel:
+                        farm_barrel.remove_item('wheat', amount_needed)
+            else:
+                # Non-farmer vendors just use inventory
+                vendor.remove_item('wheat', amount)
+            
+            buyer.add_item('wheat', amount)
         else:
-            # For other goods types, adjust stock values
+            # Generic goods trade
             vendor_stock_key = f'{goods_type}_stock'
             buyer_stock_key = f'{goods_type}_stock'
             vendor[vendor_stock_key] = vendor.get(vendor_stock_key, 0) - amount
             buyer[buyer_stock_key] = buyer.get(buyer_stock_key, 0) + amount
         
         # Transfer money
-        self.add_money(vendor, price)
-        self.remove_money(buyer, price)
+        vendor.add_item('money', price)
+        buyer.remove_item('money', price)
         
         # Set trade cooldown
         buyer['last_trade_tick'] = self.state.ticks
@@ -903,13 +827,13 @@ class GameLogic:
     
     def try_buy_from_nearest_vendor(self, char, goods_type):
         """Attempt to buy goods from the nearest willing vendor.
+        
         Returns True if a purchase was made or if moving toward a vendor.
         """
-        name = self.get_display_name(char)
+        name = char.get_display_name()
         
         # Check if we can afford anything
-        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
-        if self.get_money(char) < unit_price:
+        if not self.can_afford_goods(char, goods_type):
             return False
         
         # First check if adjacent to a willing vendor
@@ -918,7 +842,7 @@ class GameLogic:
             amount = self.get_max_vendor_trade_amount(adjacent_vendor, char, goods_type)
             if amount > 0:
                 price = self.get_goods_price(goods_type, amount)
-                vendor_name = self.get_display_name(adjacent_vendor)
+                vendor_name = adjacent_vendor.get_display_name()
                 
                 if self.execute_vendor_trade(adjacent_vendor, char, goods_type, amount):
                     self.state.log_action(f"{name} bought {amount} {goods_type} for ${price} from {vendor_name}")
@@ -932,289 +856,6 @@ class GameLogic:
             return True
         
         return False
-    
-    # =========================================================================
-    # JOB SEEKING SYSTEM
-    # =========================================================================
-    # Jobs are sought in tier order: Steward (tier 2), then Trader/Soldier/Farmer (tier 3)
-    
-    def is_eligible_for_steward(self, char):
-        """Check if character is eligible to be Steward.
-        Requirements: must have an allegiance + mercantile skill >= 50
-        Traders can also be promoted to steward.
-        """
-        if not char.get('allegiance'):
-            return False
-        mercantile_skill = char.get('skills', {}).get('mercantile', 0)
-        return mercantile_skill >= 50
-    
-    def is_steward_job_available(self):
-        """Check if steward position is available (vacant)."""
-        return self.get_steward() is None
-    
-    def is_best_steward_candidate(self, char):
-        """Check if this character has the highest mercantile among eligible candidates."""
-        if not self.is_eligible_for_steward(char):
-            return False
-        
-        char_mercantile = char.get('skills', {}).get('mercantile', 0)
-        
-        for other in self.state.characters:
-            if other == char:
-                continue
-            if not self.is_eligible_for_steward(other):
-                continue
-            other_mercantile = other.get('skills', {}).get('mercantile', 0)
-            if other_mercantile > char_mercantile:
-                return False
-        
-        return True
-    
-    def can_become_steward(self, char):
-        """Check if character can become steward right now (in barracks + best candidate).
-        Works for both unemployed characters and traders seeking promotion.
-        """
-        if not self.is_steward_job_available():
-            return False
-        if not self.is_best_steward_candidate(char):
-            return False
-        military_area = self.state.get_area_by_role('military_housing')
-        return self.state.get_area_at(char['x'], char['y']) == military_area
-    
-    def become_steward(self, char):
-        """Promote a character to steward position."""
-        old_job = char.get('job')
-        
-        military_area = self.state.get_area_by_role('military_housing')
-        allegiance = self.state.get_allegiance_of_area(military_area)
-        
-        char['job'] = 'Steward'
-        char['home'] = military_area
-        char['allegiance'] = allegiance
-        
-        # Assign bed in barracks
-        self.state.unassign_bed_owner(char['name'])
-        bed = self.state.get_unowned_bed_by_home(self.state.get_area_by_role('military_housing'))
-        if bed:
-            self.state.assign_bed_owner(bed, char['name'])
-        
-        # Assign barracks barrel
-        barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-        if barracks_barrel:
-            barracks_barrel['owner'] = char['name']
-        
-        name = self.get_display_name(char)
-        if old_job:
-            self.state.log_action(f"{name} was promoted from {old_job} to STEWARD!")
-        else:
-            self.state.log_action(f"{name} became the village STEWARD!")
-    
-    def is_eligible_for_trader(self, char):
-        """Check if character has the mercantile skill to become a Trader"""
-        mercantile_skill = char.get('skills', {}).get('mercantile', 0)
-        return mercantile_skill >= 20
-    
-    def is_eligible_for_soldier(self, char):
-        """Check if character has the right traits to enlist as Soldier"""
-        morality = self.get_trait(char, 'morality')
-        confidence = self.get_trait(char, 'confidence')
-        cunning = self.get_trait(char, 'cunning')
-        return morality >= 5 and confidence >= 7 and cunning <= 5
-    
-    def is_eligible_for_farmer(self, char):
-        """Check if character has the farming skill required to enlist as Farmer"""
-        farming_skill = char.get('skills', {}).get('farming', 0)
-        return farming_skill >= 40
-    
-    def is_trader_job_available(self):
-        """Check if trader job is available. Always True - it's self-employed."""
-        return True
-    
-    def is_soldier_job_available(self):
-        """Check if soldier position is available (has bed and wheat)"""
-        # Check for available bed
-        bed = self.state.get_unowned_bed_by_home(self.state.get_area_by_role('military_housing'))
-        if not bed:
-            return False
-        # Check barracks barrel for wheat
-        barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-        if not barracks_barrel or self.state.get_barrel_wheat(barracks_barrel) < SOLDIER_WHEAT_PAYMENT:
-            return False
-        return True
-    
-    def is_farmer_job_available(self):
-        """Check if farmer position is available (unowned farm for an existing steward's allegiance)"""
-        steward = self.get_steward()
-        if not steward:
-            return False
-        steward_allegiance = steward.get('allegiance')
-        if not steward_allegiance:
-            return False
-        return self.get_unowned_allegiance_farm(steward_allegiance) is not None
-    
-    def get_best_available_job(self, char):
-        """Get the best available job for this character based on tier priority.
-        Returns job name or None if no jobs available/eligible.
-        Tier order: Steward (2), then Trader/Soldier/Farmer (3) chosen randomly if multiple available.
-        """
-        if char.get('job') is not None:
-            return None
-        
-        # Tier 2: Steward - only if they're the best candidate
-        if self.is_eligible_for_steward(char) and self.is_steward_job_available() and self.is_best_steward_candidate(char):
-            return 'Steward'
-        
-        # Tier 3: Trader, Soldier and Farmer - pick randomly if multiple available
-        available_tier3 = []
-        if self.is_eligible_for_trader(char) and self.is_trader_job_available():
-            available_tier3.append('Trader')
-        if self.is_eligible_for_soldier(char) and self.is_soldier_job_available():
-            available_tier3.append('Soldier')
-        if self.is_eligible_for_farmer(char) and self.is_farmer_job_available():
-            available_tier3.append('Farmer')
-        
-        if available_tier3:
-            return random.choice(available_tier3)
-        
-        return None
-    
-    def wants_job(self, char):
-        """Check if character wants to seek any job"""
-        return self.get_best_available_job(char) is not None
-    
-    def can_enlist_as_soldier(self, char):
-        """Check if character can enlist as soldier right now"""
-        if char.get('job') is not None:
-            return False
-        military_area = self.state.get_area_by_role('military_housing')
-        if self.state.get_area_at(char['x'], char['y']) != military_area:
-            return False
-        if not self.is_eligible_for_soldier(char):
-            return False
-        if not self.is_soldier_job_available():
-            return False
-        return True
-    
-    def can_become_trader(self, char):
-        """Check if character can become a self-employed trader right now.
-        Traders are self-employed - they can start anytime, anywhere.
-        """
-        if char.get('job') is not None:
-            return False
-        if not self.is_eligible_for_trader(char):
-            return False
-        return True
-    
-    def become_trader(self, char):
-        """Character becomes a self-employed trader.
-        Traders have no allegiance requirement and can trade with anyone.
-        """
-        char['job'] = 'Trader'
-        # Traders are self-employed - no allegiance, home is wherever they want
-        # They keep their current home/camp if they have one
-        
-        name = self.get_display_name(char)
-        self.state.log_action(f"{name} became a self-employed Trader!")
-    
-    def can_enlist_as_farmer(self, char):
-        """Check if character can enlist as a farmer (must be adjacent to steward)"""
-        if char.get('job') is not None:
-            return False
-        if not self.is_eligible_for_farmer(char):
-            return False
-        # Must be adjacent to steward
-        steward = self.get_steward()
-        if not steward:
-            return False
-        if not self.is_adjacent(char, steward):
-            return False
-        if not self.is_farmer_job_available():
-            return False
-        return True
-    
-    def enlist_as_soldier(self, char):
-        """Enlist a character as a soldier"""
-        old_allegiance = char.get('allegiance')
-        military_area = self.state.get_area_by_role('military_housing')
-        allegiance = self.state.get_allegiance_of_area(military_area)
-        
-        char['job'] = 'Soldier'
-        char['home'] = military_area
-        char['allegiance'] = allegiance
-        char['soldier_stopped'] = False
-        char['asked_steward_for_wheat'] = False
-        
-        # Assign a bed in barracks
-        bed = self.state.get_unowned_bed_by_home(military_area)
-        if bed:
-            self.state.assign_bed_owner(bed, char['name'])
-        
-        name = self.get_display_name(char)
-        if old_allegiance is None:
-            self.state.log_action(f"{name} ENLISTED as Soldier! (gained {allegiance} allegiance)")
-        elif old_allegiance != allegiance:
-            self.state.log_action(f"{name} ENLISTED as Soldier! (allegiance changed from {old_allegiance} to {allegiance})")
-        else:
-            self.state.log_action(f"{name} RE-ENLISTED as Soldier!")
-    
-    def get_unowned_allegiance_farm(self, allegiance):
-        """Find a farm area belonging to an allegiance that has no farmer assigned.
-        Returns the area name or None if all farms are owned.
-        """
-        from scenario_world import AREAS
-        
-        for area in AREAS:
-            if area.get('has_farm_cells') and area.get('allegiance') == allegiance:
-                farm_name = area['name']
-                # Check if any farmer owns this farm (has it as home)
-                farm_has_farmer = False
-                for char in self.state.characters:
-                    if char.get('job') == 'Farmer' and char.get('home') == farm_name:
-                        farm_has_farmer = True
-                        break
-                if not farm_has_farmer:
-                    return farm_name
-        return None
-    
-    def enlist_as_farmer(self, char):
-        """Enlist a character as a farmer"""
-        # Get the steward to know which allegiance's farm to use
-        steward = self.get_steward()
-        if not steward:
-            return  # Need a steward to enlist farmers
-        
-        steward_allegiance = steward.get('allegiance')
-        
-        # Find the available farm for this allegiance
-        farm_name = self.get_unowned_allegiance_farm(steward_allegiance)
-        if not farm_name:
-            return  # No farm available
-        
-        allegiance = self.state.get_allegiance_of_area(farm_name)
-        old_allegiance = char.get('allegiance')
-        
-        char['job'] = 'Farmer'
-        char['home'] = farm_name
-        char['allegiance'] = allegiance
-        char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # First tax due 1 year after hire
-        
-        # Assign the farm barrel to this farmer
-        farm_barrel = self.state.get_barrel_by_home(farm_name)
-        if farm_barrel:
-            farm_barrel['owner'] = char['name']
-        
-        # Assign the farm bed to this farmer
-        bed = self.state.get_unowned_bed_by_home(farm_name)
-        if bed:
-            self.state.assign_bed_owner(bed, char['name'])
-        
-        name = self.get_display_name(char)
-        if old_allegiance is None:
-            self.state.log_action(f"{name} ENLISTED as Farmer! (gained {allegiance} allegiance)")
-        elif old_allegiance != allegiance:
-            self.state.log_action(f"{name} ENLISTED as Farmer! (allegiance changed from {old_allegiance} to {allegiance})")
-        else:
-            self.state.log_action(f"{name} ENLISTED as Farmer!")
 
     # =========================================================================
     # COMBAT / ROBBERY SYSTEM
@@ -1223,8 +864,11 @@ class GameLogic:
     def get_attacker(self, char):
         """Find anyone who is targeting this character and is close enough"""
         for other in self.state.characters:
+            # Skip dying attackers
+            if other.get('health', 100) <= 0:
+                continue
             if other.get('robbery_target') == char:
-                dist = self.get_distance(char, other)
+                dist = self.state.get_distance(char, other)
                 if dist <= 5:
                     return other
         return None
@@ -1239,16 +883,19 @@ class GameLogic:
         for other in self.state.characters:
             if other == char:
                 continue
+            # Skip dying characters
+            if other.get('health', 100) <= 0:
+                continue
             
-            morality = self.get_trait(other, 'morality')
-            confidence = self.get_trait(other, 'confidence')
+            morality = other.get_trait('morality')
+            confidence = other.get_trait('confidence')
             is_soldier = other.get('job') == 'Soldier'
             
             # Soldier with confidence >= 5, or high morality + high confidence
             is_defender = (is_soldier and confidence >= 5) or (morality >= 7 and confidence >= 7)
             
             if is_defender:
-                dist = self.get_distance(char, other)
+                dist = self.state.get_distance(char, other)
                 if dist <= max_distance and dist < best_dist:
                     best_dist = dist
                     best_defender = other
@@ -1259,8 +906,8 @@ class GameLogic:
         """Check if a character will defend others from crime.
         Soldiers need confidence >= 5, others need morality >= 7 and confidence >= 7
         """
-        morality = self.get_trait(char, 'morality')
-        confidence = self.get_trait(char, 'confidence')
+        morality = char.get_trait('morality')
+        confidence = char.get_trait('confidence')
         is_soldier = char.get('job') == 'Soldier'
         
         if is_soldier:
@@ -1293,7 +940,7 @@ class GameLogic:
         Soldiers: +3 morality bonus for same-allegiance crimes, any intensity
         Others: morality >= 7 required, only for intensity >= 15
         """
-        effective_morality = self.get_trait(responder, 'morality')
+        effective_morality = responder.get_trait('morality')
         is_same_allegiance_soldier = (responder.get('job') == 'Soldier' and 
                                     responder.get('allegiance') == crime_allegiance)
         
@@ -1352,10 +999,13 @@ class GameLogic:
         for other in self.state.characters:
             if other == char:
                 continue
+            # Skip dying characters - they're no longer a threat
+            if other.get('health', 100) <= 0:
+                continue
             if other.get('is_aggressor') and other.get('robbery_target'):
                 target = other.get('robbery_target')
                 if target in self.state.characters:
-                    dist = self.get_distance(char, other)
+                    dist = self.state.get_distance(char, other)
                     if dist <= murder_range:
                         # Active aggression - check if we care
                         crime_allegiance = target.get('allegiance')
@@ -1366,6 +1016,9 @@ class GameLogic:
         for other in self.state.characters:
             if other == char:
                 continue
+            # Skip dying characters
+            if other.get('health', 100) <= 0:
+                continue
             
             criminal_id = id(other)
             crimes = char.get('known_crimes', {}).get(criminal_id, [])
@@ -1375,7 +1028,7 @@ class GameLogic:
                 crime_allegiance = crime['allegiance']
                 crime_range = intensity  # Range = intensity
                 
-                dist = self.get_distance(char, other)
+                dist = self.state.get_distance(char, other)
                 if dist <= crime_range:
                     if self.will_care_about_crime(char, crime_allegiance, intensity):
                         return (other, intensity)
@@ -1399,9 +1052,14 @@ class GameLogic:
         Morality 5: 5% -> 20% based on hunger
         Morality 4-1: 50% -> 100% based on hunger
         """
-        morality = self.get_trait(char, 'morality')
+        morality = char.get_trait('morality')
         
         if morality >= 7:
+            return False
+        
+        # Check cooldown from giving up theft (tick-based)
+        cooldown_until_tick = char.get('theft_cooldown_until_tick')
+        if cooldown_until_tick and self.state.ticks < cooldown_until_tick:
             return False
         
         hunger_factor = self.get_hunger_factor(char)
@@ -1423,7 +1081,7 @@ class GameLogic:
         Morality 4-3: Only when starving, +10% per tick starving
         Morality 2-1: Same chance as farm theft (50-100% based on hunger)
         """
-        morality = self.get_trait(char, 'morality')
+        morality = char.get_trait('morality')
         
         if morality >= 5:
             return False
@@ -1449,7 +1107,7 @@ class GameLogic:
         For morality 2-1, if both theft and robbery would trigger,
         randomly choose between them (50/50).
         """
-        morality = self.get_trait(char, 'morality')
+        morality = char.get_trait('morality')
         
         if morality >= 7:
             return None
@@ -1488,51 +1146,105 @@ class GameLogic:
         
         return best_cell
     
+    def get_farm_waiting_position(self, char):
+        """Get a position near the farm to wait for crops."""
+        # Find any farm cell and return a position adjacent to the farm area
+        if not self.state.farm_cells:
+            return None
+        
+        # Get the farm area bounds
+        farm_cells = list(self.state.farm_cells.keys())
+        min_x = min(c[0] for c in farm_cells)
+        max_x = max(c[0] for c in farm_cells)
+        min_y = min(c[1] for c in farm_cells)
+        max_y = max(c[1] for c in farm_cells)
+        
+        # Return center of farm area
+        return ((min_x + max_x) / 2 + 0.5, (min_y + max_y) / 2 + 0.5)
+    
     def try_farm_theft(self, char):
         """Character attempts to steal from a farm. Returns True if action taken."""
-        # If already pursuing a theft target, continue
-        if char.get('theft_target'):
+        # If already pursuing theft, continue
+        if char.get('theft_target') or char.get('theft_waiting'):
             return self.continue_theft(char)
         
         cell = self.find_nearby_ready_farm_cell(char)
-        if not cell:
-            return False
+        name = char.get_display_name()
         
-        # Start pursuing the cell (not a crime yet - just walking to farm)
-        char['theft_target'] = cell
-        name = self.get_display_name(char)
-        self.state.log_action(f"{name} heading toward farm at {cell}")
+        if cell:
+            # Start pursuing the cell (not a crime yet - just walking to farm)
+            char['theft_target'] = cell
+            char['theft_start_tick'] = self.state.ticks
+            self.state.log_action(f"{name} heading toward farm at {cell}")
+        else:
+            # No ready cells - go wait at the farm
+            char['theft_waiting'] = True
+            char['theft_start_tick'] = self.state.ticks
+            self.state.log_action(f"{name} heading to farm to steal")
         
         return self.continue_theft(char)
     
     def continue_theft(self, char):
         """Continue theft in progress. Returns True if still stealing."""
         cell = char.get('theft_target')
-        if not cell:
+        name = char.get_display_name()
+        
+        # Check if we've been trying too long (tick-based, scales with game speed)
+        start_tick = char.get('theft_start_tick')
+        if start_tick and self.state.ticks - start_tick > THEFT_PATIENCE_TICKS:
+            char['theft_target'] = None
+            char['theft_waiting'] = False
+            char['theft_start_tick'] = None
+            char['theft_cooldown_until_tick'] = self.state.ticks + THEFT_COOLDOWN_TICKS
+            self.state.log_action(f"{name} gave up waiting to steal from farm")
             return False
         
+        if not cell:
+            # No specific cell - look for one or wait
+            cell = self.find_nearby_ready_farm_cell(char)
+            if cell:
+                char['theft_target'] = cell
+                char['theft_waiting'] = False
+                self.state.log_action(f"{name} heading toward farm at {cell}")
+            else:
+                # No ready cells - mark as waiting
+                if not char.get('theft_waiting'):
+                    char['theft_waiting'] = True
+                    self.state.log_action(f"{name} waiting at farm for crops to grow")
+                return True  # Still in theft mode, just waiting
+        
         cx, cy = cell
-        name = self.get_display_name(char)
         
         # Check if cell is still ready
         data = self.state.farm_cells.get(cell)
         if not data or data['state'] != 'ready':
-            # Cell no longer available
+            # Cell no longer available - try to find another
             char['theft_target'] = None
-            self.state.log_action(f"{name} abandoned theft - crop already taken")
-            return False
+            new_cell = self.find_nearby_ready_farm_cell(char)
+            if new_cell:
+                char['theft_target'] = new_cell
+                char['theft_waiting'] = False
+                self.state.log_action(f"{name} heading toward farm at {new_cell}")
+            else:
+                # No ready cells - wait at farm
+                if not char.get('theft_waiting'):
+                    char['theft_waiting'] = True
+                    self.state.log_action(f"{name} waiting at farm for crops to grow")
+            return True
         
         # If standing on the cell (character's cell position matches), steal immediately
         # Convert float position to cell coordinates
         char_cell = (int(char['x']), int(char['y']))
         if char_cell == cell:
             # Check if has inventory space
-            if not self.can_add_wheat(char, FARM_CELL_YIELD):
+            if not char.can_add_item('wheat', FARM_CELL_YIELD):
                 char['theft_target'] = None
+                char['theft_waiting'] = False
+                char['theft_start_tick'] = None
                 return False
             
             # Execute the theft - THE CRIMINAL ACT
-            self.add_wheat(char, FARM_CELL_YIELD)
+            char.add_item('wheat', FARM_CELL_YIELD)
             # Leave cell in replanting state (brown) - only farmers can turn it yellow
             data['state'] = 'replanting'
             data['timer'] = FARM_REPLANT_TIME
@@ -1540,6 +1252,8 @@ class GameLogic:
             # Mark as thief
             char['is_thief'] = True
             char['theft_target'] = None
+            char['theft_waiting'] = False
+            char['theft_start_tick'] = None
             
             self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
             self.witness_theft(char, cell)
@@ -1553,7 +1267,7 @@ class GameLogic:
         
         Range: CRIME_INTENSITY_THEFT (4 cells)
         """
-        thief_name = self.get_display_name(thief)
+        thief_name = thief.get_display_name()
         cx, cy = cell
         intensity = CRIME_INTENSITY_THEFT
         witness_range = intensity
@@ -1567,7 +1281,7 @@ class GameLogic:
             
             dist = abs(char['x'] - cx) + abs(char['y'] - cy)
             if dist <= witness_range:
-                witness_name = self.get_display_name(char)
+                witness_name = char.get_display_name()
                 
                 # Everyone remembers the crime
                 self.remember_crime(char, thief, intensity, crime_allegiance)
@@ -1576,10 +1290,14 @@ class GameLogic:
                 cares = self.will_care_about_crime(char, crime_allegiance, intensity)
                 
                 # Check if this is the farm owner (always reacts as victim)
-                is_owner = char.get('job') == 'Farmer' and char.get('home') == self.state.get_area_by_role('farm')
+                # A farmer owns a cell if the cell's home matches the farmer's home
+                cell_data = self.state.farm_cells.get((cx, cy), {})
+                is_owner = (char.get('job') == 'Farmer' and 
+                           char.get('home') and 
+                           cell_data.get('home') == char.get('home'))
                 
                 if cares or is_owner:
-                    confidence = self.get_trait(char, 'confidence')
+                    confidence = char.get_trait('confidence')
                     if confidence >= 7:
                         char['robbery_target'] = thief
                         self.state.log_action(f"{witness_name} WITNESSED {thief_name} stealing! Attacking!")
@@ -1602,8 +1320,8 @@ class GameLogic:
         if crime_allegiance is None:
             return  # Can't report crimes against unaligned
         
-        witness_name = self.get_display_name(witness)
-        criminal_name = self.get_display_name(criminal)
+        witness_name = witness.get_display_name()
+        criminal_name = criminal.get_display_name()
         
         # Look for an adjacent soldier of the same allegiance
         for char in self.state.characters:
@@ -1614,7 +1332,7 @@ class GameLogic:
                 if dist <= 1:  # Must be adjacent
                     # Report to this soldier
                     self.remember_crime(char, criminal, intensity, crime_allegiance)
-                    soldier_name = self.get_display_name(char)
+                    soldier_name = char.get_display_name()
                     self.state.log_action(f"{witness_name} reported {criminal_name} to {soldier_name}!")
                     return  # Reported successfully
         
@@ -1623,18 +1341,18 @@ class GameLogic:
     
     def find_richest_target(self, robber):
         """Find the best target to rob"""
-        targets = [c for c in self.state.characters if c != robber and (self.get_money(c) > 0 or self.get_wheat(c) > 0)]
+        targets = [c for c in self.state.characters if c != robber and (c.get_item('money') > 0 or c.get_item('wheat') > 0)]
         if not targets:
             return None
-        return max(targets, key=lambda c: (self.get_wheat(c), self.get_money(c)))
+        return max(targets, key=lambda c: (c.get_item('wheat'), c.get_item('money')))
     
     def try_robbery(self, robber):
         """Character decides to rob someone - sets target and starts pursuit"""
         target = self.find_richest_target(robber)
         if target:
-            robber_name = self.get_display_name(robber)
-            target_name = self.get_display_name(target)
-            self.state.log_action(f"{robber_name} DECIDED TO ROB {target_name} (target has ${self.get_money(target)})")
+            robber_name = robber.get_display_name()
+            target_name = target.get_display_name()
+            self.state.log_action(f"{robber_name} DECIDED TO ROB {target_name} (target has ${target.get_item('money')})")
             robber['robbery_target'] = target
             robber['is_aggressor'] = True
             return self.continue_robbery(robber)
@@ -1652,67 +1370,66 @@ class GameLogic:
             return False
         
         # Don't attack dying characters
-        if target.get('is_dying'):
+        if target.get('health', 100) <= 0:
             robber['robbery_target'] = None
             return False
         
         # Movement is handled by velocity system in _get_goal
         # We just check if adjacent and attack if so
         
-        robber_name = self.get_display_name(robber)
-        target_name = self.get_display_name(target)
-        
         if self.is_adjacent(robber, target):
-            damage = random.randint(2, 5)  # Reduced damage (was 10-20)
-            target['health'] -= damage
-            self.state.log_action(f"{robber_name} ATTACKS {target_name} for {damage} damage! Health: {target['health'] + damage} -> {target['health']}")
+            result = self.resolve_melee_attack(robber, target)
             
-            if target['health'] <= 0:
-                killer_is_defender = not robber.get('is_aggressor', False)
-                target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
-                
-                target_money = self.get_money(target)
-                target_wheat = self.get_wheat(target)
-                
-                if not (killer_is_defender and target_was_criminal):
-                    robber['is_murderer'] = True
-                    self.witness_murder(robber, target)
-                
-                # Transfer items immediately (character will be removed after death animation)
-                self.state.transfer_all_items(target, robber)
+            if result['killed']:
                 robber['robbery_target'] = None
                 robber['is_aggressor'] = False
         
         return True
     
-    def witness_murder(self, murderer, victim):
-        """Witnesses within murder range learn about the murder and may react.
+    def witness_murder(self, attacker, victim, is_lethal=False):
+        """Witnesses within range learn about the crime and may react.
         
-        Range: CRIME_INTENSITY_MURDER (7 cells)
+        Args:
+            attacker: The character who attacked
+            victim: The character who was attacked
+            is_lethal: True if this was a killing blow, False if just an attack
+        
+        For murders (is_lethal=True): witnesses permanently remember the crime
+        For assaults (is_lethal=False): triggers immediate reaction but not remembered
+        
+        Range: CRIME_INTENSITY_MURDER (17 cells)
         """
-        murderer_name = self.get_display_name(murderer)
-        victim_name = self.get_display_name(victim)
+        attacker_name = attacker.get_display_name()
+        victim_name = victim.get_display_name()
         intensity = CRIME_INTENSITY_MURDER
         witness_range = intensity
         
         # Crime allegiance = victim's allegiance
         crime_allegiance = victim.get('allegiance')
         
+        # Choose appropriate log message
+        crime_verb = "murder" if is_lethal else "attack"
+        
         for char in self.state.characters:
-            if char == murderer or char == victim:
+            if char == attacker or char == victim:
                 continue
             
             dist = abs(char['x'] - victim['x']) + abs(char['y'] - victim['y'])
             if dist <= witness_range:
-                witness_name = self.get_display_name(char)
+                witness_name = char.get_display_name()
                 
-                # Everyone remembers the crime
-                self.remember_crime(char, murderer, intensity, crime_allegiance)
-                self.state.log_action(f"{witness_name} WITNESSED {murderer_name} murder {victim_name}!")
-                
-                # Try to report if same allegiance
-                if char.get('allegiance') == crime_allegiance and crime_allegiance is not None:
-                    self.try_report_crime(char, murderer, intensity, crime_allegiance)
+                # Only permanently remember murders, not assaults
+                # Assaults trigger immediate reaction via is_aggressor flag
+                if is_lethal:
+                    self.remember_crime(char, attacker, intensity, crime_allegiance)
+                    self.state.log_action(f"{witness_name} WITNESSED {attacker_name} {crime_verb} {victim_name}!")
+                    
+                    # Try to report if same allegiance
+                    if char.get('allegiance') == crime_allegiance and crime_allegiance is not None:
+                        self.try_report_crime(char, attacker, intensity, crime_allegiance)
+                else:
+                    # Just log the assault - immediate reaction handled by is_aggressor check
+                    self.state.log_action(f"{witness_name} WITNESSED {attacker_name} {crime_verb} {victim_name}!")
     
     def try_report_crimes_to_soldier(self, char):
         """If character has unreported crimes and is adjacent to a soldier, report to them.
@@ -1725,7 +1442,7 @@ class GameLogic:
         if not unreported:
             return
         
-        char_name = self.get_display_name(char)
+        char_name = char.get_display_name()
         
         for other in self.state.characters:
             if other == char:
@@ -1737,7 +1454,7 @@ class GameLogic:
             if dist > 1:  # Must be adjacent
                 continue
                 
-            soldier_name = self.get_display_name(other)
+            soldier_name = other.get_display_name()
             soldier_allegiance = other.get('allegiance')
             
             # Check each unreported crime
@@ -1749,7 +1466,7 @@ class GameLogic:
                     # Find the criminal for logging and to pass to remember_crime
                     criminal = next((c for c in self.state.characters if id(c) == criminal_id), None)
                     if criminal:
-                        criminal_name = self.get_display_name(criminal)
+                        criminal_name = criminal.get_display_name()
                         self.remember_crime(other, criminal, intensity, crime_allegiance)
                         self.state.log_action(f"{char_name} reported {criminal_name} to {soldier_name}")
                     char['unreported_crimes'].discard(crime_tuple)
@@ -1774,27 +1491,27 @@ class GameLogic:
         """Check if character's food supply (wheat + bread) is below the buffer target.
         Since wheat can be converted to bread, we count both together.
         """
-        total_food = self.get_wheat(char) + self.get_bread(char)
+        total_food = char.get_item('wheat') + char.get_item('bread')
         return total_food < BREAD_BUFFER_TARGET
     
     def handle_wheat_need(self, char):
         """Handle a character's hunger needs. Returns True if action was taken."""
         job = char.get('job')
-        name = self.get_display_name(char)
+        name = char.get_display_name()
         
         # Option 1: Eat bread from inventory
-        if self.get_bread(char) >= BREAD_PER_BITE:
-            self.remove_bread(char, BREAD_PER_BITE)
+        if char.get_item('bread') >= BREAD_PER_BITE:
+            char.remove_item('bread', BREAD_PER_BITE)
             char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
             char['wheat_seek_ticks'] = 0
             self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
             return True
         
         # Option 2: If have wheat but no bread, go cook it
-        if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO:
             # Try to bake if adjacent to cooking spot
             if self.can_bake_bread(char):
-                amount_to_bake = min(self.get_wheat(char), BREAD_BUFFER_TARGET)
+                amount_to_bake = min(char.get_item('wheat'), BREAD_BUFFER_TARGET)
                 self.bake_bread(char, amount_to_bake)
                 return True
             
@@ -1828,14 +1545,14 @@ class GameLogic:
         
         # Option 4: Non-soldiers buy wheat from nearest vendor (Farmer, Innkeeper, etc.)
         # Characters who sell wheat themselves don't buy from others
-        if self.can_afford_any_wheat(char) and not self.is_vendor_of(char, 'wheat'):
+        if self.can_afford_goods(char, 'wheat') and not self.is_vendor_of(char, 'wheat'):
             # Try to buy from adjacent vendor first
             adjacent_vendor = self.find_adjacent_vendor(char, 'wheat')
             if adjacent_vendor and self.vendor_willing_to_trade(adjacent_vendor, char, 'wheat'):
                 amount = self.get_max_vendor_trade_amount(adjacent_vendor, char, 'wheat')
                 if amount > 0:
                     price = self.get_goods_price('wheat', amount)
-                    vendor_name = self.get_display_name(adjacent_vendor)
+                    vendor_name = adjacent_vendor.get_display_name()
                     
                     if self.execute_vendor_trade(adjacent_vendor, char, 'wheat', amount):
                         char['wheat_seek_ticks'] = 0
@@ -1862,7 +1579,7 @@ class GameLogic:
         
         # Option 5: Resort to crime (only if can't legitimately buy wheat)
         # Characters with money and access to a willing vendor should NEVER steal
-        can_buy_wheat = self.can_afford_any_wheat(char) and self.find_willing_vendor(char, 'wheat') is not None
+        can_buy_wheat = self.can_afford_goods(char, 'wheat') and self.find_willing_vendor(char, 'wheat') is not None
         
         if not can_buy_wheat:
             crime_action = self.decide_crime_action(char)
@@ -1882,37 +1599,63 @@ class GameLogic:
     
     def _process_npc_movement(self):
         """
-        Process all NPC movement for this tick.
-        Updates velocities based on goals. Position updates happen every frame via update_npc_positions().
-        """
-        npcs = [c for c in self.state.characters if not self.is_player(c)]
+        Process all NPC decisions and movement for this tick.
         
-        # Update velocities based on goals (decision-making happens per tick)
+        For each NPC:
+        1. Call job.decide() which sets char.goal and performs any immediate actions
+        2. Update velocity based on char.goal
+        
+        Position updates happen every frame via update_npc_positions().
+        """
+        npcs = [c for c in self.state.characters if not c.is_player]
+        
+        # Each NPC decides what to do (sets goal and/or takes action)
         for char in npcs:
+            if char not in self.state.characters:
+                continue  # May have been killed
+            
             if char.get('is_frozen'):
-                char['vx'] = 0.0
-                char['vy'] = 0.0
+                char.vx = 0.0
+                char.vy = 0.0
                 continue
             
-            # Skip dying characters - they don't move
-            if char.get('is_dying'):
-                char['vx'] = 0.0
-                char['vy'] = 0.0
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                char.vx = 0.0
+                char.vy = 0.0
                 continue
             
-            # Reset idle flag before getting goal (will be set if idling)
-            char['idle_is_idle'] = False
+            # Reset idle flag before deciding
+            char.idle_is_idle = False
             
-            goal = self._get_goal(char)
+            # Get the job and let it decide what to do
+            job = get_job(char.get('job'))
+            job.decide(char, self.state, self)
+            
+            # Wake up if not sleep time
+            if not self.state.is_sleep_time() and char.get('is_sleeping'):
+                char.is_sleeping = False
+                name = char.get_display_name()
+                self.state.log_action(f"{name} woke up")
+        
+        # Update velocities based on goals
+        for char in npcs:
+            if char not in self.state.characters:
+                continue
+            
+            if char.get('is_frozen') or char.get('health', 100) <= 0:
+                continue
+            
+            goal = char.goal
             if goal:
                 # Calculate direction to goal
-                dx = goal[0] - char['x']
-                dy = goal[1] - char['y']
+                dx = goal[0] - char.x
+                dy = goal[1] - char.y
                 dist = math.sqrt(dx * dx + dy * dy)
                 
-                if dist < 0.35:  # Close enough to goal - larger threshold prevents overshoot jitter
-                    char['vx'] = 0.0
-                    char['vy'] = 0.0
+                if dist < 0.35:  # Close enough - prevents overshoot jitter
+                    char.vx = 0.0
+                    char.vy = 0.0
                 else:
                     # Use slower speed if idling or patrolling
                     speed = MOVEMENT_SPEED
@@ -1922,23 +1665,17 @@ class GameLogic:
                         speed = MOVEMENT_SPEED * PATROL_SPEED_MULTIPLIER
                     
                     # Normalize and apply speed
-                    char['vx'] = (dx / dist) * speed
-                    char['vy'] = (dy / dist) * speed
+                    char.vx = (dx / dist) * speed
+                    char.vy = (dy / dist) * speed
                     # Update facing direction
                     self._update_facing_from_velocity(char)
             else:
-                char['vx'] = 0.0
-                char['vy'] = 0.0
+                char.vx = 0.0
+                char.vy = 0.0
             
-            # If character is not idling, reset their idle state for next time
+            # If not idling, reset idle state for next time
             if not char.get('idle_is_idle', False):
                 self._reset_idle_state(char)
-        
-        # Run actions (combat, trading, eating, etc.)
-        for char in npcs:
-            if char not in self.state.characters:
-                continue  # Skip dead characters
-            self._do_npc_actions(char)
         
         # Report crimes to nearby soldiers
         for char in self.state.characters:
@@ -1950,7 +1687,7 @@ class GameLogic:
         Implements squeeze behavior: when blocked for more than SQUEEZE_THRESHOLD_TICKS,
         characters will slide perpendicular to their movement direction to squeeze past obstacles.
         """
-        npcs = [c for c in self.state.characters if not self.is_player(c)]
+        npcs = [c for c in self.state.characters if not c.is_player]
         
         for char in npcs:
             vx = char.get('vx', 0.0)
@@ -2142,216 +1879,7 @@ class GameLogic:
         """Calculate the position this NPC wants to move toward.
         Returns the goal position or None if no goal.
         """
-        return self._get_goal(char)
-    
-    def _get_goal(self, char):
-        """Get the position this character is trying to reach.
-        Returns float position (x, y) or None if no goal.
-        """
-        # Helper to convert cell position to center point
-        def cell_to_center(pos):
-            if pos is None:
-                return None
-            return (pos[0] + 0.5, pos[1] + 0.5)
-        
-        # Helper to check if character is at a position (within threshold)
-        def at_position(char, pos, threshold=0.15):
-            if pos is None:
-                return False
-            dx = char['x'] - pos[0]
-            dy = char['y'] - pos[1]
-            return (dx * dx + dy * dy) < threshold * threshold
-        
-        # Priority 0: Sleep time - go to bed or camp
-        if self.is_sleep_time():
-            sleep_pos = self.get_sleep_position(char)
-            if sleep_pos:
-                sleep_center = cell_to_center(sleep_pos)
-                # Have a bed or camp
-                if at_position(char, sleep_center):
-                    # Already at sleep position - stay still and sleep
-                    if not char.get('is_sleeping'):
-                        char['is_sleeping'] = True
-                        name = self.get_display_name(char)
-                        bed = self.get_character_bed(char)
-                        if bed:
-                            self.state.log_action(f"{name} went to sleep in bed")
-                        else:
-                            self.state.log_action(f"{name} went to sleep at camp")
-                    return None
-                else:
-                    # Move toward sleep position
-                    return sleep_center
-            else:
-                # No bed or camp - need to find a place to make camp
-                if self.can_make_camp_at(char['x'], char['y']):
-                    # Can camp here
-                    self.make_camp(char)
-                    char['is_sleeping'] = True
-                    return None
-                else:
-                    # Move away from village to find camp spot
-                    return self._find_camp_spot(char)
-        else:
-            # Not sleep time - wake up if sleeping
-            if char.get('is_sleeping'):
-                char['is_sleeping'] = False
-                name = self.get_display_name(char)
-                self.state.log_action(f"{name} woke up")
-        
-        # Priority 1: Combat target - stay still if already adjacent
-        target = char.get('robbery_target')
-        if target and target in self.state.characters:
-            if self.is_adjacent(char, target):
-                return None  # Stay still, we're in combat range
-            return (target['x'], target['y'])
-        
-        # Priority 2: Respond to attacker - stay still if adjacent and fighting back
-        attacker = self.get_attacker(char)
-        if attacker:
-            confidence = self.get_trait(char, 'confidence')
-            if confidence >= 7:
-                if self.is_adjacent(char, attacker):
-                    return None  # Stay still, we're fighting
-                return (attacker['x'], attacker['y'])
-            else:
-                # Being attacked = murder-level threat
-                murder_range = self.get_crime_range('murder')
-                defender = self.find_nearby_defender(char, murder_range)
-                if defender:
-                    return (defender['x'], defender['y'])
-                else:
-                    return self._get_flee_goal(char, attacker)
-        
-        # Priority 2.5: Fleeing from witnessed crime
-        flee_target = char.get('flee_from')
-        if flee_target and flee_target in self.state.characters:
-            # Get the worst crime we know about for flee distance
-            worst_crime = self.get_worst_known_crime(char, flee_target)
-            if worst_crime:
-                flee_distance = self.get_flee_distance(worst_crime['intensity'])
-            else:
-                flee_distance = self.get_flee_distance(CRIME_INTENSITY_MURDER)  # Default to murder
-            
-            dist = self.get_distance(char, flee_target)
-            if dist > flee_distance:
-                # Far enough, stop fleeing
-                char['flee_from'] = None
-            else:
-                return self._get_flee_goal(char, flee_target)
-        elif flee_target:
-            # Target no longer exists
-            char['flee_from'] = None
-        
-        # Priority 2.75: Theft target - move toward farm cell to steal
-        theft_target = char.get('theft_target')
-        if theft_target:
-            # Check if cell is still ready
-            data = self.state.farm_cells.get(theft_target)
-            if data and data['state'] == 'ready':
-                return cell_to_center(theft_target)
-            else:
-                # Cell no longer available, clear target
-                char['theft_target'] = None
-        
-        # Priority 3: React to known criminals nearby (only if we care)
-        criminal, intensity = self.find_known_criminal_nearby(char)
-        if criminal:
-            confidence = self.get_trait(char, 'confidence')
-            char_name = self.get_display_name(char)
-            criminal_name = self.get_display_name(criminal)
-            
-            if confidence >= 7:
-                # Attack
-                if char.get('robbery_target') != criminal:
-                    self.state.log_action(f"{char_name} confronting {criminal_name}!")
-                    char['robbery_target'] = criminal
-                if self.is_adjacent(char, criminal):
-                    return None  # Stay still, we're in combat range
-                return (criminal['x'], criminal['y'])
-            else:
-                # Flee
-                if char.get('flee_from') != criminal:
-                    self.state.log_action(f"{char_name} fleeing from {criminal_name}!")
-                    char['flee_from'] = criminal
-                
-                # Use intensity-based range for finding defender
-                defender_range = intensity
-                defender = self.find_nearby_defender(char, defender_range)
-                if defender:
-                    return (defender['x'], defender['y'])
-                else:
-                    return self._get_flee_goal(char, criminal)
-        
-        # Priority 4: Critical hunger (need bread to eat, but they'll seek wheat to make bread)
-        if char['hunger'] <= HUNGER_CRITICAL and self.get_bread(char) < BREAD_PER_BITE:
-            wheat_goal = self._get_wheat_goal(char)
-            if wheat_goal:
-                return wheat_goal
-        
-        # Priority 5: Job-specific goals
-        job = char.get('job')
-        if job == 'Farmer':
-            return self._get_farmer_goal(char)
-        elif job == 'Soldier':
-            return self._get_soldier_goal(char)
-        elif job == 'Steward':
-            return self._get_steward_goal(char)
-        elif job == 'Trader':
-            # Traders can be promoted to steward - go to barracks if eligible
-            if self.is_steward_job_available() and self.is_best_steward_candidate(char):
-                military_area = self.state.get_area_by_role('military_housing')
-                if self.state.get_area_at(char['x'], char['y']) != military_area:
-                    return self._nearest_in_area(char, military_area)
-        
-        # Priority 6: Job seeking (unified system - seeks best available job by tier)
-        if job is None and self.wants_job(char):
-            best_job = self.get_best_available_job(char)
-            if best_job == 'Steward':
-                # Go to barracks to accept steward position
-                if self.state.get_area_at(char['x'], char['y']) != self.state.get_area_by_role('military_housing'):
-                    return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
-            elif best_job == 'Trader':
-                # Traders are self-employed - can start anywhere, no goal needed
-                # They'll become a trader in the action phase
-                pass
-            elif best_job == 'Soldier':
-                # Go to barracks to enlist
-                if self.state.get_area_at(char['x'], char['y']) != self.state.get_area_by_role('military_housing'):
-                    return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
-            elif best_job == 'Farmer':
-                # Go to steward to enlist
-                steward = self.get_steward()
-                if steward:
-                    return (steward['x'], steward['y'])
-        
-        # Priority 7: Non-critical hunger (no bread to eat) OR low wheat buffer
-        if (self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE) or self.needs_wheat_buffer(char):
-            wheat_goal = self._get_wheat_goal(char)
-            if wheat_goal:
-                return wheat_goal
-        
-        # Priority 8: Go to / wander in home area
-        home = char.get('home')
-        if home:
-            # Check if already in home area
-            current_area = self.state.get_area_at(char['x'], char['y'])
-            is_village_home = self.state.is_village_area(home)
-            
-            if is_village_home:
-                in_home = self.state.is_in_village(char['x'], char['y'])
-            else:
-                in_home = (current_area == home)
-            
-            if in_home:
-                # Already home - wander within area
-                return self._get_wander_goal(char, home)
-            else:
-                # Not home - move toward home
-                return self._nearest_in_area(char, home, is_village=is_village_home)
-        
-        # No home - use idle wandering system with a null area (wanders anywhere non-farm)
-        return self._get_homeless_idle_goal(char)
+        return char.goal
     
     def _get_homeless_idle_goal(self, char):
         """Get idle goal for a homeless character - wanders anywhere except farm cells.
@@ -2494,7 +2022,7 @@ class GameLogic:
         job = char.get('job')
         
         # If we have wheat but no bread, we need to cook
-        if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO and self.get_bread(char) < BREAD_PER_BITE:
+        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO and char.get_item('bread') < BREAD_PER_BITE:
             # Find nearest cooking spot
             cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
             if cooking_spot and cooking_pos:
@@ -2513,290 +2041,29 @@ class GameLogic:
         # Need to get wheat
         if job == 'Soldier':
             # Go to barracks barrel position
-            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
+            barracks_barrel = self.state.interactables.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
             if barracks_barrel:
-                barrel_pos = self.state.get_barrel_position(barracks_barrel)
+                barrel_pos = barracks_barrel.position
                 if barrel_pos:
                     return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
         
         # Farmer: go to farm barrel to withdraw wheat
         if job == 'Farmer':
-            farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
+            farm_barrel = self.state.interactables.get_barrel_by_home(char.get('home'))
             if farm_barrel:
-                barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
+                barrel_wheat = farm_barrel.get_item('wheat')
                 if barrel_wheat > 0:
-                    barrel_pos = self.state.get_barrel_position(farm_barrel)
+                    barrel_pos = farm_barrel.position
                     if barrel_pos:
                         return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             # No barrel or empty barrel - fall through to buying logic
         
-        if self.can_afford_any_wheat(char):
-            farmer = self.find_willing_farmer(char)
+        if self.can_afford_goods(char, 'wheat'):
+            farmer = self.find_willing_vendor(char, 'wheat')
             if farmer:
                 return (farmer['x'], farmer['y'])
         return None
-    
-    def _get_farmer_goal(self, char):
-        """Get farmer's movement goal. Returns float position."""
-        char_allegiance = char.get('allegiance')
-        steward = self.state.get_steward_for_allegiance(char_allegiance) if char_allegiance else None
-        if steward:
-            # Go pay tax if tax is due (current tick >= tax_due_tick)
-            tax_due_tick = char.get('tax_due_tick')
-            if tax_due_tick is not None and self.state.ticks >= tax_due_tick:
-                return (steward['x'], steward['y'])
-        
-        # Priority: If hungry and have wheat but no bread, go cook
-        # Also check if barrel has wheat that we should withdraw first
-        if self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE:
-            personal_wheat = self.get_wheat(char)
-            
-            # If we have enough personal wheat, go to cooking spot
-            if personal_wheat >= WHEAT_TO_BREAD_RATIO:
-                # Have wheat, need to cook it
-                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
-                if cooking_spot and cooking_pos:
-                    return cooking_pos
-                # No cooking spot - farmer has a stove at home, should go there
-                # This shouldn't happen for farmers but fallback to camp
-                if not self.can_make_camp_at(char['x'], char['y']):
-                    camp_spot = self._find_camp_spot(char)
-                    if camp_spot:
-                        return camp_spot
-            else:
-                # No personal wheat - go to barrel to withdraw
-                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-                if farm_barrel:
-                    barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
-                    if barrel_wheat > 0:
-                        barrel_pos = self.state.get_barrel_position(farm_barrel)
-                        if barrel_pos:
-                            return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-        
-        day_tick = self.state.ticks % TICKS_PER_DAY
-        is_work_time = day_tick < TICKS_PER_DAY // 2  # Work first half of day
-        is_market_time = TICKS_PER_DAY // 2 <= day_tick < TICKS_PER_DAY * 2 // 3  # Market second quarter (50-67%)
-        
-        home = char.get('home')
-        
-        if is_work_time:
-            # Check if inventory full - go to barrel to deposit
-            if self.is_inventory_full(char):
-                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-                if farm_barrel:
-                    barrel_pos = self.state.get_barrel_position(farm_barrel)
-                    if barrel_pos:
-                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-                # Fallback if no barrel - wander in home or village
-                if home:
-                    return self._get_wander_goal(char, home)
-                return None
-            
-            # Check if has a full stack of wheat to deposit
-            farmer_wheat = self.get_wheat(char)
-            if farmer_wheat >= ITEMS["wheat"]["stack_size"]:
-                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-                if farm_barrel and self.state.can_barrel_add_wheat(farm_barrel, 1):
-                    barrel_pos = self.state.get_barrel_position(farm_barrel)
-                    if barrel_pos and not self.state.is_adjacent_to_barrel(char, farm_barrel):
-                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-            
-            # Work on farm
-            if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('farm'):
-                return self._nearest_ready_farm_cell(char)
-            return self._nearest_in_area(char, self.state.get_area_by_role('farm'))
-        elif is_market_time:
-            # Market time - go to market stall if has stuff to sell
-            sellable = self.get_farmer_sellable_wheat(char)
-            if sellable >= 1:
-                # Has stuff to sell - go to market and stand still
-                if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('market'):
-                    return None  # Already at market - stand still (manning stall)
-                return self._nearest_in_area(char, self.state.get_area_by_role('market'))
-            else:
-                # Nothing to sell - keep farming
-                if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('farm'):
-                    return self._nearest_ready_farm_cell(char)
-                return self._nearest_in_area(char, self.state.get_area_by_role('farm'))
-        else:
-            # After market time (67%+) - sleep handles this via Priority 0
-            # But if not sleep time yet somehow, go home
-            if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('farm'):
-                return None
-            return self._nearest_in_area(char, self.state.get_area_by_role('farm'))
-    
-    def _get_soldier_goal(self, char):
-        """Get soldier's movement goal. Returns float position.
-        
-        Soldiers march patrol routes covering ground throughout the village.
-        Each soldier gets the same set of waypoints but shuffled into a unique
-        order, so they cover the same ground but take different paths. This
-        ensures thorough coverage while soldiers don't follow each other.
-        
-        Patrol states:
-        - 'marching': Moving to next waypoint
-        - 'checking': Brief pause to survey area (8% chance at each waypoint)
-        
-        When hungry, they return to barracks and wait for the steward.
-        """
-        needs_food = self.needs_wheat_buffer(char)
-        
-        if needs_food:
-            # Not patrolling while waiting for food
-            char['is_patrolling'] = False
-            
-            # If have wheat, go cook it first (don't request more)
-            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
-                char['requested_wheat'] = False  # Clear request - we have wheat to cook
-                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
-                if cooking_spot and cooking_pos:
-                    return cooking_pos
-            
-            # No wheat - request from steward and wait
-            char['patrol_waypoint_idx'] = None  # Reset patrol when hungry
-            if not char.get('requested_wheat'):
-                char['requested_wheat'] = True
-                name = self.get_display_name(char)
-                self.state.log_action(f"{name} is waiting for food from the Steward")
-            # Wait in barracks
-            military_area = self.state.get_area_by_role('military_housing')
-            if self.state.get_area_at(char['x'], char['y']) == military_area:
-                return self._get_wander_goal(char, military_area)
-            return self._nearest_in_area(char, military_area)
-        
-        # Get patrol waypoints for this soldier's allegiance
-        allegiance = char.get('allegiance')
-        waypoints = self.state.get_patrol_waypoints(allegiance)
-        
-        if not waypoints:
-            # No waypoints - just wander in military housing
-            char['is_patrolling'] = False
-            military_area = self.state.get_area_by_role('military_housing')
-            return self._get_wander_goal(char, military_area)
-        
-        # Mark character as patrolling (for speed adjustment)
-        char['is_patrolling'] = True
-        
-        # Handle checking state - brief pause to survey
-        if char.get('patrol_state') == 'checking':
-            wait_ticks = char.get('patrol_wait_ticks', 0)
-            if wait_ticks > 0:
-                char['patrol_wait_ticks'] = wait_ticks - 1
-                return None  # Stay still - checking area
-            else:
-                # Done checking, resume march
-                char['patrol_state'] = 'marching'
-        
-        # Get or initialize waypoint index and direction
-        waypoint_idx = char.get('patrol_waypoint_idx')
-        
-        if waypoint_idx is None:
-            # Starting patrol - randomize start position and direction based on soldier name
-            # This spreads soldiers across different parts of the route going different directions
-            name_hash = hash(char['name'])
-            waypoint_idx = name_hash % len(waypoints)
-            # Direction: 1 (forward) or -1 (backward) through waypoints
-            char['patrol_direction'] = 1 if (name_hash // len(waypoints)) % 2 == 0 else -1
-            char['patrol_waypoint_idx'] = waypoint_idx
-        
-        direction = char.get('patrol_direction', 1)
-        
-        # Get current target waypoint
-        target_x, target_y = waypoints[waypoint_idx]
-        
-        # Check if we've reached the waypoint
-        dist = math.sqrt((char['x'] - target_x)**2 + (char['y'] - target_y)**2)
-        
-        if dist < PATROL_APPROACH_DISTANCE:
-            # Reached waypoint - maybe pause to check, then move to next
-            if random.random() < PATROL_CHECK_CHANCE:
-                char['patrol_state'] = 'checking'
-                char['patrol_wait_ticks'] = random.randint(PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS)
-            
-            # Advance to next waypoint in our direction (wrap around)
-            waypoint_idx = (waypoint_idx + direction) % len(waypoints)
-            char['patrol_waypoint_idx'] = waypoint_idx
-            
-            # If we just started checking, stay still
-            if char.get('patrol_state') == 'checking':
-                return None
-            
-            # Otherwise get new target
-            target_x, target_y = waypoints[waypoint_idx]
-        
-        return (target_x, target_y)
-    
-    def _get_steward_goal(self, char):
-        """Get steward's movement goal. Returns float position.
-        
-        Priority order:
-        1. Tax collection target
-        2. Feed hungry soldiers (go to them if has wheat, go to barrel if not)
-        3. Own hunger needs
-        4. Buy wheat from farmers
-        5. Deposit excess wheat
-        6. Wander in barracks
-        """
-        # Priority 1: Tax collection
-        target = char.get('tax_collection_target')
-        if target and target in self.state.characters:
-            return (target['x'], target['y'])
-        
-        # Priority 2: Feed hungry soldiers who have requested wheat
-        hungry_soldiers = self._get_soldiers_requesting_wheat()
-        if hungry_soldiers:
-            steward_wheat = self.get_wheat(char)
-            
-            if steward_wheat >= SOLDIER_WHEAT_PAYMENT:
-                # Have enough for at least one soldier - go to closest requesting soldier
-                closest_soldier = min(hungry_soldiers, key=lambda s: self.get_distance(char, s))
-                return (closest_soldier['x'], closest_soldier['y'])
-            else:
-                # Check if barrel has wheat before going there
-                barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-                if barracks_barrel and self.state.get_barrel_wheat(barracks_barrel) > 0:
-                    barrel_pos = self.state.get_barrel_position(barracks_barrel)
-                    if barrel_pos:
-                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-                # No wheat available - fall through to other priorities
-        
-        # Priority 3: Go to barrel to get wheat when hungry and low on bread
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE:
-            # If have wheat, go cook it
-            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
-                cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
-                if cooking_spot and cooking_pos:
-                    return cooking_pos
-            
-            # Otherwise get wheat from barrel
-            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-            if barracks_barrel and self.state.get_barrel_wheat(barracks_barrel) >= SOLDIER_WHEAT_PAYMENT:
-                barrel_pos = self.state.get_barrel_position(barracks_barrel)
-                if barrel_pos:
-                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-        
-        # Priority 4: Buy wheat from farmers
-        if self.steward_needs_to_buy_wheat(char) and self.can_afford_any_wheat(char):
-            farmer = self.find_willing_farmer(char)
-            if farmer:
-                return (farmer['x'], farmer['y'])
-        
-        # Priority 5: If has excess wheat, go to barrel to deposit
-        personal_wheat = self.get_wheat(char)
-        personal_reserve = 3
-        if personal_wheat > personal_reserve:
-            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-            if barracks_barrel:
-                barrel_pos = self.state.get_barrel_position(barracks_barrel)
-                if barrel_pos:
-                    return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-        
-        # Priority 6: Wander in barracks
-        if self.state.get_area_at(char['x'], char['y']) == self.state.get_area_by_role('military_housing'):
-            # Already in barracks - wander around naturally
-            return self._get_wander_goal(char, self.state.get_area_by_role('military_housing'))
-        return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
     
     def _get_soldiers_requesting_wheat(self):
         """Get list of soldiers who have requested wheat from the steward."""
@@ -2972,8 +2239,13 @@ class GameLogic:
         
         return best_free if best_free else best_any
     
-    def _nearest_ready_farm_cell(self, char):
-        """Find nearest ready farm cell. Returns float position (cell center)."""
+    def _nearest_ready_farm_cell(self, char, home=None):
+        """Find nearest ready farm cell. Returns float position (cell center).
+        
+        Args:
+            char: The character looking for a cell
+            home: Filter to only cells owned by this farm. If None, searches all.
+        """
         # Check if character is already on a farm cell being worked
         char_cell = (int(char['x']), int(char['y']))
         cell = self.state.get_farm_cell_state(char_cell[0], char_cell[1])
@@ -2984,6 +2256,9 @@ class GameLogic:
         best_dist = float('inf')
         for (cx, cy), data in self.state.farm_cells.items():
             if data['state'] == 'ready':
+                # Filter by home (owning farm) if specified
+                if home and data.get('home') != home:
+                    continue
                 # Distance to cell center
                 center_x, center_y = cx + 0.5, cy + 0.5
                 dist = math.sqrt((center_x - char['x']) ** 2 + (center_y - char['y']) ** 2)
@@ -3117,382 +2392,45 @@ class GameLogic:
     # NPC ACTIONS (non-movement)
     # =========================================================================
     
-    def _do_npc_actions(self, char):
-        """Execute non-movement actions for an NPC."""
-        # Check if character is still alive (may have been killed this tick)
-        if char not in self.state.characters:
-            return
-        
-        name = self.get_display_name(char)
-        job = char.get('job')
-        
-        if char.get('is_frozen'):
-            self._try_frozen_trade(char)
-            return
-        
-        # Combat
-        target = char.get('robbery_target')
-        if target and target in self.state.characters:
-            if self.is_adjacent(char, target) and self.can_attack(char):
-                self._do_attack(char, target)
-                return
-        
-        # Respond to attacker
-        attacker = self.get_attacker(char)
-        if attacker and self.is_adjacent(char, attacker) and self.can_attack(char):
-            confidence = self.get_trait(char, 'confidence')
-            if confidence >= 7:
-                if not char.get('robbery_target'):
-                    self.state.log_action(f"{name} FIGHTING BACK against {self.get_display_name(attacker)}!")
-                char['robbery_target'] = attacker
-                self._do_attack(char, attacker)
-                return
-        
-        # Eat if hungry (bread only - wheat cannot be eaten)
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) >= BREAD_PER_BITE:
-            self.remove_bread(char, BREAD_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
-            self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
-            return
-        
-        # Cook if hungry, have wheat, no bread, and at a cooking spot
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO and self.get_bread(char) < BREAD_PER_BITE:
-            if self.can_bake_bread(char):
-                # Bake enough to eat and maintain buffer
-                amount_to_bake = min(self.get_wheat(char), BREAD_BUFFER_TARGET)
-                self.bake_bread(char, amount_to_bake)
-                return
-            
-            # If at a valid camp spot and no cooking available, make a camp
-            if not self.has_access_to_cooking(char) and self.can_make_camp_at(char['x'], char['y']):
-                self.make_camp(char)
-                return
-        
-        # Job-specific actions
-        if job == 'Farmer':
-            self._do_farmer_actions(char)
-        elif job == 'Soldier':
-            self._do_soldier_actions(char)
-        elif job == 'Steward':
-            self._do_steward_actions(char)
-        elif job == 'Trader':
-            # Traders can be promoted to steward
-            if self.can_become_steward(char):
-                self.become_steward(char)
-            else:
-                # Otherwise behave like unemployed
-                self._do_unemployed_actions(char)
-        else:
-            self._do_unemployed_actions(char)
-    
-    def _do_farmer_actions(self, char):
-        """Farmer actions."""
-        name = self.get_display_name(char)
-        char_allegiance = char.get('allegiance')
-        steward = self.state.get_steward_for_allegiance(char_allegiance) if char_allegiance else None
-        farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-        
-        # Tax payment - if tax is due (current tick >= tax_due_tick)
-        tax_due_tick = char.get('tax_due_tick')
-        if steward and self.is_adjacent(char, steward) and tax_due_tick is not None and self.state.ticks >= tax_due_tick:
-            # Calculate total available wheat (inventory + barrel - farmer owns the barrel)
-            farmer_wheat = self.get_wheat(char)
-            barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
-            total_wheat = farmer_wheat + barrel_wheat
-            
-            if total_wheat >= STEWARD_TAX_AMOUNT:
-                # Pay tax - take from inventory first, then barrel
-                amount_needed = STEWARD_TAX_AMOUNT
-                from_inventory = min(farmer_wheat, amount_needed)
-                if from_inventory > 0:
-                    self.remove_wheat(char, from_inventory)
-                    amount_needed -= from_inventory
-                if amount_needed > 0 and farm_barrel:
-                    self.state.remove_barrel_wheat(farm_barrel, amount_needed)
-                
-                self.add_wheat(steward, STEWARD_TAX_AMOUNT)
-                char['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL  # Next tax due in 1 year
-                steward['tax_collection_target'] = None
-                self.state.log_action(f"{name} paid {STEWARD_TAX_AMOUNT} wheat tax")
-            else:
-                self.state.log_action(f"{name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
-                char['job'] = None
-                char['home'] = None
-                char['tax_due_tick'] = None
-                steward['tax_collection_target'] = None
-                # Remove bed ownership
-                self.state.unassign_bed_owner(char['name'])
-            return
-        
-        # Withdraw wheat from barrel when hungry and low on personal wheat
-        if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
-            # Check if we need wheat for bread buffer
-            if self.needs_wheat_buffer(char) and self.get_wheat(char) < BREAD_BUFFER_TARGET:
-                barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
-                if barrel_wheat > 0:
-                    # Withdraw enough for bread buffer
-                    amount_needed = BREAD_BUFFER_TARGET - self.get_wheat(char)
-                    amount_to_withdraw = min(amount_needed, barrel_wheat)
-                    if amount_to_withdraw > 0 and self.can_add_wheat(char, amount_to_withdraw):
-                        self.state.remove_barrel_wheat(farm_barrel, amount_to_withdraw)
-                        self.add_wheat(char, amount_to_withdraw)
-                        self.state.log_action(f"{name} withdrew {amount_to_withdraw} wheat from barrel for food")
-                        return
-        
-        # Deposit wheat into farm barrel when adjacent to it (only full stacks)
-        # Keep BREAD_BUFFER_TARGET wheat for personal bread buffer
-        if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
-            farmer_wheat = self.get_wheat(char)
-            # Reserve wheat for bread buffer before depositing
-            wheat_to_keep = BREAD_BUFFER_TARGET
-            wheat_to_deposit = farmer_wheat - wheat_to_keep
-            # Only deposit if we have at least a full stack after keeping reserve
-            if wheat_to_deposit >= ITEMS["wheat"]["stack_size"] and self.state.can_barrel_add_wheat(farm_barrel, wheat_to_deposit):
-                self.remove_wheat(char, wheat_to_deposit)
-                self.state.add_barrel_wheat(farm_barrel, wheat_to_deposit)
-    
-    def _do_soldier_actions(self, char):
-        """Soldier actions.
-        
-        Soldiers no longer get wheat directly from the barrel.
-        Instead, they request wheat from the steward and wait for delivery.
-        The steward will come to them with food.
-        """
-        # Soldiers just wait - steward handles feeding them
-        # Clear the wheat request flag when buffer is satisfied
-        if not self.needs_wheat_buffer(char):
-            char['requested_wheat'] = False
-    
-    def _do_steward_actions(self, char):
-        """Steward actions.
-        
-        Priority order:
-        1. Feed adjacent hungry soldiers from inventory
-        2. Get wheat from barrel for hungry soldiers (if not enough in inventory)
-        3. Get wheat from barrel for self when hungry
-        4. Tax collection
-        5. Deposit excess wheat
-        6. Buy wheat from farmers
-        """
-        name = self.get_display_name(char)
-        
-        # Priority 1: Feed adjacent hungry soldiers from inventory
-        hungry_soldiers = self._get_soldiers_requesting_wheat()
-        for soldier in hungry_soldiers:
-            if self.is_adjacent(char, soldier):
-                if self.get_wheat(char) >= SOLDIER_WHEAT_PAYMENT and self.can_add_wheat(soldier, SOLDIER_WHEAT_PAYMENT):
-                    self.remove_wheat(char, SOLDIER_WHEAT_PAYMENT)
-                    self.add_wheat(soldier, SOLDIER_WHEAT_PAYMENT)
-                    soldier['requested_wheat'] = False
-                    soldier_name = self.get_display_name(soldier)
-                    self.state.log_action(f"Steward {name} gave {SOLDIER_WHEAT_PAYMENT} wheat to {soldier_name}")
-                    return  # One action per tick
-        
-        # Priority 2: Get wheat from barrel for hungry soldiers (if not enough in inventory)
-        if hungry_soldiers:
-            total_needed = len(hungry_soldiers) * SOLDIER_WHEAT_PAYMENT
-            steward_wheat = self.get_wheat(char)
-            wheat_shortfall = total_needed - steward_wheat
-            
-            if wheat_shortfall > 0:
-                barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-                if barracks_barrel and self.state.is_adjacent_to_barrel(char, barracks_barrel):
-                    barrel_wheat = self.state.get_barrel_wheat(barracks_barrel)
-                    # Take enough for all hungry soldiers (or as much as available)
-                    amount_to_take = min(wheat_shortfall, barrel_wheat)
-                    if amount_to_take > 0 and self.can_add_wheat(char, amount_to_take):
-                        self.state.remove_barrel_wheat(barracks_barrel, amount_to_take)
-                        self.add_wheat(char, amount_to_take)
-                        self.state.log_action(f"Steward {name} took {amount_to_take} wheat from barrel for soldiers")
-                        return  # One action per tick
-        
-        # Priority 3: Get wheat from barracks barrel when adjacent to it and hungry (no bread)
-        if char['hunger'] <= HUNGER_CHANCE_THRESHOLD and self.get_bread(char) < BREAD_PER_BITE:
-            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-            if barracks_barrel and self.state.is_adjacent_to_barrel(char, barracks_barrel):
-                if self.state.get_barrel_wheat(barracks_barrel) >= SOLDIER_WHEAT_PAYMENT:
-                    if self.can_add_wheat(char, SOLDIER_WHEAT_PAYMENT):
-                        self.state.remove_barrel_wheat(barracks_barrel, SOLDIER_WHEAT_PAYMENT)
-                        self.add_wheat(char, SOLDIER_WHEAT_PAYMENT)
-                        self.state.log_action(f"Steward {name} took {SOLDIER_WHEAT_PAYMENT} wheat from barracks barrel")
-                        return
-        
-        # Priority 4: Tax collection - if farmer has overdue tax
-        target = char.get('tax_collection_target')
-        if target and target in self.state.characters and self.is_adjacent(char, target):
-            target_name = self.get_display_name(target)
-            tax_due_tick = target.get('tax_due_tick')
-            if tax_due_tick is not None and self.state.ticks >= tax_due_tick:
-                # Calculate total available wheat (inventory + barrel)
-                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
-                farmer_wheat = self.get_wheat(target)
-                barrel_wheat = self.state.get_barrel_wheat(farm_barrel) if farm_barrel else 0
-                total_wheat = farmer_wheat + barrel_wheat
-                
-                if total_wheat >= STEWARD_TAX_AMOUNT:
-                    # Collect tax - take from inventory first, then barrel
-                    amount_needed = STEWARD_TAX_AMOUNT
-                    from_inventory = min(farmer_wheat, amount_needed)
-                    if from_inventory > 0:
-                        self.remove_wheat(target, from_inventory)
-                        amount_needed -= from_inventory
-                    if amount_needed > 0 and farm_barrel:
-                        self.state.remove_barrel_wheat(farm_barrel, amount_needed)
-                    
-                    self.add_wheat(char, STEWARD_TAX_AMOUNT)
-                    target['tax_due_tick'] = self.state.ticks + STEWARD_TAX_INTERVAL
-                    char['tax_collection_target'] = None
-                    self.state.log_action(f"Steward {name} collected {STEWARD_TAX_AMOUNT} wheat tax from {target_name}")
-                else:
-                    self.state.log_action(f"{target_name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
-                    target['job'] = None
-                    target['home'] = None
-                    target['tax_due_tick'] = None
-                    char['tax_collection_target'] = None
-                    # Remove bed ownership
-                    self.state.unassign_bed_owner(target['name'])
-            return
-        
-        # Priority 5: Deposit wheat into barracks barrel when adjacent to it (only if no hungry soldiers)
-        if not hungry_soldiers:
-            barracks_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-            if barracks_barrel and self.state.is_adjacent_to_barrel(char, barracks_barrel):
-                # Keep some personal wheat (3 wheat = 1 day buffer), deposit the rest
-                personal_wheat = self.get_wheat(char)
-                personal_reserve = 3  # 1 day of wheat
-                excess = personal_wheat - personal_reserve
-                if excess > 0 and self.state.can_barrel_add_wheat(barracks_barrel, excess):
-                    self.remove_wheat(char, excess)
-                    self.state.add_barrel_wheat(barracks_barrel, excess)
-                    self.state.log_action(f"Steward {name} deposited {excess} wheat into barracks barrel")
-                    return
-        
-        # Priority 6: Buy wheat from farmers
-        if self.steward_needs_to_buy_wheat(char) and self.can_afford_any_wheat(char):
-            farmer = self.find_adjacent_farmer(char)
-            if farmer and self.farmer_willing_to_trade(farmer, char):
-                amount = self.get_max_trade_amount(farmer, char)
-                if amount > 0:
-                    price = int(amount * ITEMS["wheat"]["price"])
-                    self.execute_trade(farmer, char, amount)
-                    self.state.log_action(f"Steward {name} bought {amount} wheat for ${price}")
-    
-    def _do_unemployed_actions(self, char):
-        """Unemployed character actions."""
-        name = self.get_display_name(char)
-        
-        # Try to get a job (unified system picks best available by tier)
-        if self.wants_job(char):
-            best_job = self.get_best_available_job(char)
-            if best_job == 'Steward' and self.can_become_steward(char):
-                self.become_steward(char)
-                return
-            elif best_job == 'Trader' and self.can_become_trader(char):
-                self.become_trader(char)
-                return
-            elif best_job == 'Soldier' and self.can_enlist_as_soldier(char):
-                self.enlist_as_soldier(char)
-                return
-            elif best_job == 'Farmer' and self.can_enlist_as_farmer(char):
-                self.enlist_as_farmer(char)
-                return
-        
-        # Seek wheat if hungry (no bread) OR if wheat buffer is low
-        is_hungry = self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE
-        needs_buffer = self.needs_wheat_buffer(char)
-        
-        if is_hungry or needs_buffer:
-            # Try to buy from adjacent vendor (Farmer, Innkeeper, etc.)
-            if self.can_afford_any_wheat(char):
-                vendor = self.find_adjacent_vendor(char, 'wheat')
-                if vendor and self.vendor_willing_to_trade(vendor, char, 'wheat'):
-                    amount = self.get_max_vendor_trade_amount(vendor, char, 'wheat')
-                    if amount > 0:
-                        price = self.get_goods_price('wheat', amount)
-                        self.execute_vendor_trade(vendor, char, 'wheat', amount)
-                        char['wheat_seek_ticks'] = 0
-                        self.state.log_action(f"{name} bought {amount} wheat for ${price} from {self.get_display_name(vendor)}")
-                        return
-            
-            # Only consider crime if actually hungry (not just buffering) and can't buy
-            if is_hungry:
-                can_buy = self.can_afford_any_wheat(char) and self.find_willing_vendor(char, 'wheat') is not None
-                if not can_buy:
-                    # Don't re-roll if already pursuing a crime
-                    if char.get('theft_target'):
-                        self.continue_theft(char)
-                    elif char.get('robbery_target'):
-                        self.continue_robbery(char)
-                    else:
-                        # Decide on new crime
-                        crime = self.decide_crime_action(char)
-                        if crime == 'theft':
-                            self.try_farm_theft(char)
-                        elif crime == 'robbery':
-                            self.try_robbery(char)
-    
     def _try_frozen_trade(self, char):
         """Frozen character tries to trade with any adjacent wheat vendor.
         Note: They buy wheat but can't eat it - they need bread to recover.
         """
-        if self.can_afford_any_wheat(char):
+        if self.can_afford_goods(char, 'wheat'):
             vendor = self.find_adjacent_vendor(char, 'wheat')
             if vendor and self.vendor_willing_to_trade(vendor, char, 'wheat'):
                 amount = self.get_max_vendor_trade_amount(vendor, char, 'wheat')
                 if amount > 0:
                     self.execute_vendor_trade(vendor, char, 'wheat', amount)
-                    name = self.get_display_name(char)
+                    name = char.get_display_name()
                     self.state.log_action(f"{name} (frozen) bought {amount} wheat!")
                     # They have wheat but can't eat it - need bread to recover
-                    if self.get_bread(char) >= BREAD_PER_BITE:
-                        self.remove_bread(char, BREAD_PER_BITE)
+                    if char.get_item('bread') >= BREAD_PER_BITE:
+                        char.remove_item('bread', BREAD_PER_BITE)
                         char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
                         char['is_starving'] = False
                         char['is_frozen'] = False
                         self.state.log_action(f"{name} ate bread and recovered from starvation!")
     
     def _do_attack(self, attacker, target):
-        """Execute an attack."""
-        import time
-        
-        # Don't attack dying characters
-        if target.get('is_dying'):
-            return
-        
-        attacker_name = self.get_display_name(attacker)
-        target_name = self.get_display_name(target)
+        """Execute an attack. Wrapper around resolve_melee_attack for NPC combat."""
+        # Set attack animation direction toward target
+        dx = target.x - attacker.x
+        dy = target.y - attacker.y
+        if abs(dx) > abs(dy):
+            attacker.attack_direction = 'right' if dx > 0 else 'left'
+        else:
+            attacker.attack_direction = 'down' if dy > 0 else 'up'
+        attacker.attack_animation_start = time.time()
         
         # Record attack tick for cooldown
         attacker['last_attack_tick'] = self.state.ticks
         
-        # Start attack animation
-        attacker['attack_animation_start'] = time.time()
-        # Calculate attack direction toward target
-        dx = target['x'] - attacker['x']
-        dy = target['y'] - attacker['y']
-        if abs(dx) > abs(dy):
-            attacker['attack_direction'] = 'right' if dx > 0 else 'left'
-        else:
-            attacker['attack_direction'] = 'down' if dy > 0 else 'up'
+        # Use unified attack resolution
+        result = self.resolve_melee_attack(attacker, target)
         
-        damage = random.randint(2, 5)  # Reduced damage (was 10-20)
-        target['health'] -= damage
-        self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target['health']}")
-        
-        if target['health'] <= 0:
-            attacker_is_defender = not attacker.get('is_aggressor', False)
-            target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
-            
-            if attacker_is_defender and target_was_criminal:
-                # Kill message logged in death handling
-                pass
-            else:
-                attacker['is_murderer'] = True
-                self.witness_murder(attacker, target)
-            
-            # Transfer items immediately
-            self.state.transfer_all_items(target, attacker)
-            # Clear attacker's target (death animation will handle removal)
+        # Handle post-attack cleanup for NPCs
+        if result['killed']:
             attacker['robbery_target'] = None
             attacker['is_aggressor'] = False
 
@@ -3512,6 +2450,10 @@ class GameLogic:
         # Process starvation
         self._process_starvation()
         
+        # Handle deaths IMMEDIATELY - remove from game logic, store visual info separately
+        # This must happen right after starvation before any other processing
+        self._process_deaths()
+        
         # Update farm cells
         self._update_farm_cells()
         
@@ -3522,7 +2464,7 @@ class GameLogic:
             self.state.log_action(f"A new year begins! Everyone is one year older.")
         
         # Tax grace period check - steward goes to collect if farmer is late
-        steward = self.get_steward()
+        steward = self.state.get_steward()
         if steward:
             steward_allegiance = steward.get('allegiance')
             for char in self.state.characters:
@@ -3530,52 +2472,59 @@ class GameLogic:
                     tax_due_tick = char.get('tax_due_tick')
                     if tax_due_tick is not None and self.state.ticks >= tax_due_tick + TAX_GRACE_PERIOD:
                         if steward.get('tax_collection_target') != char:
-                            steward_name = self.get_display_name(steward)
-                            char_name = self.get_display_name(char)
+                            steward_name = steward.get_display_name()
+                            char_name = char.get_display_name()
                             self.state.log_action(f"Steward {steward_name} going to collect tax from {char_name}!")
                             steward['tax_collection_target'] = char
         
-        # Handle deaths (now health-based, not hunger-based)
-        # Death animation duration - 6 frames at 150ms each = 0.9 seconds
-        DEATH_ANIMATION_DURATION = 0.9
-        current_time = time.time()
-        
-        for char in self.state.characters:
-            if char['health'] <= 0:
-                # Start death animation if not already started
-                if 'death_animation_start' not in char:
-                    char['death_animation_start'] = current_time
-                    char['is_dying'] = True
-                    char['vx'] = 0.0  # Stop movement
-                    char['vy'] = 0.0
-                    
-                    # Log death message
-                    dead_name = self.get_display_name(char)
-                    if self.is_player(char):
-                        if char.get('is_starving'):
-                            self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
-                        else:
-                            self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
-                    else:
-                        if char.get('is_starving'):
-                            self.state.log_action(f"{dead_name} DIED from starvation!")
-                        else:
-                            self.state.log_action(f"{dead_name} DIED!")
-        
-        # Remove characters whose death animation has finished
-        dead_chars = [c for c in self.state.characters 
-                      if c.get('is_dying') and 
-                      current_time - c.get('death_animation_start', 0) > DEATH_ANIMATION_DURATION]
-        for dead in dead_chars:
-            self.state.remove_character(dead)
-        
         # Move NPCs with swap detection to prevent oscillation
         self._process_npc_movement()
+        
+        # Process deaths again to catch combat kills
+        self._process_deaths()
+    
+    def _process_deaths(self):
+        """Remove dead characters from game and store visual info for death animation"""
+        import time
+        current_time = time.time()
+        
+        dead_chars = [char for char in self.state.characters if char['health'] <= 0]
+        for char in dead_chars:
+            # Log death message
+            dead_name = char.get_display_name()
+            if char.is_player:
+                if char.get('is_starving'):
+                    self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
+                else:
+                    self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
+            else:
+                if char.get('is_starving'):
+                    self.state.log_action(f"{dead_name} DIED from starvation!")
+                else:
+                    self.state.log_action(f"{dead_name} DIED!")
+            
+            # Store visual info for death animation (GUI concern only)
+            self.state.death_animations.append({
+                'x': char['x'],
+                'y': char['y'],
+                'name': char['name'],
+                'start_time': current_time,
+                'facing': char.get('facing', 'down'),
+                'job': char.get('job'),
+                'morality': char.get('morality', 5)
+            })
+            
+            # Immediately remove from game - no more processing
+            self.state.remove_character(char)
     
     def _process_starvation(self):
         """Process starvation for all characters"""
         for char in self.state.characters:
-            name = self.get_display_name(char)
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            name = char.get_display_name()
             
             # Check if character should enter starvation (hunger = 0)
             if char['hunger'] <= STARVATION_THRESHOLD:
@@ -3595,7 +2544,7 @@ class GameLogic:
                         char['job'] = None
                         char['home'] = None
                         # Remove bed ownership
-                        self.state.unassign_bed_owner(char['name'])
+                        self.state.interactables.unassign_bed_owner(char['name'])
                         self.state.log_action(f"{name} QUIT being a Soldier due to starvation!")
                 
                 # Increment ticks starving
@@ -3643,6 +2592,10 @@ class GameLogic:
         # Only farmers can legitimately harvest - others (including player) commit theft
         cells_being_worked = set()
         for char in self.state.characters:
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
             # Convert float position to cell coordinates
             cell = (int(char['x']), int(char['y']))
             if cell in self.state.farm_cells and cell not in cells_being_worked:
@@ -3650,14 +2603,14 @@ class GameLogic:
                 
                 # Only farmers can work farm cells without it being theft
                 is_farmer = char.get('job') == 'Farmer'
-                is_player = self.is_player(char)
+                is_player = char.is_player
                 
                 if not is_farmer and not is_player:
                     continue  # Non-farmers/non-players use try_farm_theft via AI
                 
                 if data['state'] == 'ready':
                     # Check if can carry more wheat
-                    if not self.can_add_wheat(char, FARM_CELL_YIELD):
+                    if not char.can_add_item('wheat', FARM_CELL_YIELD):
                         continue  # Inventory full, can't harvest
                     data['state'] = 'harvesting'
                     data['timer'] = FARM_HARVEST_TIME
@@ -3668,12 +2621,12 @@ class GameLogic:
                     data['timer'] -= 1
                     if data['timer'] <= 0:
                         # Check inventory space before adding wheat
-                        if self.can_add_wheat(char, FARM_CELL_YIELD):
-                            self.add_wheat(char, FARM_CELL_YIELD)
+                        if char.can_add_item('wheat', FARM_CELL_YIELD):
+                            char.add_item('wheat', FARM_CELL_YIELD)
                             data['state'] = 'replanting'
                             data['timer'] = FARM_REPLANT_TIME
                             
-                            name = self.get_display_name(char)
+                            name = char.get_display_name()
                             
                             # If player (and not farmer), this is theft!
                             if is_player and not is_farmer:
@@ -3694,333 +2647,6 @@ class GameLogic:
                         data['state'] = 'growing'
                         data['timer'] = FARM_CELL_HARVEST_INTERVAL
                     cells_being_worked.add(cell)
-    
-    # =========================================================================
-    # PLAYER ACTIONS
-    # =========================================================================
-    
-    def move_player(self, dx, dy, sprinting=False):
-        """Set player velocity for ALTTP-style movement.
-        Called by GUI when movement keys are held.
-        dx, dy should be -1, 0, or 1 indicating direction.
-        sprinting: if True, use SPRINT_SPEED instead of MOVEMENT_SPEED.
-        Returns True if velocity was set successfully.
-        """
-        player = self.state.player
-        if not player:
-            return False
-        
-        # Update facing direction based on movement attempt (even if blocked)
-        if dx > 0 and dy < 0:
-            player['facing'] = 'up-right'
-        elif dx > 0 and dy > 0:
-            player['facing'] = 'down-right'
-        elif dx < 0 and dy < 0:
-            player['facing'] = 'up-left'
-        elif dx < 0 and dy > 0:
-            player['facing'] = 'down-left'
-        elif dx > 0:
-            player['facing'] = 'right'
-        elif dx < 0:
-            player['facing'] = 'left'
-        elif dy > 0:
-            player['facing'] = 'down'
-        elif dy < 0:
-            player['facing'] = 'up'
-        
-        # Can't move while frozen (starving + health <= 20)
-        if player.get('is_frozen', False):
-            name = self.get_display_name(player)
-            self.state.log_action(f"{name} is too weak to move!")
-            player['vx'] = 0.0
-            player['vy'] = 0.0
-            return False
-        
-        # Use sprint speed if sprinting
-        speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
-        player['is_sprinting'] = sprinting  # Store for animation speed
-        
-        # Normalize diagonal movement to maintain consistent speed (ALTTP style)
-        if dx != 0 and dy != 0:
-            # Diagonal: multiply by 1/sqrt(2) to maintain same speed as cardinal
-            diagonal_factor = 1.0 / math.sqrt(2)
-            player['vx'] = dx * speed * diagonal_factor
-            player['vy'] = dy * speed * diagonal_factor
-        else:
-            # Cardinal: full speed
-            player['vx'] = dx * speed
-            player['vy'] = dy * speed
-        
-        return True
-    
-    def stop_player(self):
-        """Stop player movement (called when no movement keys are held)."""
-        player = self.state.player
-        if player:
-            player['vx'] = 0.0
-            player['vy'] = 0.0
-            player['is_sprinting'] = False
-    
-    def update_player_position(self, dt):
-        """Update player position based on velocity and delta time.
-        Called every frame by the GUI.
-        
-        Args:
-            dt: Delta time in seconds
-        """
-        player = self.state.player
-        if not player:
-            return
-        
-        vx = player.get('vx', 0.0)
-        vy = player.get('vy', 0.0)
-        
-        if vx == 0.0 and vy == 0.0:
-            return
-        
-        # Calculate new position
-        new_x = player['x'] + vx * dt
-        new_y = player['y'] + vy * dt
-        
-        # Keep within bounds
-        half_width = player.get('width', CHARACTER_WIDTH) / 2
-        half_height = player.get('height', CHARACTER_HEIGHT) / 2
-        new_x = max(half_width, min(SIZE - half_width, new_x))
-        new_y = max(half_height, min(SIZE - half_height, new_y))
-        
-        # Check for collision with other characters
-        if not self.state.is_position_blocked(new_x, new_y, exclude_char=player):
-            player['x'] = new_x
-            player['y'] = new_y
-        else:
-            # Blocked - try to slide/jostle around (ALTTP style bumping)
-            moved = False
-            
-            # Try sliding along primary movement axis first
-            if abs(vx) > abs(vy):
-                # Moving mostly horizontal - try X first, then Y
-                if not self.state.is_position_blocked(new_x, player['y'], exclude_char=player):
-                    player['x'] = new_x
-                    moved = True
-                elif not self.state.is_position_blocked(player['x'], new_y, exclude_char=player):
-                    player['y'] = new_y
-                    moved = True
-            else:
-                # Moving mostly vertical - try Y first, then X
-                if not self.state.is_position_blocked(player['x'], new_y, exclude_char=player):
-                    player['y'] = new_y
-                    moved = True
-                elif not self.state.is_position_blocked(new_x, player['y'], exclude_char=player):
-                    player['x'] = new_x
-                    moved = True
-            
-            # If still blocked, try perpendicular jostling
-            if not moved:
-                jostle_amount = MOVEMENT_SPEED * dt * 0.3
-                if abs(vx) > abs(vy):
-                    # Moving horizontal, jostle vertical
-                    for jostle_dir in [1, -1]:
-                        jostle_y = player['y'] + jostle_dir * jostle_amount
-                        if not self.state.is_position_blocked(player['x'], jostle_y, exclude_char=player):
-                            player['y'] = jostle_y
-                            break
-                else:
-                    # Moving vertical, jostle horizontal
-                    for jostle_dir in [1, -1]:
-                        jostle_x = player['x'] + jostle_dir * jostle_amount
-                        if not self.state.is_position_blocked(jostle_x, player['y'], exclude_char=player):
-                            player['x'] = jostle_x
-                            break
-    
-    def player_eat(self):
-        """Player eats bread from inventory. Returns True if ate."""
-        player = self.state.player
-        if not player:
-            return False
-        
-        name = self.get_display_name(player)
-        
-        if self.get_bread(player) >= BREAD_PER_BITE:
-            self.remove_bread(player, BREAD_PER_BITE)
-            player['hunger'] = min(MAX_HUNGER, player['hunger'] + ITEMS["bread"]["hunger_value"])
-            
-            # Check if this recovered from starvation
-            if player['hunger'] > STARVATION_THRESHOLD:
-                if player.get('is_starving', False) or player.get('is_frozen', False):
-                    player['is_starving'] = False
-                    player['is_frozen'] = False
-                    player['starvation_health_lost'] = 0
-                    player['ticks_starving'] = 0
-                    self.state.log_action(f"{name} ate bread and recovered from starvation! Hunger: {player['hunger']:.0f}")
-                else:
-                    self.state.log_action(f"{name} ate bread, hunger now {player['hunger']:.0f}")
-            else:
-                self.state.log_action(f"{name} ate bread, hunger now {player['hunger']:.0f}")
-            return True
-        return False
-    
-    def player_trade(self):
-        """Player attempts to trade with adjacent wheat vendor. Returns True if traded."""
-        player = self.state.player
-        if not player:
-            return False
-        
-        name = self.get_display_name(player)
-        
-        # Find any adjacent vendor selling wheat
-        vendor = self.find_adjacent_vendor(player, 'wheat')
-        
-        if vendor and self.can_afford_any_wheat(player):
-            vendor_name = self.get_display_name(vendor)
-            if self.vendor_willing_to_trade(vendor, player, 'wheat'):
-                amount = self.get_max_vendor_trade_amount(vendor, player, 'wheat')
-                if amount > 0:
-                    price = self.get_goods_price('wheat', amount)
-                    self.execute_vendor_trade(vendor, player, 'wheat', amount)
-                    self.state.log_action(f"{name} bought {amount} wheat for ${price} from {vendor_name}")
-                    
-                    # If starving/frozen, auto-eat bread to try to recover (wheat can't be eaten)
-                    if (player.get('is_starving', False) or player.get('is_frozen', False)) and self.get_bread(player) >= BREAD_PER_BITE:
-                        self.remove_bread(player, BREAD_PER_BITE)
-                        player['hunger'] = min(MAX_HUNGER, player['hunger'] + ITEMS["bread"]["hunger_value"])
-                        if player['hunger'] > STARVATION_THRESHOLD:
-                            player['is_starving'] = False
-                            player['is_frozen'] = False
-                            player['starvation_health_lost'] = 0
-                            player['ticks_starving'] = 0
-                            self.state.log_action(f"{name} ate bread and recovered from starvation! Hunger: {player['hunger']:.0f}")
-                    
-                    return True
-            else:
-                self.state.log_action(f"{name} tried to trade but {vendor_name} refused")
-        return False
-    
-    def player_attack(self):
-        """Player swings sword in facing direction. Returns True if swung."""
-        import time
-        
-        player = self.state.player
-        if not player:
-            return False
-        
-        # Check if already attacking (animation in progress)
-        anim_start = player.get('attack_animation_start')
-        if anim_start is not None:
-            elapsed = time.time() - anim_start
-            if elapsed < ATTACK_ANIMATION_DURATION:
-                return False  # Still animating
-        
-        name = self.get_display_name(player)
-        facing = player.get('facing', 'down')
-        
-        # Start attack animation
-        player['attack_animation_start'] = time.time()
-        player['attack_direction'] = self._facing_to_attack_direction(facing)
-        
-        # Calculate attack hitbox based on facing direction
-        attack_range = COMBAT_RANGE
-        targets_hit = []
-        
-        # Get attack direction vector
-        dx, dy = self._get_direction_vector(facing)
-        
-        # Check for targets in the attack area
-        for char in self.state.characters:
-            if char is player:
-                continue
-            
-            # Calculate distance in the attack direction
-            rel_x = char['x'] - player['x']
-            rel_y = char['y'] - player['y']
-            
-            # Project onto attack direction
-            if dx != 0 or dy != 0:
-                # Distance along attack direction
-                proj_dist = rel_x * dx + rel_y * dy
-                
-                # Perpendicular distance (for width of swing)
-                perp_dist = abs(rel_x * (-dy) + rel_y * dx)
-                
-                # Hit if within range in attack direction and within swing width
-                if 0 < proj_dist <= attack_range and perp_dist < 0.7:
-                    targets_hit.append(char)
-        
-        # Deal damage to all targets hit
-        if targets_hit:
-            for target in targets_hit:
-                # Skip dying characters
-                if target.get('is_dying'):
-                    continue
-                    
-                target_name = self.get_display_name(target)
-                damage = random.randint(2, 5)
-                target['health'] -= damage
-                self.state.log_action(f"{name} ATTACKS {target_name} for {damage}! HP: {target['health']}")
-                
-                # Check if target was already a criminal before this attack
-                target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
-                
-                # If attacking an innocent, mark as aggressor and alert witnesses
-                if not target_was_criminal and not player.get('is_aggressor'):
-                    player['is_aggressor'] = True
-                    self.witness_murder(player, target)
-                
-                if target['health'] <= 0:
-                    if not target_was_criminal:
-                        player['is_murderer'] = True
-                    
-                    # Transfer items immediately (character will be removed after death animation)
-                    self.state.transfer_all_items(target, player)
-            return True
-        else:
-            self.state.log_action(f"{name} swings sword (missed)")
-            return True
-    
-    def player_bake(self):
-        """Player bakes bread at adjacent stove or campfire. Returns True if baked."""
-        player = self.state.player
-        if not player:
-            return False
-        
-        name = self.get_display_name(player)
-        
-        # Check if we can bake
-        if not self.can_bake_bread(player):
-            # Give feedback on why we can't bake
-            cooking_spot = self.get_adjacent_cooking_spot(player)
-            if not cooking_spot:
-                # Check if there's a stove nearby that we can't use
-                stove = self.state.get_adjacent_stove(player)
-                if stove and not self.state.can_use_stove(player, stove):
-                    self.state.log_action(f"{name} can't use this stove (not your home)")
-                else:
-                    self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
-            elif self.get_wheat(player) < WHEAT_TO_BREAD_RATIO:
-                self.state.log_action(f"{name} needs wheat to bake bread")
-            elif not self.can_add_bread(player, 1):
-                self.state.log_action(f"{name}'s inventory is full")
-            return False
-        
-        # Bake one bread
-        amount_baked = self.bake_bread(player, 1)
-        return amount_baked > 0
-    
-    def _facing_to_attack_direction(self, facing):
-        """Convert facing direction to attack direction."""
-        if facing in ('up', 'up-left', 'up-right'):
-            return 'up'
-        elif facing in ('down', 'down-left', 'down-right'):
-            return 'down'
-        elif facing in ('left',):
-            return 'left'
-        elif facing in ('right',):
-            return 'right'
-        # Handle diagonal facings
-        if 'left' in facing:
-            return 'left'
-        if 'right' in facing:
-            return 'right'
-        return 'down'
     
     def _get_direction_vector(self, facing):
         """Get unit direction vector for a facing direction."""

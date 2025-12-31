@@ -1,5 +1,5 @@
 # constants.py - Simulation structure and game mechanics configuration
-# This file defines HOW the game works, not WHAT is in it (that's in scenario.py)
+# This file defines HOW the game works, not WHAT is in it (that's in scenario_*.py files)
 
 # =============================================================================
 # GUI SETTINGS
@@ -57,7 +57,7 @@ SPRITE_TILES_TALL = 2.5    # How many tiles tall the sprite is
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
 CHARACTER_WIDTH = CHARACTER_HEIGHT / SPRITE_HW_RATIO
-CHARACTER_EYE_POSITION = 0.2  # Eyes at 10% from top of rectangle
+CHARACTER_EYE_POSITION = 0.2  # Eyes at 20% from top of rectangle
 
 DIRECTIONS_CARDINAL = [(-1, 0), (1, 0), (0, -1), (0, 1)] # Cardinal directions
 DIRECTIONS_DIAGONAL = [(-1, -1), (1, -1), (-1, 1), (1, 1)] # Diagonal directions
@@ -66,7 +66,7 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardi
 # Movement speed - characters move once every this many ticks
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
 MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
-MOVEMENT_SPEED = 1.0 # loat-based continuous movement: cells per second
+MOVEMENT_SPEED = 1.0 # Float-based continuous movement: cells per second
 SPRINT_SPEED = 1.8       # Sprint (cells/second)
 
 # Collision radius - how close before characters "bump" each other
@@ -78,7 +78,7 @@ SQUEEZE_SLIDE_SPEED = 0.8  # How fast to slide perpendicular (relative to moveme
 
 # Adjacency threshold - how close characters need to be for interactions
 # Generous range so characters don't need to be perfectly aligned to trade/talk
-ADJACENCY_DISTANCE = 1.3 # Within 1.8 cells - can interact from reasonable distance
+ADJACENCY_DISTANCE = 1.3 # Within 1.3 cells - can interact from reasonable distance
 
 # Combat range - need to be closer for attacks
 COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
@@ -132,6 +132,10 @@ STARVATION_FREEZE_HEALTH = 20  # freeze in place when health drops to this while
 # The intensity IS the range in cells
 CRIME_INTENSITY_MURDER = 17  # 17 cells (2.5x original)
 CRIME_INTENSITY_THEFT = 10   # 10 cells (2.5x original)
+
+# Theft timing (tick-based, scales with game speed)
+THEFT_PATIENCE_TICKS = 60 * TICK_MULTIPLIER  # 60 seconds at 1x speed - how long to wait for crops
+THEFT_COOLDOWN_TICKS = 30 * TICK_MULTIPLIER  # 30 seconds at 1x speed - cooldown after giving up
 
 # =============================================================================
 # SKILL DEFINITIONS
@@ -221,14 +225,30 @@ JOB_TIERS = {
     "Queen": {"tier": 1},
     
     # TIER 2 — TRUSTED ADVISORS AND ADMINISTRATORS
-    "Steward": {"tier": 2, "color": "#8B008B"},
+    "Steward": {
+        "tier": 2,
+        "color": "#8B008B",
+        "requires": {"mercantile": 50},  # Also requires allegiance (checked in code)
+    },
     "Historian": {"tier": 2},
     "Weapons Trainer": {"tier": 2},
     
     # TIER 3 — SKILLED TRADES WITH STATUS
-    "Trader": {"tier": 3, "color": "#FFD700"},
-    "Soldier": {"tier": 3, "color": "#FF69B4"},
-    "Farmer": {"tier": 3, "color": "#39db34"},
+    "Trader": {
+        "tier": 3,
+        "color": "#FFD700",
+        "requires": {"mercantile": 20},
+    },
+    "Soldier": {
+        "tier": 3,
+        "color": "#FF69B4",
+        "requires": {"morality_min": 5, "confidence_min": 7, "cunning_max": 5},
+    },
+    "Farmer": {
+        "tier": 3,
+        "color": "#39db34",
+        "requires": {"farming": 40},
+    },
     "Doctor": {"tier": 3},
     "Blacksmith": {"tier": 3},
     "Carpenter": {"tier": 3},
@@ -252,6 +272,9 @@ JOB_TIERS = {
     "Miner": {"tier": 5},
     "Bard": {"tier": 5},
 }
+
+# Default tier for jobs not in JOB_TIERS (unemployed, etc.)
+DEFAULT_JOB_TIER = 99
 
 
 # =============================================================================

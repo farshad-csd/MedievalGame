@@ -43,6 +43,7 @@ class SpriteManager:
         self.sprite_dir = sprite_dir
         self.sprites = {}  # {direction: {action: [frames]}}
         self.loaded = False
+        self._recolor_cache = {}  # Cache for recolored frames: (frame_id, color_hex) -> surface
         
     def load_sprites(self):
         """Load all sprite sheets and extract frames."""
@@ -222,6 +223,105 @@ class SpriteManager:
             Scaled pygame surface
         """
         return pygame.transform.scale(frame, (int(target_width), int(target_height)))
+    
+    def recolor_red_to_color(self, frame, target_color, red_threshold=0.3):
+        """Replace red-ish pixels in a frame with a target color, preserving shading.
+        
+        This detects pixels where red is the dominant channel and replaces them
+        with the target color while maintaining the original luminosity for shading.
+        Results are cached for performance.
+        
+        Args:
+            frame: Pygame surface to recolor
+            target_color: Target color as (R, G, B) tuple or hex string "#RRGGBB"
+            red_threshold: How dominant red must be (0.0-1.0, higher = more selective)
+            
+        Returns:
+            New pygame surface with red replaced by target color
+        """
+        # Convert hex color to RGB if needed
+        if isinstance(target_color, str):
+            color_hex = target_color.lstrip('#').upper()
+            target_color = tuple(int(color_hex[i:i+2], 16) for i in (0, 2, 4))
+        else:
+            color_hex = f"{target_color[0]:02X}{target_color[1]:02X}{target_color[2]:02X}"
+        
+        # Check cache using frame's id and color
+        cache_key = (id(frame), color_hex)
+        if cache_key in self._recolor_cache:
+            return self._recolor_cache[cache_key]
+        
+        # Create a copy to modify
+        result = frame.copy()
+        
+        # Lock surface for pixel access
+        result.lock()
+        
+        width, height = result.get_size()
+        
+        for y in range(height):
+            for x in range(width):
+                pixel = result.get_at((x, y))
+                r, g, b, a = pixel.r, pixel.g, pixel.b, pixel.a
+                
+                # Skip fully transparent pixels
+                if a == 0:
+                    continue
+                
+                # Skip very dark pixels (outlines, shadows)
+                brightness = (r + g + b) / 3
+                if brightness < 30:
+                    continue
+                
+                # Skip very light/white pixels
+                if brightness > 240 and max(abs(r-g), abs(r-b), abs(g-b)) < 20:
+                    continue
+                
+                # Calculate how "red" this pixel is
+                # Red is dominant when R > G and R > B by some margin
+                max_channel = max(r, g, b)
+                if max_channel == 0:
+                    continue
+                
+                # Normalize channels
+                r_norm = r / 255.0
+                g_norm = g / 255.0
+                b_norm = b / 255.0
+                
+                # Check if red is the dominant channel
+                # Red dominance = how much more red there is compared to green and blue
+                red_dominance = r_norm - max(g_norm, b_norm)
+                
+                # Also check that it's actually reddish (not just slightly more red)
+                is_reddish = (r > g * 1.2 and r > b * 1.2 and red_dominance > red_threshold)
+                
+                if is_reddish:
+                    # Calculate luminosity of original pixel (for shading)
+                    luminosity = 0.299 * r + 0.587 * g + 0.114 * b
+                    
+                    # Calculate luminosity of target color
+                    target_lum = 0.299 * target_color[0] + 0.587 * target_color[1] + 0.114 * target_color[2]
+                    
+                    # Scale target color to match original luminosity
+                    if target_lum > 0:
+                        scale = luminosity / target_lum
+                        # Clamp scale to prevent extreme values
+                        scale = min(scale, 2.0)
+                        new_r = min(255, int(target_color[0] * scale))
+                        new_g = min(255, int(target_color[1] * scale))
+                        new_b = min(255, int(target_color[2] * scale))
+                    else:
+                        # Target is black, use luminosity directly
+                        new_r = new_g = new_b = int(luminosity)
+                    
+                    result.set_at((x, y), (new_r, new_g, new_b, a))
+        
+        result.unlock()
+        
+        # Cache the result
+        self._recolor_cache[cache_key] = result
+        
+        return result
 
 
 # Global sprite manager instance
