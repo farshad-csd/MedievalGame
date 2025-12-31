@@ -7,6 +7,7 @@ It does NOT contain any rendering code.
 
 import random
 import math
+import time
 from collections import deque
 from constants import (
     DIRECTIONS, ITEMS,
@@ -1643,6 +1644,11 @@ class GameLogic:
             robber['robbery_target'] = None
             return False
         
+        # Don't attack dying characters
+        if target.get('is_dying'):
+            robber['robbery_target'] = None
+            return False
+        
         # Movement is handled by velocity system in _get_goal
         # We just check if adjacent and attack if so
         
@@ -1657,27 +1663,16 @@ class GameLogic:
             if target['health'] <= 0:
                 killer_is_defender = not robber.get('is_aggressor', False)
                 target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
-                is_player_death = self.is_player(target)
                 
                 target_money = self.get_money(target)
                 target_wheat = self.get_wheat(target)
                 
-                if killer_is_defender and target_was_criminal:
-                    if is_player_death:
-                        self.state.log_action(f"{robber_name} KILLED {target_name} (PLAYER - justified)! GAME OVER")
-                    else:
-                        self.state.log_action(f"{robber_name} KILLED {target_name} (justified)! Took ${target_money} and {target_wheat} wheat")
-                else:
+                if not (killer_is_defender and target_was_criminal):
                     robber['is_murderer'] = True
-                    if is_player_death:
-                        self.state.log_action(f"{robber_name} KILLED {target_name} (PLAYER)! GAME OVER")
-                    else:
-                        self.state.log_action(f"{robber_name} KILLED {target_name}! Stole ${target_money} and {target_wheat} wheat")
                     self.witness_murder(robber, target)
                 
-                # Transfer items
+                # Transfer items immediately (character will be removed after death animation)
                 self.state.transfer_all_items(target, robber)
-                self.state.remove_character(target)
                 robber['robbery_target'] = None
                 robber['is_aggressor'] = False
         
@@ -1888,6 +1883,12 @@ class GameLogic:
         # Update velocities based on goals (decision-making happens per tick)
         for char in npcs:
             if char.get('is_frozen'):
+                char['vx'] = 0.0
+                char['vy'] = 0.0
+                continue
+            
+            # Skip dying characters - they don't move
+            if char.get('is_dying'):
                 char['vx'] = 0.0
                 char['vy'] = 0.0
                 continue
@@ -3447,6 +3448,10 @@ class GameLogic:
         """Execute an attack."""
         import time
         
+        # Don't attack dying characters
+        if target.get('is_dying'):
+            return
+        
         attacker_name = self.get_display_name(attacker)
         target_name = self.get_display_name(target)
         
@@ -3469,15 +3474,15 @@ class GameLogic:
             target_was_criminal = target.get('is_aggressor', False) or target.get('is_murderer', False) or target.get('is_thief', False)
             
             if attacker_is_defender and target_was_criminal:
-                self.state.log_action(f"{attacker_name} KILLED {target_name} (justified)!")
+                # Kill message logged in death handling
+                pass
             else:
                 attacker['is_murderer'] = True
-                self.state.log_action(f"{attacker_name} KILLED {target_name}!")
                 self.witness_murder(attacker, target)
             
-            # Transfer items
+            # Transfer items immediately
             self.state.transfer_all_items(target, attacker)
-            self.state.remove_character(target)
+            # Clear attacker's target (death animation will handle removal)
             attacker['robbery_target'] = None
             attacker['is_aggressor'] = False
 
@@ -3521,19 +3526,37 @@ class GameLogic:
                             steward['tax_collection_target'] = char
         
         # Handle deaths (now health-based, not hunger-based)
-        dead_chars = [c for c in self.state.characters if c['health'] <= 0]
+        # Death animation duration - 6 frames at 150ms each = 0.9 seconds
+        DEATH_ANIMATION_DURATION = 0.9
+        current_time = time.time()
+        
+        for char in self.state.characters:
+            if char['health'] <= 0:
+                # Start death animation if not already started
+                if 'death_animation_start' not in char:
+                    char['death_animation_start'] = current_time
+                    char['is_dying'] = True
+                    char['vx'] = 0.0  # Stop movement
+                    char['vy'] = 0.0
+                    
+                    # Log death message
+                    dead_name = self.get_display_name(char)
+                    if self.is_player(char):
+                        if char.get('is_starving'):
+                            self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
+                        else:
+                            self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
+                    else:
+                        if char.get('is_starving'):
+                            self.state.log_action(f"{dead_name} DIED from starvation!")
+                        else:
+                            self.state.log_action(f"{dead_name} DIED!")
+        
+        # Remove characters whose death animation has finished
+        dead_chars = [c for c in self.state.characters 
+                      if c.get('is_dying') and 
+                      current_time - c.get('death_animation_start', 0) > DEATH_ANIMATION_DURATION]
         for dead in dead_chars:
-            dead_name = self.get_display_name(dead)
-            if self.is_player(dead):
-                if dead.get('is_starving'):
-                    self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
-                else:
-                    self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
-            else:
-                if dead.get('is_starving'):
-                    self.state.log_action(f"{dead_name} DIED from starvation!")
-                else:
-                    self.state.log_action(f"{dead_name} DIED!")
             self.state.remove_character(dead)
         
         # Move NPCs with swap detection to prevent oscillation
@@ -3705,6 +3728,7 @@ class GameLogic:
         
         # Use sprint speed if sprinting
         speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
+        player['is_sprinting'] = sprinting  # Store for animation speed
         
         # Normalize diagonal movement to maintain consistent speed (ALTTP style)
         if dx != 0 and dy != 0:
@@ -3725,6 +3749,7 @@ class GameLogic:
         if player:
             player['vx'] = 0.0
             player['vy'] = 0.0
+            player['is_sprinting'] = False
     
     def update_player_position(self, dt):
         """Update player position based on velocity and delta time.
@@ -3913,6 +3938,10 @@ class GameLogic:
         # Deal damage to all targets hit
         if targets_hit:
             for target in targets_hit:
+                # Skip dying characters
+                if target.get('is_dying'):
+                    continue
+                    
                 target_name = self.get_display_name(target)
                 damage = random.randint(2, 5)
                 target['health'] -= damage
@@ -3927,15 +3956,11 @@ class GameLogic:
                     self.witness_murder(player, target)
                 
                 if target['health'] <= 0:
-                    if target_was_criminal:
-                        self.state.log_action(f"{name} KILLED {target_name} (justified)!")
-                    else:
+                    if not target_was_criminal:
                         player['is_murderer'] = True
-                        self.state.log_action(f"{name} KILLED {target_name}!")
                     
-                    # Transfer items
+                    # Transfer items immediately (character will be removed after death animation)
                     self.state.transfer_all_items(target, player)
-                    self.state.remove_character(target)
             return True
         else:
             self.state.log_action(f"{name} swings sword (missed)")

@@ -36,6 +36,8 @@ from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE
 from game_state import GameState
 from game_logic import GameLogic
 from debug_window import DebugWindow
+from sprites import get_sprite_manager
+import os
 
 
 def hex_to_rgb(hex_color):
@@ -100,6 +102,11 @@ class BoardGUI:
         # Load fonts
         self.font_tiny = pygame.freetype.SysFont('Arial', 7)
         self.font_barrel = pygame.freetype.SysFont('Arial', 14, bold=True)
+        
+        # Initialize sprite manager - look for sprites in same directory as gui.py
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.sprite_manager = get_sprite_manager(script_dir)
+        self.sprite_manager.load_sprites()
         
         # Timing
         self.clock = pygame.time.Clock()
@@ -566,53 +573,62 @@ class BoardGUI:
                                     int(8*self.zoom), int(12*self.zoom)))
     
     def _draw_characters(self):
-        """Draw all characters as rectangles at their float positions (ALTTP-style)"""
+        """Draw all characters using sprites at their float positions (ALTTP-style)"""
         cell_size = self._cam_cell_size
+        current_time = time.time()
+        
         for char in self.state.characters:
             # Use float position directly - positions are already continuous
             vis_x = char['x']
             vis_y = char['y']
             
-            color = self._get_character_color(char)
-            color_rgb = hex_to_rgb(color)
-            
             # Transform world position to screen position
             pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
             
-            # Rectangle dimensions from constants (in pixels, scaled by zoom)
-            rect_width = int(CHARACTER_WIDTH * cell_size)
-            rect_height = int(CHARACTER_HEIGHT * cell_size)
+            # Sprite dimensions scaled by zoom (CHARACTER_HEIGHT tiles tall)
+            sprite_height = int(CHARACTER_HEIGHT * cell_size)
+            sprite_width = int(CHARACTER_WIDTH * cell_size)
             
-            # Calculate rectangle bounds (centered on character position)
-            rect_left = int(pixel_cx - rect_width / 2)
-            rect_top = int(pixel_cy - rect_height / 2)
+            # Get the appropriate sprite frame
+            frame, should_flip = self.sprite_manager.get_frame(char, current_time)
             
-            # Draw filled rectangle
-            pygame.draw.rect(self.screen, color_rgb, 
-                           (rect_left, rect_top, rect_width, rect_height))
-            pygame.draw.rect(self.screen, (0, 0, 0),
-                           (rect_left, rect_top, rect_width, rect_height), 1)
+            if frame is not None:
+                # Scale the frame to match character size
+                scaled_frame = self.sprite_manager.scale_frame(frame, sprite_width, sprite_height)
+                
+                # Flip horizontally if needed (for right-facing)
+                if should_flip:
+                    scaled_frame = pygame.transform.flip(scaled_frame, True, False)
+                
+                # Calculate blit position (sprite centered on character position)
+                blit_x = int(pixel_cx - sprite_width / 2)
+                blit_y = int(pixel_cy - sprite_height / 2)
+                
+                # Draw the sprite
+                self.screen.blit(scaled_frame, (blit_x, blit_y))
+            else:
+                # Fallback to colored rectangle if no sprite
+                color = self._get_character_color(char)
+                color_rgb = hex_to_rgb(color)
+                rect_left = int(pixel_cx - sprite_width / 2)
+                rect_top = int(pixel_cy - sprite_height / 2)
+                pygame.draw.rect(self.screen, color_rgb, 
+                               (rect_left, rect_top, sprite_width, sprite_height))
+                pygame.draw.rect(self.screen, (0, 0, 0),
+                               (rect_left, rect_top, sprite_width, sprite_height), 1)
             
-            # Draw eyes at configured position from top of rectangle
-            eye_y = rect_top + int(rect_height * CHARACTER_EYE_POSITION)
-            rect_cx = rect_left + rect_width // 2
-            self._draw_character_eyes(char, rect_cx, eye_y, rect_width)
-            
-            # Draw sword swing animation if active
-            self._draw_sword_swing(char, pixel_cx, pixel_cy, rect_width, rect_height)
-            
-            # Draw first name below rectangle
+            # Draw first name below sprite
             first_name = char['name'].split()[0]
             text_surface, text_rect = self.font_tiny.render(first_name, (0, 0, 0))
             text_x = pixel_cx - text_rect.width / 2
-            text_y = rect_top + rect_height + 2
+            text_y = int(pixel_cy + sprite_height / 2) + 2
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
             
             # Draw HP bar below name only when health < 100
             health = char.get('health', 100)
             if health < 100:
                 hp_bar_y = int(text_y + text_rect.height + 2)
-                hp_bar_width = rect_width
+                hp_bar_width = sprite_width
                 hp_bar_height = max(3, int(4 * self.zoom))
                 hp_bar_x = int(pixel_cx - hp_bar_width / 2)
                 

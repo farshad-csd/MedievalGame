@@ -51,8 +51,8 @@ TICKS_PER_YEAR = BASE_TICKS_PER_YEAR * TICK_MULTIPLIER  # 45000 ticks
 # 2:1       | 1.5-2      | Children of Morta
 # 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
 # 2.4:1     | 2.25       | Chrono Trigger
-SPRITE_HW_RATIO = 2      # Height-to-width ratio (taller = bigger number)
-SPRITE_TILES_TALL = 1.2    # How many tiles tall the sprite is
+SPRITE_HW_RATIO = 1      # Height-to-width ratio (taller = bigger number)
+SPRITE_TILES_TALL = 2.5    # How many tiles tall the sprite is
 
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
@@ -67,7 +67,7 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardi
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
 MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
 MOVEMENT_SPEED = 1.0 # loat-based continuous movement: cells per second
-SPRINT_SPEED = 2         # Sprint (cells/second)
+SPRINT_SPEED = 1.8       # Sprint (cells/second)
 
 # Collision radius - how close before characters "bump" each other
 # Set VERY small to allow characters to squeeze past each other like in ALTTP
