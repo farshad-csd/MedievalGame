@@ -29,7 +29,7 @@ from constants import (
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
-    ATTACK_ANIMATION_DURATION,
+    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
     WHEAT_TO_BREAD_RATIO,
     BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
@@ -93,6 +93,13 @@ class GameLogic:
         """
         dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
         return dist <= COMBAT_RANGE
+    
+    def can_attack(self, char):
+        """Check if character can attack (not on cooldown).
+        Returns True if enough time has passed since last attack.
+        """
+        last_attack_tick = char.get('last_attack_tick', -ATTACK_COOLDOWN_TICKS)
+        return self.state.ticks - last_attack_tick >= ATTACK_COOLDOWN_TICKS
     
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
@@ -3126,13 +3133,13 @@ class GameLogic:
         # Combat
         target = char.get('robbery_target')
         if target and target in self.state.characters:
-            if self.is_adjacent(char, target):
+            if self.is_adjacent(char, target) and self.can_attack(char):
                 self._do_attack(char, target)
                 return
         
         # Respond to attacker
         attacker = self.get_attacker(char)
-        if attacker and self.is_adjacent(char, attacker):
+        if attacker and self.is_adjacent(char, attacker) and self.can_attack(char):
             confidence = self.get_trait(char, 'confidence')
             if confidence >= 7:
                 if not char.get('robbery_target'):
@@ -3454,6 +3461,9 @@ class GameLogic:
         
         attacker_name = self.get_display_name(attacker)
         target_name = self.get_display_name(target)
+        
+        # Record attack tick for cooldown
+        attacker['last_attack_tick'] = self.state.ticks
         
         # Start attack animation
         attacker['attack_animation_start'] = time.time()
