@@ -67,20 +67,38 @@ class GameState:
                         self.area_map[y][x] = name
     
     def _init_farm_cells(self):
-        """Initialize harvestable farm cells"""
+        """Initialize harvestable farm cells.
+        
+        Supports two formats:
+        - farm_cells: [[x, y], ...] - explicit list of cell coordinates (new format)
+        - farm_cell_bounds: [y_start, x_start, y_end, x_end] - rectangular bounds (legacy)
+        """
         for area in AREAS:
             if area.get("has_farm_cells"):
-                bounds = area.get("farm_cell_bounds", area["bounds"])
-                y_start, x_start, y_end, x_end = bounds
                 allegiance = area.get("allegiance")  # Farm's allegiance (e.g., "Dunmere" or None)
-                for y in range(y_start, y_end):
-                    for x in range(x_start, x_end):
+                
+                # New format: explicit list of cell coordinates
+                if "farm_cells" in area:
+                    for cell in area["farm_cells"]:
+                        x, y = cell[0], cell[1]
                         if 0 <= y < SIZE and 0 <= x < SIZE:
                             self.farm_cells[(x, y)] = {
                                 'state': 'ready',
                                 'timer': 0,
                                 'allegiance': allegiance
                             }
+                # Legacy format: rectangular bounds
+                else:
+                    bounds = area.get("farm_cell_bounds", area["bounds"])
+                    y_start, x_start, y_end, x_end = bounds
+                    for y in range(y_start, y_end):
+                        for x in range(x_start, x_end):
+                            if 0 <= y < SIZE and 0 <= x < SIZE:
+                                self.farm_cells[(x, y)] = {
+                                    'state': 'ready',
+                                    'timer': 0,
+                                    'allegiance': allegiance
+                                }
     
     def _init_barrels(self):
         """Initialize barrels from BARRELS configuration.
@@ -677,6 +695,74 @@ class GameState:
                 perimeter.append((min_x - 1, y))
         
         return perimeter
+    
+    def get_patrol_waypoints(self, allegiance=None):
+        """Get patrol waypoints for soldiers - a grid of points covering walkable ground.
+        
+        Generates waypoints spread across the village area to ensure soldiers
+        cover ground between buildings, along roads, and through open spaces.
+        Points are spaced ~3 cells apart to create a patrol route that covers
+        the entire settlement over time.
+        
+        Args:
+            allegiance: If specified, only return waypoints in areas belonging to this allegiance
+        
+        Returns list of (x, y) tuples for patrol route points.
+        """
+        waypoints = []
+        
+        # Get bounds of all areas belonging to this allegiance
+        min_x, min_y = SIZE, SIZE
+        max_x, max_y = 0, 0
+        
+        for area_def in AREAS:
+            # Check allegiance
+            area_allegiance = area_def.get('allegiance')
+            if area_def.get('role') == 'village':
+                area_allegiance = area_def['name']
+            
+            if allegiance and area_allegiance != allegiance:
+                continue
+            
+            bounds = area_def.get('bounds', [0, 0, 0, 0])
+            y_start, x_start, y_end, x_end = bounds
+            
+            min_x = min(min_x, x_start)
+            min_y = min(min_y, y_start)
+            max_x = max(max_x, x_end)
+            max_y = max(max_y, y_end)
+        
+        if min_x >= max_x or min_y >= max_y:
+            return []
+        
+        # Generate grid of patrol points with ~3 cell spacing
+        spacing = 3
+        
+        for y in range(min_y + 1, max_y - 1, spacing):
+            for x in range(min_x + 1, max_x - 1, spacing):
+                # Check if this point is in a valid patrol area (not inside a building)
+                # We want points in open ground, roads, market - not inside house interiors
+                px, py = x + 0.5, y + 0.5
+                
+                if not self.is_position_valid(px, py):
+                    continue
+                
+                # Skip farm cells - don't patrol through crops
+                if (x, y) in self.farm_cells:
+                    continue
+                
+                # Check area at this position
+                area = self.get_area_at(px, py)
+                if area:
+                    role = self.get_area_role(area)
+                    # Skip interior of houses/farmhouses (soldiers patrol outside, not inside homes)
+                    # But include military_housing, market, village (open areas)
+                    if role in ('house', 'farmhouse'):
+                        continue
+                
+                waypoints.append((px, py))
+        
+        return waypoints
     
     def get_farm_cell_state(self, x, y):
         """Get the state of a farm cell. Works with float positions."""

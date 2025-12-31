@@ -30,7 +30,9 @@ from constants import (
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
     ATTACK_ANIMATION_DURATION,
     WHEAT_TO_BREAD_RATIO,
-    BREAD_PER_BITE, BREAD_BUFFER_TARGET
+    BREAD_PER_BITE, BREAD_BUFFER_TARGET,
+    PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
+    PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE
 )
 from scenario_world import SIZE
 from scenario_characters import CHARACTER_TEMPLATES
@@ -1904,10 +1906,12 @@ class GameLogic:
                     char['vx'] = 0.0
                     char['vy'] = 0.0
                 else:
-                    # Use slower speed if idling
+                    # Use slower speed if idling or patrolling
                     speed = MOVEMENT_SPEED
                     if char.get('idle_is_idle', False):
                         speed = MOVEMENT_SPEED * IDLE_SPEED_MULTIPLIER
+                    elif char.get('is_patrolling', False):
+                        speed = MOVEMENT_SPEED * PATROL_SPEED_MULTIPLIER
                     
                     # Normalize and apply speed
                     char['vx'] = (dx / dist) * speed
@@ -2507,6 +2511,18 @@ class GameLogic:
                 if barrel_pos:
                     return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
             return self._nearest_in_area(char, self.state.get_area_by_role('military_housing'))
+        
+        # Farmer: go to farm barrel to withdraw wheat
+        if job == 'Farmer':
+            farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
+            if farm_barrel:
+                barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
+                if barrel_wheat > 0:
+                    barrel_pos = self.state.get_barrel_position(farm_barrel)
+                    if barrel_pos:
+                        return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
+            # No barrel or empty barrel - fall through to buying logic
+        
         if self.can_afford_any_wheat(char):
             farmer = self.find_willing_farmer(char)
             if farmer:
@@ -2524,8 +2540,12 @@ class GameLogic:
                 return (steward['x'], steward['y'])
         
         # Priority: If hungry and have wheat but no bread, go cook
+        # Also check if barrel has wheat that we should withdraw first
         if self.should_seek_wheat(char) and self.get_bread(char) < BREAD_PER_BITE:
-            if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
+            personal_wheat = self.get_wheat(char)
+            
+            # If we have enough personal wheat, go to cooking spot
+            if personal_wheat >= WHEAT_TO_BREAD_RATIO:
                 # Have wheat, need to cook it
                 cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
                 if cooking_spot and cooking_pos:
@@ -2536,6 +2556,15 @@ class GameLogic:
                     camp_spot = self._find_camp_spot(char)
                     if camp_spot:
                         return camp_spot
+            else:
+                # No personal wheat - go to barrel to withdraw
+                farm_barrel = self.state.get_barrel_by_home(self.state.get_area_by_role('farm'))
+                if farm_barrel:
+                    barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
+                    if barrel_wheat > 0:
+                        barrel_pos = self.state.get_barrel_position(farm_barrel)
+                        if barrel_pos:
+                            return (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
         
         day_tick = self.state.ticks % TICKS_PER_DAY
         is_work_time = day_tick < TICKS_PER_DAY // 2  # Work first half of day
@@ -2592,13 +2621,23 @@ class GameLogic:
     def _get_soldier_goal(self, char):
         """Get soldier's movement goal. Returns float position.
         
-        Soldiers patrol the village perimeter in clockwise order.
-        When blocked, they squeeze past obstacles without losing their patrol progress.
-        When buffer is low (wheat + bread < target), they wait in barracks for the steward.
+        Soldiers march patrol routes covering ground throughout the village.
+        Each soldier gets the same set of waypoints but shuffled into a unique
+        order, so they cover the same ground but take different paths. This
+        ensures thorough coverage while soldiers don't follow each other.
+        
+        Patrol states:
+        - 'marching': Moving to next waypoint
+        - 'checking': Brief pause to survey area (8% chance at each waypoint)
+        
+        When hungry, they return to barracks and wait for the steward.
         """
         needs_food = self.needs_wheat_buffer(char)
         
         if needs_food:
+            # Not patrolling while waiting for food
+            char['is_patrolling'] = False
+            
             # If have wheat, go cook it first (don't request more)
             if self.get_wheat(char) >= WHEAT_TO_BREAD_RATIO:
                 char['requested_wheat'] = False  # Clear request - we have wheat to cook
@@ -2607,75 +2646,78 @@ class GameLogic:
                     return cooking_pos
             
             # No wheat - request from steward and wait
-            char['patrol_target'] = None
+            char['patrol_waypoint_idx'] = None  # Reset patrol when hungry
             if not char.get('requested_wheat'):
                 char['requested_wheat'] = True
                 name = self.get_display_name(char)
                 self.state.log_action(f"{name} is waiting for food from the Steward")
-            # Wait in barracks (wander there, not at barrel specifically)
+            # Wait in barracks
             military_area = self.state.get_area_by_role('military_housing')
             if self.state.get_area_at(char['x'], char['y']) == military_area:
                 return self._get_wander_goal(char, military_area)
             return self._nearest_in_area(char, military_area)
         
-        perimeter = self.state.get_village_perimeter()  # Clockwise ordered
-        if not perimeter:
-            return None
-            
-        current_cell = (int(char['x']), int(char['y']))
+        # Get patrol waypoints for this soldier's allegiance
+        allegiance = char.get('allegiance')
+        waypoints = self.state.get_patrol_waypoints(allegiance)
         
-        # Get positions of other soldiers to avoid
-        other_soldier_cells = set()
-        for c in self.state.characters:
-            if c != char and c.get('job') == 'Soldier':
-                other_soldier_cells.add((int(c['x']), int(c['y'])))
+        if not waypoints:
+            # No waypoints - just wander in military housing
+            char['is_patrolling'] = False
+            military_area = self.state.get_area_by_role('military_housing')
+            return self._get_wander_goal(char, military_area)
         
-        # Check if we have an existing patrol target
-        patrol_target = char.get('patrol_target')
+        # Mark character as patrolling (for speed adjustment)
+        char['is_patrolling'] = True
         
-        if patrol_target:
-            # Check if we've reached our patrol target
-            target_x, target_y = patrol_target
-            dist_to_target = math.sqrt((char['x'] - target_x - 0.5)**2 + (char['y'] - target_y - 0.5)**2)
-            
-            if dist_to_target < 0.5:
-                # Reached target - clear it and pick next one below
-                char['patrol_target'] = None
-                patrol_target = None
-            elif patrol_target not in other_soldier_cells:
-                # Still heading to target and it's not blocked by another soldier
-                return (target_x + 0.5, target_y + 0.5)
+        # Handle checking state - brief pause to survey
+        if char.get('patrol_state') == 'checking':
+            wait_ticks = char.get('patrol_wait_ticks', 0)
+            if wait_ticks > 0:
+                char['patrol_wait_ticks'] = wait_ticks - 1
+                return None  # Stay still - checking area
             else:
-                # Target is now occupied by another soldier - skip it
-                char['patrol_target'] = None
-                patrol_target = None
+                # Done checking, resume march
+                char['patrol_state'] = 'marching'
         
-        # Need to pick a new patrol target
-        # Find our position in the perimeter (or nearest point if we're off the path)
-        if current_cell in perimeter:
-            current_idx = perimeter.index(current_cell)
-        else:
-            # Off perimeter (maybe squeezed off) - find nearest perimeter point
-            # and continue from there in the same direction
-            best_idx = 0
-            best_dist = float('inf')
-            for idx, (px, py) in enumerate(perimeter):
-                dist = abs(char['x'] - px - 0.5) + abs(char['y'] - py - 0.5)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = idx
-            current_idx = best_idx
+        # Get or initialize waypoint index and direction
+        waypoint_idx = char.get('patrol_waypoint_idx')
         
-        # Find next unoccupied perimeter cell in clockwise order
-        for offset in range(1, len(perimeter)):
-            next_idx = (current_idx + offset) % len(perimeter)
-            next_pos = perimeter[next_idx]
-            if next_pos not in other_soldier_cells:
-                char['patrol_target'] = next_pos
-                return (next_pos[0] + 0.5, next_pos[1] + 0.5)
+        if waypoint_idx is None:
+            # Starting patrol - randomize start position and direction based on soldier name
+            # This spreads soldiers across different parts of the route going different directions
+            name_hash = hash(char['name'])
+            waypoint_idx = name_hash % len(waypoints)
+            # Direction: 1 (forward) or -1 (backward) through waypoints
+            char['patrol_direction'] = 1 if (name_hash // len(waypoints)) % 2 == 0 else -1
+            char['patrol_waypoint_idx'] = waypoint_idx
         
-        # All positions occupied - stay still
-        return None
+        direction = char.get('patrol_direction', 1)
+        
+        # Get current target waypoint
+        target_x, target_y = waypoints[waypoint_idx]
+        
+        # Check if we've reached the waypoint
+        dist = math.sqrt((char['x'] - target_x)**2 + (char['y'] - target_y)**2)
+        
+        if dist < PATROL_APPROACH_DISTANCE:
+            # Reached waypoint - maybe pause to check, then move to next
+            if random.random() < PATROL_CHECK_CHANCE:
+                char['patrol_state'] = 'checking'
+                char['patrol_wait_ticks'] = random.randint(PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS)
+            
+            # Advance to next waypoint in our direction (wrap around)
+            waypoint_idx = (waypoint_idx + direction) % len(waypoints)
+            char['patrol_waypoint_idx'] = waypoint_idx
+            
+            # If we just started checking, stay still
+            if char.get('patrol_state') == 'checking':
+                return None
+            
+            # Otherwise get new target
+            target_x, target_y = waypoints[waypoint_idx]
+        
+        return (target_x, target_y)
     
     def _get_steward_goal(self, char):
         """Get steward's movement goal. Returns float position.
@@ -2865,6 +2907,7 @@ class GameLogic:
         char['idle_destination'] = None
         char['idle_wait_ticks'] = 0
         char['idle_is_idle'] = False
+        char['is_patrolling'] = False
 
     def _get_random_neighbor(self, char):
         """Get a random valid position nearby. Returns float position.
@@ -3173,13 +3216,32 @@ class GameLogic:
                 self.state.unassign_bed_owner(char['name'])
             return
         
+        # Withdraw wheat from barrel when hungry and low on personal wheat
+        if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
+            # Check if we need wheat for bread buffer
+            if self.needs_wheat_buffer(char) and self.get_wheat(char) < BREAD_BUFFER_TARGET:
+                barrel_wheat = self.state.get_barrel_wheat(farm_barrel)
+                if barrel_wheat > 0:
+                    # Withdraw enough for bread buffer
+                    amount_needed = BREAD_BUFFER_TARGET - self.get_wheat(char)
+                    amount_to_withdraw = min(amount_needed, barrel_wheat)
+                    if amount_to_withdraw > 0 and self.can_add_wheat(char, amount_to_withdraw):
+                        self.state.remove_barrel_wheat(farm_barrel, amount_to_withdraw)
+                        self.add_wheat(char, amount_to_withdraw)
+                        self.state.log_action(f"{name} withdrew {amount_to_withdraw} wheat from barrel for food")
+                        return
+        
         # Deposit wheat into farm barrel when adjacent to it (only full stacks)
+        # Keep BREAD_BUFFER_TARGET wheat for personal bread buffer
         if farm_barrel and self.state.is_adjacent_to_barrel(char, farm_barrel):
             farmer_wheat = self.get_wheat(char)
-            # Only deposit if we have at least a full stack (15)
-            if farmer_wheat >= ITEMS["wheat"]["stack_size"] and self.state.can_barrel_add_wheat(farm_barrel, farmer_wheat):
-                self.remove_wheat(char, farmer_wheat)
-                self.state.add_barrel_wheat(farm_barrel, farmer_wheat)
+            # Reserve wheat for bread buffer before depositing
+            wheat_to_keep = BREAD_BUFFER_TARGET
+            wheat_to_deposit = farmer_wheat - wheat_to_keep
+            # Only deposit if we have at least a full stack after keeping reserve
+            if wheat_to_deposit >= ITEMS["wheat"]["stack_size"] and self.state.can_barrel_add_wheat(farm_barrel, wheat_to_deposit):
+                self.remove_wheat(char, wheat_to_deposit)
+                self.state.add_barrel_wheat(farm_barrel, wheat_to_deposit)
     
     def _do_soldier_actions(self, char):
         """Soldier actions.

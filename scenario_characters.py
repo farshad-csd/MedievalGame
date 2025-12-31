@@ -17,7 +17,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": "Dunmere",
         "starting_job": None,
         "starting_money": 200,
-        "starting_wheat": 0,
+        "starting_wheat": 100,
         "starting_age": 45,
         "starting_skills": {"mercantile": 70},
         "is_player": False
@@ -30,7 +30,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": None,
         "starting_job": None,
         "starting_money": 50,
-        "starting_wheat": 10,
+        "starting_wheat": 100,
         "starting_age": 35,
         "starting_skills": {"farming": 50},
         "is_player": False

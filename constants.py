@@ -51,8 +51,8 @@ TICKS_PER_YEAR = BASE_TICKS_PER_YEAR * TICK_MULTIPLIER  # 45000 ticks
 # 2:1       | 1.5-2      | Children of Morta
 # 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
 # 2.4:1     | 2.25       | Chrono Trigger
-SPRITE_HW_RATIO = 1.5      # Height-to-width ratio (taller = bigger number)
-SPRITE_TILES_TALL = 1    # How many tiles tall the sprite is
+SPRITE_HW_RATIO = 2      # Height-to-width ratio (taller = bigger number)
+SPRITE_TILES_TALL = 1.2    # How many tiles tall the sprite is
 
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
@@ -94,6 +94,16 @@ IDLE_MAX_WAIT_TICKS = 80 * TICK_MULTIPLIER  # Maximum time to wait at a spot (8 
 IDLE_PAUSE_CHANCE = 0.3  # 30% chance to pause mid-journey
 IDLE_PAUSE_MIN_TICKS = 10 * TICK_MULTIPLIER  # Minimum pause duration (1 second)
 IDLE_PAUSE_MAX_TICKS = 30 * TICK_MULTIPLIER  # Maximum pause duration (3 seconds)
+
+# =============================================================================
+# SOLDIER PATROL SETTINGS
+# =============================================================================
+# Soldiers march patrol routes covering ground between buildings
+PATROL_SPEED_MULTIPLIER = 0.9  # Marching pace
+PATROL_CHECK_MIN_TICKS = 8 * TICK_MULTIPLIER  # Brief pause to survey area (0.8 seconds)
+PATROL_CHECK_MAX_TICKS = 20 * TICK_MULTIPLIER  # Maximum survey pause (2 seconds)
+PATROL_CHECK_CHANCE = 0.15  # 15% chance to do a brief check when reaching a waypoint
+PATROL_APPROACH_DISTANCE = 0.8  # How close to get to a waypoint before moving to next
 
 # =============================================================================
 # SLEEP SETTINGS
@@ -273,6 +283,7 @@ AREA_ROLES = {
     "village": "A settlement/economic hub",
     "market": "Where trading happens, in a village",
     "military_housing": "Where soldiers live and sleep, in a village",
+    "farmhouse": "Where a farmer with a farm lives",
     "farm": "Where wheat is grown, part of a village",
     "encampment": "No purpose"
 }
