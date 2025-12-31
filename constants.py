@@ -53,7 +53,7 @@ TICKS_PER_YEAR = BASE_TICKS_PER_YEAR * TICK_MULTIPLIER  # 45000 ticks
 # 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
 # 2.4:1     | 2.25       | Chrono Trigger
 SPRITE_HW_RATIO = 1      # Height-to-width ratio (taller = bigger number)
-SPRITE_TILES_TALL = 2.5    # How many tiles tall the sprite is
+SPRITE_TILES_TALL = 2.0   # How many tiles tall the sprite is
 
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
@@ -67,8 +67,8 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardi
 # Movement speed - characters move once every this many ticks
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
 MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
-MOVEMENT_SPEED = 1.0 # Float-based continuous movement: cells per second
-SPRINT_SPEED = 1.8       # Sprint (cells/second)
+MOVEMENT_SPEED = .8 # Float-based continuous movement: cells per second
+SPRINT_SPEED = 1.3      # Sprint (cells/second)
 
 # Collision radius - how close before characters "bump" each other
 # Set VERY small to allow characters to squeeze past each other like in ALTTP
@@ -84,7 +84,7 @@ ADJACENCY_DISTANCE = 1.3 # Within 1.3 cells - can interact from reasonable dista
 # Combat range - need to be closer for attacks
 COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
-ATTACK_COOLDOWN_TICKS = 10  # Minimum ticks between attacks
+ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS

@@ -9,8 +9,9 @@ import json
 # =============================================================================
 # RAW WORLD DATA (JSON-serializable)
 # =============================================================================
-WORLD_DATA = generate_areas(30, 0, 2, seed=4, name="Dunmere", trees=0.0)
-print(json.dumps(WORLD_DATA, indent=2))
+#WORLD_DATA = generate_areas(60, 10, 2, seed=None, name="Dunmere", trees=0.05)
+WORLD_DATA = generate_areas(30, 0, 2, seed=4, name="Dunmere", trees=0.01)
+#print(json.dumps(WORLD_DATA, indent=2))
 
 # =============================================================================
 # DERIVED CONSTANTS

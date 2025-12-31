@@ -108,6 +108,9 @@ class BoardGUI:
         self.sprite_manager = get_sprite_manager(script_dir)
         self.sprite_manager.load_sprites()
         
+        # Load world sprites (trees, roads, barrels, campfires, houses)
+        self._load_world_sprites(script_dir)
+        
         # Timing
         self.clock = pygame.time.Clock()
         self.last_tick_time = pygame.time.get_ticks()
@@ -134,6 +137,45 @@ class BoardGUI:
         
         # Running state
         self.running = True
+    
+    def _load_world_sprites(self, sprite_dir):
+        """Load world sprites (trees, roads, barrels, campfires, houses)."""
+        self.world_sprites = {}
+        
+        sprite_files = {
+            'tree': 'Tree.png',
+            'road': 'Road.png',
+            'barrel': 'Barrel.png',
+            'campfire': 'Campfire.png',
+            'house_s': 'House_S.png',
+            'house_m': 'House_M.png',
+            'grass': 'Grass_BG.png',
+        }
+        
+        for name, filename in sprite_files.items():
+            filepath = os.path.join(sprite_dir, 'sprites', filename)
+            if os.path.exists(filepath):
+                img = pygame.image.load(filepath)
+                if pygame.display.get_surface() is not None:
+                    img = img.convert_alpha()
+                self.world_sprites[name] = img
+            else:
+                print(f"Warning: World sprite not found: {filepath}")
+                self.world_sprites[name] = None
+        
+        # Extract campfire frames (192x32 = 6 frames of 32x32)
+        campfire_sheet = self.world_sprites.get('campfire')
+        if campfire_sheet:
+            self.campfire_frames = []
+            frame_width = 32
+            frame_height = 32
+            num_frames = campfire_sheet.get_width() // frame_width
+            for i in range(num_frames):
+                frame = pygame.Surface((frame_width, frame_height), pygame.SRCALPHA)
+                frame.blit(campfire_sheet, (0, 0), (i * frame_width, 0, frame_width, frame_height))
+                self.campfire_frames.append(frame)
+        else:
+            self.campfire_frames = []
     
     def run(self):
         """Main game loop"""
@@ -447,20 +489,42 @@ class BoardGUI:
         max_visible_y = min(SIZE, max_visible_y)
         
         # Draw grid cells (only visible ones)
+        road_sprite = self.world_sprites.get('road')
+        grass_sprite = self.world_sprites.get('grass')
+        
+        # Pre-scale sprites for current zoom level
+        tile_size = int(cell_size) + 1
+        scaled_road = pygame.transform.scale(road_sprite, (tile_size, tile_size)) if road_sprite else None
+        scaled_grass = pygame.transform.scale(grass_sprite, (tile_size, tile_size)) if grass_sprite else None
+        
         for y in range(min_visible_y, max_visible_y):
             for x in range(min_visible_x, max_visible_x):
                 # Transform world to screen coordinates
                 screen_x = canvas_center_x + (x - self.camera_x) * cell_size
                 screen_y = canvas_center_y + (y - self.camera_y) * cell_size
                 
-                # Get cell color
-                color = self._get_cell_color(x, y)
-                color_rgb = hex_to_rgb(color)
+                # Check if road tile
+                is_road = (x, y) in self._road_set
                 
-                # Draw cell
-                rect = pygame.Rect(screen_x, screen_y, cell_size + 1, cell_size + 1)
-                pygame.draw.rect(self.screen, color_rgb, rect)
-                pygame.draw.rect(self.screen, self.GRID_COLOR_RGB, rect, 1)
+                # Always draw grass as base layer first
+                if scaled_grass:
+                    self.screen.blit(scaled_grass, (int(screen_x), int(screen_y)))
+                else:
+                    # Fallback to solid color
+                    rect = pygame.Rect(screen_x, screen_y, cell_size + 1, cell_size + 1)
+                    pygame.draw.rect(self.screen, self.BG_COLOR_RGB, rect)
+                
+                # Then draw road or area colors on top
+                if is_road and scaled_road:
+                    self.screen.blit(scaled_road, (int(screen_x), int(screen_y)))
+                else:
+                    # Check for special area colors (farm, market, barracks, etc.)
+                    color = self._get_cell_color(x, y)
+                    # Only draw overlay if it's not the default background color
+                    if color != BG_COLOR:
+                        color_rgb = hex_to_rgb(color)
+                        rect = pygame.Rect(screen_x, screen_y, cell_size + 1, cell_size + 1)
+                        pygame.draw.rect(self.screen, color_rgb, rect)
         
         # Store camera transform info for other draw methods
         self._cam_center_x = canvas_center_x
@@ -501,24 +565,29 @@ class BoardGUI:
         return screen_x, screen_y
     
     def _draw_barrels(self):
-        """Draw all barrels"""
+        """Draw all barrels using barrel sprite"""
         cell_size = self._cam_cell_size
+        barrel_sprite = self.world_sprites.get('barrel')
+        
         for pos, barrel in self.state.interactables.barrels.items():
             x, y = pos
             screen_x, screen_y = self._world_to_screen(x, y)
             
-            # Draw barrel as brown rectangle with "B"
-            padding = 5 * self.zoom
-            barrel_rect = pygame.Rect(screen_x + padding, screen_y + padding, 
-                                       cell_size - 2*padding, cell_size - 2*padding)
-            pygame.draw.rect(self.screen, hex_to_rgb("#8B4513"), barrel_rect)
-            pygame.draw.rect(self.screen, hex_to_rgb("#4a2500"), barrel_rect, max(1, int(2 * self.zoom)))
-            
-            # Draw "B" text
-            text_surface, text_rect = self.font_barrel.render("B", (255, 255, 255))
-            text_x = screen_x + cell_size / 2 - text_rect.width / 2
-            text_y = screen_y + cell_size / 2 - text_rect.height / 2
-            self.screen.blit(text_surface, (int(text_x), int(text_y)))
+            if barrel_sprite:
+                # Scale barrel to fit nicely in cell (with some padding)
+                barrel_size = int(cell_size * 0.8)
+                scaled_barrel = pygame.transform.scale(barrel_sprite, (barrel_size, barrel_size))
+                
+                # Center in cell
+                blit_x = int(screen_x + (cell_size - barrel_size) / 2)
+                blit_y = int(screen_y + (cell_size - barrel_size) / 2)
+                self.screen.blit(scaled_barrel, (blit_x, blit_y))
+            else:
+                # Fallback to rectangle
+                padding = 5 * self.zoom
+                barrel_rect = pygame.Rect(screen_x + padding, screen_y + padding, 
+                                           cell_size - 2*padding, cell_size - 2*padding)
+                pygame.draw.rect(self.screen, hex_to_rgb("#8B4513"), barrel_rect)
     
     def _draw_beds(self):
         """Draw all beds"""
@@ -562,97 +631,103 @@ class BoardGUI:
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
     
     def _draw_camps(self):
-        """Draw all camps"""
+        """Draw all camps using animated campfire sprite"""
         cell_size = self._cam_cell_size
+        current_time = time.time()
+        
+        # Animation: cycle through frames
+        if self.campfire_frames:
+            frame_duration = 0.15  # 150ms per frame
+            frame_idx = int(current_time / frame_duration) % len(self.campfire_frames)
+            campfire_frame = self.campfire_frames[frame_idx]
+        else:
+            campfire_frame = None
+        
         for char in self.state.characters:
             camp_pos = char.get('camp_position')
             if camp_pos:
                 x, y = camp_pos
                 screen_x, screen_y = self._world_to_screen(x, y)
                 
-                # Draw campfire (orange/red circle)
-                fire_cx = int(screen_x + cell_size / 2)
-                fire_cy = int(screen_y + cell_size / 2)
-                r1, r2, r3 = int(8 * self.zoom), int(5 * self.zoom), int(2 * self.zoom)
-                pygame.draw.circle(self.screen, (255, 100, 0), (fire_cx, fire_cy), r1)
-                pygame.draw.circle(self.screen, (255, 200, 0), (fire_cx, fire_cy), r2)
-                pygame.draw.circle(self.screen, (255, 255, 100), (fire_cx, fire_cy), r3)
-                
-                # Draw bedroll next to fire
-                bedroll_x = fire_cx + int(10 * self.zoom)
-                pygame.draw.ellipse(self.screen, (100, 80, 60),
-                                   (bedroll_x - int(3*self.zoom), fire_cy - int(6*self.zoom), 
-                                    int(8*self.zoom), int(12*self.zoom)))
+                if campfire_frame:
+                    # Scale campfire to fit in cell
+                    campfire_size = int(cell_size * 1.2)
+                    scaled_campfire = pygame.transform.scale(campfire_frame, (campfire_size, campfire_size))
+                    
+                    # Center on cell
+                    blit_x = int(screen_x + cell_size / 2 - campfire_size / 2)
+                    blit_y = int(screen_y + cell_size - campfire_size)
+                    self.screen.blit(scaled_campfire, (blit_x, blit_y))
+                else:
+                    # Fallback to circles
+                    fire_cx = int(screen_x + cell_size / 2)
+                    fire_cy = int(screen_y + cell_size / 2)
+                    r1, r2, r3 = int(8 * self.zoom), int(5 * self.zoom), int(2 * self.zoom)
+                    pygame.draw.circle(self.screen, (255, 100, 0), (fire_cx, fire_cy), r1)
+                    pygame.draw.circle(self.screen, (255, 200, 0), (fire_cx, fire_cy), r2)
+                    pygame.draw.circle(self.screen, (255, 255, 100), (fire_cx, fire_cy), r3)
     
     def _draw_trees(self):
-        """Draw all trees as simple green circles with brown trunks"""
+        """Draw all trees using tree sprite"""
         cell_size = self._cam_cell_size
+        tree_sprite = self.world_sprites.get('tree')
         
-        # Tree colors
-        trunk_color = hex_to_rgb("#5D4037")  # Brown trunk
-        leaves_color = hex_to_rgb("#2D5A27")  # Dark green leaves
-        leaves_highlight = hex_to_rgb("#4A7C42")  # Lighter green highlight
+        if not tree_sprite:
+            return
+        
+        # Tree sprite is 66x77, we want it to span roughly 1.5-2 cells and be centered
+        # Scale based on cell size
+        tree_height = int(cell_size * 2.5)  # Tree is about 2.2 cells tall
+        tree_width = int(tree_height * 66 / 77)  # Maintain aspect ratio
+        
+        scaled_tree = pygame.transform.scale(tree_sprite, (tree_width, tree_height))
         
         for pos, tree in self.state.interactables.trees.items():
             x, y = pos
             screen_x, screen_y = self._world_to_screen(x, y)
             
-            # Center of cell
-            cx = int(screen_x + cell_size / 2)
-            cy = int(screen_y + cell_size / 2)
+            # Center the tree on the cell, with bottom of tree at bottom of cell
+            blit_x = int(screen_x + cell_size / 2 - tree_width / 2)
+            blit_y = int(screen_y + cell_size - tree_height)
             
-            # Tree dimensions scaled by zoom
-            trunk_width = max(2, int(4 * self.zoom))
-            trunk_height = max(3, int(8 * self.zoom))
-            canopy_radius = max(4, int(cell_size * 0.4))
-            
-            # Draw trunk (small rectangle at bottom center)
-            trunk_rect = pygame.Rect(
-                cx - trunk_width // 2,
-                cy + canopy_radius // 2 - trunk_height // 2,
-                trunk_width,
-                trunk_height
-            )
-            pygame.draw.rect(self.screen, trunk_color, trunk_rect)
-            
-            # Draw canopy (circle above trunk)
-            canopy_cy = cy - int(canopy_radius * 0.2)
-            pygame.draw.circle(self.screen, leaves_color, (cx, canopy_cy), canopy_radius)
-            
-            # Draw highlight circle (smaller, offset up-left)
-            highlight_radius = max(2, int(canopy_radius * 0.5))
-            highlight_offset = max(1, int(canopy_radius * 0.2))
-            pygame.draw.circle(self.screen, leaves_highlight, 
-                             (cx - highlight_offset, canopy_cy - highlight_offset), 
-                             highlight_radius)
+            self.screen.blit(scaled_tree, (blit_x, blit_y))
     
     def _draw_houses(self):
-        """Draw all houses as colored rectangles with roofs"""
+        """Draw all houses using house sprites"""
         cell_size = self._cam_cell_size
         
-        # House colors
-        wall_color = hex_to_rgb("#C4813D")  # Brown/tan walls
-        roof_color = hex_to_rgb("#8B4513")  # Darker brown roof
-        outline_color = hex_to_rgb("#5D4037")  # Dark brown outline
+        house_s_sprite = self.world_sprites.get('house_s')  # 98x102 for 4x4
+        house_m_sprite = self.world_sprites.get('house_m')  # 146x138 for 5x5
         
         for house in self.state.interactables.houses.values():
             bounds = house.bounds
             y_start, x_start, y_end, x_end = bounds
             
+            house_width_cells = x_end - x_start
+            house_height_cells = y_end - y_start
+            
             # Convert to screen coordinates
             screen_x, screen_y = self._world_to_screen(x_start, y_start)
-            width = (x_end - x_start) * cell_size
-            height = (y_end - y_start) * cell_size
+            width = house_width_cells * cell_size
+            height = house_height_cells * cell_size
             
-            # Draw house body
-            house_rect = pygame.Rect(screen_x, screen_y, width, height)
-            pygame.draw.rect(self.screen, wall_color, house_rect)
-            pygame.draw.rect(self.screen, outline_color, house_rect, max(1, int(2 * self.zoom)))
+            # Select sprite based on house size (4x4 = small, 5x5 = medium)
+            if house_width_cells <= 4 and house_s_sprite:
+                sprite = house_s_sprite
+            elif house_m_sprite:
+                sprite = house_m_sprite
+            else:
+                sprite = house_s_sprite  # Fallback
             
-            # Draw simple roof indicator (darker strip at top)
-            roof_height = max(2, int(cell_size * 0.3))
-            roof_rect = pygame.Rect(screen_x, screen_y, width, roof_height)
-            pygame.draw.rect(self.screen, roof_color, roof_rect)
+            if sprite:
+                # Scale sprite to fit the house bounds
+                scaled_sprite = pygame.transform.scale(sprite, (int(width), int(height)))
+                self.screen.blit(scaled_sprite, (int(screen_x), int(screen_y)))
+            else:
+                # Fallback to rectangle if no sprite
+                wall_color = hex_to_rgb("#C4813D")
+                house_rect = pygame.Rect(screen_x, screen_y, width, height)
+                pygame.draw.rect(self.screen, wall_color, house_rect)
 
     def _draw_characters(self):
         """Draw all characters using sprites at their float positions (ALTTP-style)"""
@@ -696,9 +771,9 @@ class BoardGUI:
             
             # Draw first name below sprite
             first_name = char['name'].split()[0]
-            text_surface, text_rect = self.font_tiny.render(first_name, (0, 0, 0))
+            text_surface, text_rect = self.font_tiny.render(first_name, (255, 255, 255))
             text_x = pixel_cx - text_rect.width / 2
-            text_y = int(pixel_cy + sprite_height / 2) + 2
+            text_y = int(pixel_cy + sprite_height / 3.2) 
             self.screen.blit(text_surface, (int(text_x), int(text_y)))
             
             # Draw HP bar below name only when health < 100
