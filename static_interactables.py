@@ -221,6 +221,66 @@ class Campfire(Interactable):
         return self.owner == char_name
 
 
+class Tree(Interactable):
+    """
+    A tree occupying a single cell.
+    Currently no interaction - just a static world object.
+    """
+    
+    def __init__(self, x, y):
+        super().__init__("Tree", x, y, home=None)
+    
+    def __repr__(self):
+        return f"<Tree at ({self.x}, {self.y})>"
+
+
+class House(Interactable):
+    """
+    A house occupying multiple cells defined by bounds.
+    Currently no interaction - just a static world object.
+    
+    The position (x, y) is the top-left corner of the house.
+    The full footprint is defined by bounds [y_start, x_start, y_end, x_end].
+    """
+    
+    def __init__(self, name, bounds, allegiance=None):
+        """
+        Args:
+            name: Display name for this house
+            bounds: [y_start, x_start, y_end, x_end] defining the house footprint
+            allegiance: Which faction/village this house belongs to
+        """
+        y_start, x_start, y_end, x_end = bounds
+        super().__init__(name, x_start, y_start, home=None)
+        self.bounds = bounds
+        self.allegiance = allegiance
+        self.width = x_end - x_start
+        self.height = y_end - y_start
+    
+    @property
+    def center(self):
+        """Get center point of the house (for distance calculations)."""
+        y_start, x_start, y_end, x_end = self.bounds
+        return ((x_start + x_end) / 2, (y_start + y_end) / 2)
+    
+    def contains_point(self, x, y):
+        """Check if a point is within this house's bounds."""
+        y_start, x_start, y_end, x_end = self.bounds
+        return x_start <= x < x_end and y_start <= y < y_end
+    
+    def get_cells(self):
+        """Get all cells occupied by this house."""
+        y_start, x_start, y_end, x_end = self.bounds
+        cells = []
+        for cy in range(y_start, y_end):
+            for cx in range(x_start, x_end):
+                cells.append((cx, cy))
+        return cells
+    
+    def __repr__(self):
+        return f"<House '{self.name}' bounds={self.bounds}>"
+
+
 # =============================================================================
 # MANAGER CLASS
 # =============================================================================
@@ -236,6 +296,8 @@ class InteractableManager:
         self.beds = {}     # (x, y) -> Bed
         self.stoves = {}   # (x, y) -> Stove
         self.campfires = {}  # (x, y) -> Campfire
+        self.trees = {}    # (x, y) -> Tree
+        self.houses = {}   # name -> House
     
     # =========================================================================
     # INITIALIZATION
@@ -277,11 +339,36 @@ class InteractableManager:
             )
             self.stoves[(x, y)] = stove
     
-    def reset(self, barrel_defs, bed_defs, stove_defs):
+    def init_trees(self, tree_positions):
+        """Initialize trees from list of (x, y) positions."""
+        self.trees = {}
+        for pos in tree_positions:
+            x, y = pos
+            tree = Tree(x, y)
+            self.trees[(x, y)] = tree
+    
+    def init_houses(self, house_defs):
+        """Initialize houses from configuration list.
+        
+        Args:
+            house_defs: List of dicts with 'name', 'bounds', and optionally 'allegiance'
+        """
+        self.houses = {}
+        for house_def in house_defs:
+            house = House(
+                name=house_def["name"],
+                bounds=house_def["bounds"],
+                allegiance=house_def.get("allegiance")
+            )
+            self.houses[house.name] = house
+    
+    def reset(self, barrel_defs, bed_defs, stove_defs, tree_positions=None, house_defs=None):
         """Reset all interactables from configuration."""
         self.init_barrels(barrel_defs)
         self.init_beds(bed_defs)
         self.init_stoves(stove_defs)
+        self.init_trees(tree_positions or [])
+        self.init_houses(house_defs or [])
         self.campfires = {}
     
     # =========================================================================
@@ -422,3 +509,51 @@ class InteractableManager:
             if campfire.is_adjacent(char):
                 return campfire
         return None
+    
+    # =========================================================================
+    # TREE LOOKUPS
+    # =========================================================================
+    
+    def get_tree_at(self, x, y):
+        """Get tree at position, if any."""
+        return self.trees.get((x, y))
+    
+    def has_tree_at(self, x, y):
+        """Check if there is a tree at the given position."""
+        return (x, y) in self.trees
+    
+    def get_all_tree_positions(self):
+        """Get list of all tree positions."""
+        return list(self.trees.keys())
+    
+    def remove_tree(self, x, y):
+        """Remove tree at position."""
+        if (x, y) in self.trees:
+            del self.trees[(x, y)]
+    
+    # =========================================================================
+    # HOUSE LOOKUPS
+    # =========================================================================
+    
+    def get_house_by_name(self, name):
+        """Get house by its name."""
+        return self.houses.get(name)
+    
+    def get_house_at(self, x, y):
+        """Get house that contains the given point, if any."""
+        for house in self.houses.values():
+            if house.contains_point(x, y):
+                return house
+        return None
+    
+    def get_all_houses(self):
+        """Get list of all houses."""
+        return list(self.houses.values())
+    
+    def get_houses_by_allegiance(self, allegiance):
+        """Get all houses belonging to a specific allegiance."""
+        return [h for h in self.houses.values() if h.allegiance == allegiance]
+    
+    def is_point_in_house(self, x, y):
+        """Check if a point is inside any house."""
+        return self.get_house_at(x, y) is not None

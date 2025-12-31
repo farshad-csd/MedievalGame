@@ -25,12 +25,12 @@ import pygame.freetype
 from constants import (
     CELL_SIZE, UPDATE_INTERVAL,
     FARM_CELL_COLORS, JOB_TIERS,
-    BG_COLOR, GRID_COLOR,
+    BG_COLOR, GRID_COLOR, ROAD_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED
 )
-from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE
+from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
@@ -128,6 +128,9 @@ class BoardGUI:
         self.camera_dragging = False  # True while actively dragging
         self.drag_start_mouse = None  # Mouse position when drag started
         self.drag_start_camera = None  # Camera position when drag started
+        
+        # Pre-compute road set for fast lookup
+        self._road_set = set(tuple(r) for r in ROADS)
         
         # Running state
         self.running = True
@@ -464,6 +467,12 @@ class BoardGUI:
         self._cam_center_y = canvas_center_y
         self._cam_cell_size = cell_size
         
+        # Draw houses (below other objects)
+        self._draw_houses()
+        
+        # Draw trees
+        self._draw_trees()
+        
         # Draw barrels
         self._draw_barrels()
         
@@ -575,6 +584,76 @@ class BoardGUI:
                                    (bedroll_x - int(3*self.zoom), fire_cy - int(6*self.zoom), 
                                     int(8*self.zoom), int(12*self.zoom)))
     
+    def _draw_trees(self):
+        """Draw all trees as simple green circles with brown trunks"""
+        cell_size = self._cam_cell_size
+        
+        # Tree colors
+        trunk_color = hex_to_rgb("#5D4037")  # Brown trunk
+        leaves_color = hex_to_rgb("#2D5A27")  # Dark green leaves
+        leaves_highlight = hex_to_rgb("#4A7C42")  # Lighter green highlight
+        
+        for pos, tree in self.state.interactables.trees.items():
+            x, y = pos
+            screen_x, screen_y = self._world_to_screen(x, y)
+            
+            # Center of cell
+            cx = int(screen_x + cell_size / 2)
+            cy = int(screen_y + cell_size / 2)
+            
+            # Tree dimensions scaled by zoom
+            trunk_width = max(2, int(4 * self.zoom))
+            trunk_height = max(3, int(8 * self.zoom))
+            canopy_radius = max(4, int(cell_size * 0.4))
+            
+            # Draw trunk (small rectangle at bottom center)
+            trunk_rect = pygame.Rect(
+                cx - trunk_width // 2,
+                cy + canopy_radius // 2 - trunk_height // 2,
+                trunk_width,
+                trunk_height
+            )
+            pygame.draw.rect(self.screen, trunk_color, trunk_rect)
+            
+            # Draw canopy (circle above trunk)
+            canopy_cy = cy - int(canopy_radius * 0.2)
+            pygame.draw.circle(self.screen, leaves_color, (cx, canopy_cy), canopy_radius)
+            
+            # Draw highlight circle (smaller, offset up-left)
+            highlight_radius = max(2, int(canopy_radius * 0.5))
+            highlight_offset = max(1, int(canopy_radius * 0.2))
+            pygame.draw.circle(self.screen, leaves_highlight, 
+                             (cx - highlight_offset, canopy_cy - highlight_offset), 
+                             highlight_radius)
+    
+    def _draw_houses(self):
+        """Draw all houses as colored rectangles with roofs"""
+        cell_size = self._cam_cell_size
+        
+        # House colors
+        wall_color = hex_to_rgb("#C4813D")  # Brown/tan walls
+        roof_color = hex_to_rgb("#8B4513")  # Darker brown roof
+        outline_color = hex_to_rgb("#5D4037")  # Dark brown outline
+        
+        for house in self.state.interactables.houses.values():
+            bounds = house.bounds
+            y_start, x_start, y_end, x_end = bounds
+            
+            # Convert to screen coordinates
+            screen_x, screen_y = self._world_to_screen(x_start, y_start)
+            width = (x_end - x_start) * cell_size
+            height = (y_end - y_start) * cell_size
+            
+            # Draw house body
+            house_rect = pygame.Rect(screen_x, screen_y, width, height)
+            pygame.draw.rect(self.screen, wall_color, house_rect)
+            pygame.draw.rect(self.screen, outline_color, house_rect, max(1, int(2 * self.zoom)))
+            
+            # Draw simple roof indicator (darker strip at top)
+            roof_height = max(2, int(cell_size * 0.3))
+            roof_rect = pygame.Rect(screen_x, screen_y, width, roof_height)
+            pygame.draw.rect(self.screen, roof_color, roof_rect)
+
     def _draw_characters(self):
         """Draw all characters using sprites at their float positions (ALTTP-style)"""
         cell_size = self._cam_cell_size
@@ -718,16 +797,23 @@ class BoardGUI:
     
     def _get_cell_color(self, x, y):
         """Get the background color for a cell"""
+        # Check if it's a road cell first
+        if (x, y) in self._road_set:
+            return ROAD_COLOR
+        
         # Check if it's a farm cell
         farm_cell = self.state.get_farm_cell_state(x, y)
         if farm_cell:
             return FARM_CELL_COLORS.get(farm_cell['state'], BG_COLOR)
         
-        # Get area color
+        # Get area color (but skip village areas - they use background)
         area = self.state.get_area_at(x, y)
         if area:
             for area_def in AREAS:
                 if area_def["name"] == area:
+                    # Village areas use background color, not their defined color
+                    if area_def.get("role") == "village":
+                        return BG_COLOR
                     return area_def.get("color", BG_COLOR)
         
         return BG_COLOR

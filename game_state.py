@@ -15,7 +15,7 @@ from constants import (
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
-from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE
+from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE, TREES, HOUSES
 from scenario_characters import CHARACTER_TEMPLATES
 from character import Character, create_character
 from static_interactables import InteractableManager
@@ -43,7 +43,7 @@ class GameState:
         self.area_map = [[None for _ in range(SIZE)] for _ in range(SIZE)]
         self.farm_cells = {}  # (x, y) -> {'state': str, 'timer': int}
         
-        # Interactable objects (barrels, beds, stoves, campfires)
+        # Interactable objects (barrels, beds, stoves, campfires, trees, houses)
         self.interactables = InteractableManager()
         
         # Character data
@@ -95,10 +95,12 @@ class GameState:
                             }
     
     def _init_interactables(self):
-        """Initialize all interactable objects (barrels, beds, stoves)."""
+        """Initialize all interactable objects (barrels, beds, stoves, trees, houses)."""
         self.interactables.init_barrels(BARRELS)
         self.interactables.init_beds(BEDS)
         self.interactables.init_stoves(STOVES)
+        self.interactables.init_trees(TREES)
+        self.interactables.init_houses(HOUSES)
     
     def _init_characters(self):
         """Initialize characters from templates.

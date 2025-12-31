@@ -12,6 +12,7 @@ SPEED_OPTIONS = [1, 2, 10, 20, 100]
 BG_COLOR = "#f0f0f0" # UI Background Color
 GRID_COLOR = "#cccccc" # UI Grid Color
 TEXT_COLOR = "white" # UI Text Color
+ROAD_COLOR = "#A89880" # Road cell color
 
 # =============================================================================
 # BOARD SETTINGS

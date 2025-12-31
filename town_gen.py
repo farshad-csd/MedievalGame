@@ -526,7 +526,7 @@ class TownGenerator:
     
     def place_farmhouse_near_farm(self, farm_cells, farm_number):
         """Place farmhouse adjacent to farm."""
-        w, h = 5, 4
+        w, h = 4, 4
         
         adjacent_cells = set()
         for fx, fy in farm_cells:
@@ -579,7 +579,7 @@ class TownGenerator:
     
     def place_village_houses(self):
         """Place houses with higher density near town center."""
-        house_sizes = [(4, 3), (5, 4), (5, 4), (6, 5), (7, 6)]
+        house_sizes = [(4, 4), (4, 4), (4, 4), (4, 4), (5, 5)]
         
         existing = sum(1 for b in self.buildings if b[0] == 'House')
         target = self.num_houses
@@ -872,7 +872,13 @@ def generate_areas(size, houses, farms, seed, name, trees):
     
     data = generator.generate()
     
-    return {"name": name, "size": size, "areas": data["areas"]}
+    return {
+        "name": name,
+        "size": size,
+        "areas": data["areas"],
+        "roads": data.get("roads", []),
+        "trees": data.get("trees", []),
+    }
 
 
 if __name__ == "__main__":

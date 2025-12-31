@@ -18,6 +18,27 @@ print(json.dumps(WORLD_DATA, indent=2))
 VILLAGE_NAME = WORLD_DATA["name"]
 SIZE = WORLD_DATA["size"]
 AREAS = WORLD_DATA["areas"]
+ROADS = WORLD_DATA.get("roads", [])
+TREES = WORLD_DATA.get("trees", [])
+
+# =============================================================================
+# HOUSE DEFINITIONS
+# =============================================================================
+# Houses and farmhouses are extracted for the interactable system
+def _generate_houses():
+    """Generate house definitions from areas with role='house' or 'farmhouse'."""
+    houses = []
+    for area in AREAS:
+        role = area.get("role", "")
+        if role in ("house", "farmhouse"):
+            houses.append({
+                "name": area["name"],
+                "bounds": area["bounds"],
+                "allegiance": area.get("allegiance")
+            })
+    return houses
+
+HOUSES = _generate_houses()
 
 # =============================================================================
 # OBJECT GENERATION RULES
