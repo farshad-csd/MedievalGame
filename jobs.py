@@ -358,12 +358,15 @@ class Job:
                 char.clear_intent()
                 return False
             
-            # Check distance
+            # Check distance - low confidence bystanders keep more distance
             dx = attacker.x - char.x
             dy = attacker.y - char.y
             dist = math.sqrt(dx*dx + dy*dy)
             
-            if dist < VISION_RANGE / 4:
+            confidence = char.get_trait('confidence')
+            safe_distance = VISION_RANGE / 2 if confidence < 7 else VISION_RANGE / 3
+            
+            if dist < safe_distance:
                 # Too close - keep fleeing
                 char.goal = logic._get_flee_goal(char, attacker)
                 return False
@@ -460,8 +463,13 @@ class Job:
         dist_to_threat = math.sqrt(dx * dx + dy * dy)
         
         # If threat got too close, switch to flee
-        # Bystanders have smaller safe distance than victims
-        flee_distance = VISION_RANGE / 4 if reason == 'bystander' else VISION_RANGE / 2
+        # Bystanders: low conf keeps more distance, high conf less
+        # Victims: use standard VISION_RANGE / 2
+        if reason == 'bystander':
+            confidence = char.get_trait('confidence')
+            flee_distance = VISION_RANGE / 2 if confidence < 7 else VISION_RANGE / 3
+        else:
+            flee_distance = VISION_RANGE / 2
         if dist_to_threat < flee_distance:
             # Bystanders stay bystanders, victims stay victims
             if reason == 'bystander':
