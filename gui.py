@@ -68,6 +68,15 @@ class BoardGUI:
         """Initialize pygame and game components. root parameter kept for compatibility but ignored."""
         pygame.init()
         pygame.freetype.init()
+        pygame.mixer.init()
+        
+        # Load and play background music on loop
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        music_path = os.path.join(script_dir, "Forest__8-Bit_Music_.mp3")
+        if os.path.exists(music_path):
+            pygame.mixer.music.load(music_path)
+            pygame.mixer.music.set_volume(0.3)  # 30% volume
+            pygame.mixer.music.play(-1)  # -1 means loop forever
         
         # Create game state and logic
         self.state = GameState()

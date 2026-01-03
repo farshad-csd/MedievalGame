@@ -87,14 +87,14 @@ ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 # PERCEPTION SETTINGS (Vision and Hearing)
 # =============================================================================
 # Sound radius - how far sound travels (attacks, screams, etc.)
-SOUND_RADIUS = 1.0  # cells - characters hear events within this range
+SOUND_RADIUS = 4.0  # cells - characters hear events within this range
 
 # Vision settings
-VISION_RANGE = 4.0  # cells - how far characters can see
+VISION_RANGE = 8.0  # cells - how far characters can see
 VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
 
 # Debug visualization
-SHOW_PERCEPTION_DEBUG = True  # Set to True to show vision cones and sound radii
+SHOW_PERCEPTION_DEBUG = False  # Set to True to show vision cones and sound radii
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS

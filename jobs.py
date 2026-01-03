@@ -98,14 +98,14 @@ class Job:
         if self._check_flee(char, state, logic):
             return self._do_flee(char, state, logic)
         
-        if self._check_watch_threat(char, state, logic):
-            return self._do_watch_threat(char, state, logic)
-        
         if self._check_fight_back(char, state, logic):
             return self._do_fight_back(char, state, logic)
         
         if self._check_combat(char, state, logic):
             return self._do_combat(char, state, logic)
+        
+        if self._check_watch_threat(char, state, logic):
+            return self._do_watch_threat(char, state, logic)
         
         if self._check_flee_criminal(char, state, logic):
             return self._do_flee_criminal(char, state, logic)
@@ -138,44 +138,83 @@ class Job:
     # =========================================================================
     
     def _check_flee(self, char, state, logic):
-        """Should flee from an attacker?"""
-        # Already have flee intent - continue if target is valid
+        """Should flee from an attacker (victim) or violence (bystander)?"""
+        # Already have flee intent - check if we should continue
         if char.intent and char.intent.get('action') == 'flee':
+            reason = char.intent.get('reason')
             target = char.intent.get('target')
             if target and target in state.characters and target.health > 0:
-                # For fleeing violence (not being attacked ourselves), 
-                # stop if we can't perceive it anymore
-                if char.intent.get('reason') == 'fleeing_violence':
+                # Bystanders stop caring once out of perception
+                if reason == 'bystander':
                     can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
                     if not can_perceive:
                         char.clear_intent()
                         return False
-                return True
+                    return True
+                # Only handle victim flee reasons here (being_attacked, threat_approaching)
+                # witnessed_crime and known_criminal go to _check_flee_criminal
+                if reason in ('being_attacked', 'threat_approaching'):
+                    return True
+            return False
         
         # Check if someone is actively attacking us (recent attack + nearby)
         attacker = char.get_active_attacker(state.ticks, state.characters)
-        if not attacker:
-            return False
-        return char.get_trait('confidence') < 7
+        if attacker:
+            return char.get_trait('confidence') < 7
+        
+        # Also check: do we have attacked_by memory of someone nearby?
+        # This catches cases where the attack was a while ago but attacker is back
+        if char.get_trait('confidence') < 7:
+            for memory in char.get_memories(memory_type='attacked_by'):
+                attacker = memory.get('subject')
+                if attacker and attacker in state.characters and attacker.health > 0:
+                    # Is this attacker nearby (within perception)?
+                    can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+                    if can_perceive:
+                        # Resume fleeing from this attacker
+                        char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
+                        return True
+        
+        return False
     
     def _check_watch_threat(self, char, state, logic):
         """Should watch a threat from safe distance?"""
         if char.intent and char.intent.get('action') == 'watch':
-            # Only handle watching threats or violence, not watching someone in distress
             reason = char.intent.get('reason')
-            if reason not in ('monitoring_threat', 'observing_violence'):
+            # Handle: monitoring_threat (victim), bystander (saw violence)
+            if reason not in ('monitoring_threat', 'bystander'):
                 return False
             target = char.intent.get('target')
             if target and target in state.characters and target.health > 0:
+                # Stop watching if we can't perceive them anymore
+                # For victims: _check_flee will resume via memory if attacker returns
+                # For bystanders: they just forget
+                can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                if not can_perceive:
+                    char.clear_intent()
+                    return False
                 return True
         return False
     
     def _check_fight_back(self, char, state, logic):
         """Should fight back against attacker?"""
-        attacker = char.get_active_attacker(state.ticks, state.characters)
-        if not attacker:
+        if char.get_trait('confidence') < 7:
             return False
-        return char.get_trait('confidence') >= 7
+            
+        attacker = char.get_active_attacker(state.ticks, state.characters)
+        if attacker:
+            return True
+        
+        # Also check: do we have attacked_by memory of someone nearby?
+        for memory in char.get_memories(memory_type='attacked_by'):
+            attacker = memory.get('subject')
+            if attacker and attacker in state.characters and attacker.health > 0:
+                # Is this attacker nearby (within perception)?
+                can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+                if can_perceive:
+                    return True
+        
+        return False
     
     def _check_combat(self, char, state, logic):
         """Is actively in combat with a target?"""
@@ -187,12 +226,14 @@ class Job:
         return target and target in state.characters and target.health > 0
     
     def _check_flee_criminal(self, char, state, logic):
-        """Should flee from a known criminal?"""
-        # Already have flee intent - continue if target is valid
+        """Should flee from a known criminal (witnessed crime)?"""
+        # Already have flee intent for witnessed crime - continue if target is valid
         if char.intent and char.intent.get('action') == 'flee':
-            target = char.intent.get('target')
-            if target and target in state.characters and target.health > 0:
-                return True
+            reason = char.intent.get('reason')
+            if reason in ('witnessed_crime', 'known_criminal'):
+                target = char.intent.get('target')
+                if target and target in state.characters and target.health > 0:
+                    return True
         
         # New criminal nearby?
         criminal, intensity = logic.find_known_criminal_nearby(char)
@@ -282,11 +323,15 @@ class Job:
     def _do_flee(self, char, state, logic):
         """Flee from attacker.
         
-        Behavior:
-        1. If attacker is dangerously close (< VISION_RANGE/2), flee! (self-preservation)
-        2. If at safe distance and defender nearby, stay near defender (hope they witness attack)
+        Behavior for VICTIMS (being_attacked, witnessed_crime, etc.):
+        1. If attacker is dangerously close (< VISION_RANGE/2), flee!
+        2. If at safe distance and defender nearby, stay near defender
         3. If at safe distance with no defender, stop and watch attacker
         4. Can report crimes to same-allegiance soldiers via sound
+        
+        Behavior for BYSTANDERS (just saw violence, don't know who's guilty):
+        1. Flee until out of danger distance
+        2. Then watch until out of perception
         """
         # Get attacker from intent first, fall back to get_active_attacker
         attacker = None
@@ -305,11 +350,11 @@ class Job:
         # Get current flee reason
         flee_reason = char.intent.get('reason') if char.intent else None
         
-        # Bystanders fleeing violence - flee to safe distance, then watch
-        if flee_reason == 'fleeing_violence':
+        # BYSTANDER: Simple behavior - flee to safe distance, then watch
+        if flee_reason == 'bystander':
+            # Perception check already done in _check_flee, but double-check
             can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
             if not can_perceive:
-                # Out of perception - stop caring, return to normal
                 char.clear_intent()
                 return False
             
@@ -318,18 +363,18 @@ class Job:
             dy = attacker.y - char.y
             dist = math.sqrt(dx*dx + dy*dy)
             
-            if dist >= VISION_RANGE:
+            if dist < VISION_RANGE / 4:
+                # Too close - keep fleeing
+                char.goal = logic._get_flee_goal(char, attacker)
+                return False
+            else:
                 # Safe distance - switch to watching
                 char.goal = None
                 self._face_target(char, attacker)
-                char.set_intent('watch', attacker, reason='observing_violence', started_tick=state.ticks)
+                char.set_intent('watch', attacker, reason='bystander', started_tick=state.ticks)
                 return False
-            
-            # Still too close - keep fleeing
-            char.goal = logic._get_flee_goal(char, attacker)
-            return False
         
-        # Below here is victim flee logic (being_attacked, witnessed_crime, etc.)
+        # VICTIM: Complex flee logic (being_attacked, witnessed_crime, etc.)
         
         # Set flee intent if not already set
         if char.intent is None or char.intent.get('action') not in ('flee', 'watch'):
@@ -354,7 +399,7 @@ class Job:
             return False
         
         # Look for any defender in range
-        defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=attacker)
+        defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=attacker)
         
         if defender:
             dx_to_defender = defender.x - char.x
@@ -399,8 +444,8 @@ class Job:
         Behavior:
         - Stand still and face the threat
         - If threat approaches (< VISION_RANGE/2), switch back to flee
-        - If defender comes in range, try to report and maybe go to them
-        - For observing_violence, stop if violence moves out of perception
+        - Victims (monitoring_threat): look for defenders, try to report
+        - Bystanders: just watch, perception check done in _check_watch_threat
         """
         threat = char.intent.get('target') if char.intent else None
         if not threat or threat not in state.characters or threat.health <= 0:
@@ -409,21 +454,20 @@ class Job:
         
         reason = char.intent.get('reason') if char.intent else None
         
-        # For observing violence (not a victim), stop watching if out of perception
-        if reason == 'observing_violence':
-            can_perceive, _ = logic.can_perceive_event(char, threat.x, threat.y)
-            if not can_perceive:
-                char.clear_intent()
-                return False
-        
         # Calculate distance to threat
         dx = threat.x - char.x
         dy = threat.y - char.y
         dist_to_threat = math.sqrt(dx * dx + dy * dy)
         
         # If threat got too close, switch to flee
-        if dist_to_threat < VISION_RANGE / 2:
-            char.set_intent('flee', threat, reason='threat_approaching', started_tick=state.ticks)
+        # Bystanders have smaller safe distance than victims
+        flee_distance = VISION_RANGE / 4 if reason == 'bystander' else VISION_RANGE / 2
+        if dist_to_threat < flee_distance:
+            # Bystanders stay bystanders, victims stay victims
+            if reason == 'bystander':
+                char.set_intent('flee', threat, reason='bystander', started_tick=state.ticks)
+            else:
+                char.set_intent('flee', threat, reason='threat_approaching', started_tick=state.ticks)
             char.goal = logic._get_flee_goal(char, threat)
             state.log_action(f"{char.get_display_name()} fleeing - {threat.get_display_name()} too close!")
             return False
@@ -433,12 +477,12 @@ class Job:
         self._face_target(char, threat)
         
         # Only victims (monitoring_threat) look for defenders and try to report
-        # Bystanders (observing_violence) just watch
+        # Bystanders just watch
         if reason == 'monitoring_threat':
             dir_to_threat_x = dx / dist_to_threat if dist_to_threat > 0.01 else 0
             dir_to_threat_y = dy / dist_to_threat if dist_to_threat > 0.01 else 0
             
-            defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=threat)
+            defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=threat)
             if defender:
                 dx_to_defender = defender.x - char.x
                 dy_to_defender = defender.y - char.y
@@ -498,6 +542,17 @@ class Job:
     def _do_fight_back(self, char, state, logic):
         """Fight back against attacker."""
         attacker = char.get_active_attacker(state.ticks, state.characters)
+        
+        # Also check attacked_by memory if no active attacker
+        if not attacker:
+            for memory in char.get_memories(memory_type='attacked_by'):
+                potential = memory.get('subject')
+                if potential and potential in state.characters and potential.health > 0:
+                    can_perceive, _ = logic.can_perceive_event(char, potential.x, potential.y)
+                    if can_perceive:
+                        attacker = potential
+                        break
+        
         if not attacker:
             return False
         
@@ -573,7 +628,7 @@ class Job:
             dir_to_criminal_x, dir_to_criminal_y = 0, 0
         
         # Look for any defender in range
-        defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=flee_target)
+        defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=flee_target)
         
         if defender:
             dx_to_defender = defender.x - char.x

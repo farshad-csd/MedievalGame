@@ -1295,8 +1295,7 @@ class GameLogic:
         - High confidence (>= 7): Watch from current position
         - Low confidence (< 7): Flee from the violence
         
-        This is separate from witness_crime - it's just "I see a fight happening"
-        without any judgment about who is in the wrong.
+        All bystanders use reason='bystander' - they stop caring once out of perception.
         """
         for char in self.state.characters:
             if char is attacker or char is target:
@@ -1315,9 +1314,9 @@ class GameLogic:
             
             confidence = char.get_trait('confidence')
             if confidence >= 7:
-                char.set_intent('watch', attacker, reason='observing_violence', started_tick=self.state.ticks)
+                char.set_intent('watch', attacker, reason='bystander', started_tick=self.state.ticks)
             else:
-                char.set_intent('flee', attacker, reason='fleeing_violence', started_tick=self.state.ticks)
+                char.set_intent('flee', attacker, reason='bystander', started_tick=self.state.ticks)
                 self.state.log_action(f"{char.get_display_name()} fleeing from violence!")
     
     def report_crime_to(self, reporter, defender, crime_memory):
