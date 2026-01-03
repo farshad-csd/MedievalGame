@@ -18,7 +18,8 @@ from constants import (
     WHEAT_TO_BREAD_RATIO, BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
     PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE, CRIME_INTENSITY_MURDER,
-    TAX_GRACE_PERIOD, JOB_TIERS, DEFAULT_JOB_TIER
+    TAX_GRACE_PERIOD, JOB_TIERS, DEFAULT_JOB_TIER,
+    FLEE_DEFENDER_RANGE, FLEE_TIMEOUT_TICKS
 )
 
 
@@ -119,6 +120,10 @@ class Job:
         if self._should_flee_criminal(char, state, logic):
             return self._do_flee_criminal(char, state, logic)
         
+        # Confront criminals if we're a defender (high morality + confidence)
+        if self._should_confront_criminal(char, state, logic):
+            return self._do_confront_criminal(char, state, logic)
+        
         # ===== BASIC NEEDS =====
         
         # Eat if hungry and have bread
@@ -174,8 +179,16 @@ class Job:
     def _should_flee_criminal(self, char, state, logic):
         """Should flee from a known criminal nearby?"""
         # Check if already fleeing
-        if char.get('flee_from'):
+        flee_target = char.get('flee_from')
+        if flee_target and flee_target in state.characters:
+            # Check timeout - stop fleeing after FLEE_TIMEOUT_TICKS
+            flee_start = char.get('flee_start_tick')
+            if flee_start:
+                elapsed = state.ticks - flee_start
+                if elapsed > FLEE_TIMEOUT_TICKS:
+                    return False
             return True
+        
         # Check for criminals we know about
         criminal, intensity = logic.find_known_criminal_nearby(char)
         if criminal and char.get_trait('confidence') < 7:
@@ -213,23 +226,87 @@ class Job:
             return False
         return True
     
+    def _should_confront_criminal(self, char, state, logic):
+        """Should this character confront a known criminal?
+        
+        Only for 'general defenders' - high morality (>=7) AND high confidence (>=7).
+        Soldiers handle this differently in SoldierJob.
+        """
+        # Must be a general defender (high morality + confidence)
+        morality = char.get_trait('morality')
+        confidence = char.get_trait('confidence')
+        if morality < 7 or confidence < 7:
+            return False
+        
+        # Skip if already in combat
+        if char.get('robbery_target'):
+            return False
+        
+        # Look for a known criminal to confront
+        criminal, intensity = logic.find_known_criminal_nearby(char)
+        return criminal is not None
+    
+    def _do_confront_criminal(self, char, state, logic):
+        """Confront a known criminal."""
+        criminal, intensity = logic.find_known_criminal_nearby(char)
+        if not criminal:
+            return False
+        
+        char_name = char.get_display_name()
+        criminal_name = criminal.get_display_name()
+        
+        # If adjacent, start fighting
+        if logic.is_adjacent(char, criminal):
+            if char.get('robbery_target') != criminal:
+                state.log_action(f"{char_name} confronting {criminal_name}!")
+                char.robbery_target = criminal
+            
+            # Attack if we can
+            if logic.can_attack(char):
+                logic._do_attack(char, criminal)
+                return True
+        
+        # Move toward criminal
+        char.goal = (criminal.x, criminal.y)
+        return False
+    
     # =========================================================================
     # ACTIONS
     # =========================================================================
     
     def _do_flee(self, char, state, logic):
-        """Flee from attacker."""
+        """Flee from attacker (being actively attacked).
+        
+        CONCURRENT priorities:
+        1. ALWAYS flee away from attacker (non-negotiable)
+        2. If a defender is in the flee direction, bias toward them
+        """
         attacker = logic.get_attacker(char)
         if not attacker:
             return False
         
-        # Look for a defender to run to
-        murder_range = logic.get_crime_range('murder')
-        defender = logic.find_nearby_defender(char, murder_range)
+        # Calculate flee direction (away from attacker)
+        dx_from_attacker = char.x - attacker.x
+        dy_from_attacker = char.y - attacker.y
+        
+        # Look for a defender in the flee direction
+        defender = logic.find_nearby_defender(char, FLEE_DEFENDER_RANGE, exclude=attacker)
+        
         if defender:
-            char.goal = (defender.x, defender.y)
-        else:
-            char.goal = logic._get_flee_goal(char, attacker)
+            # Check if defender is in the "away from attacker" direction using dot product
+            dx_to_defender = defender.x - char.x
+            dy_to_defender = defender.y - char.y
+            
+            # Dot product: positive means defender is in flee direction
+            dot = dx_to_defender * dx_from_attacker + dy_to_defender * dy_from_attacker
+            
+            if dot > 0:
+                # Defender is in flee direction - go toward them while fleeing
+                char.goal = (defender.x, defender.y)
+                return False
+        
+        # No defender in flee direction - just flee directly away
+        char.goal = logic._get_flee_goal(char, attacker)
         return False  # Movement, not action
     
     def _do_fight_back(self, char, state, logic):
@@ -270,43 +347,127 @@ class Job:
         return False
     
     def _do_flee_criminal(self, char, state, logic):
-        """Flee from a known criminal."""
-        # Check current flee target
+        """Flee from a known criminal.
+        
+        ALWAYS flee away from threat. If a defender is in a compatible direction,
+        bias toward them but never compromise on distance from threat.
+        """
         flee_target = char.get('flee_from')
-        if flee_target and flee_target in state.characters:
-            worst_crime = logic.get_worst_known_crime(char, flee_target)
-            if worst_crime:
-                flee_distance = logic.get_flee_distance(worst_crime['intensity'])
+        
+        # Find new criminal to flee from if we don't have one
+        if not flee_target or flee_target not in state.characters:
+            criminal, intensity = logic.find_known_criminal_nearby(char)
+            if criminal:
+                char_name = char.get_display_name()
+                criminal_name = criminal.get_display_name()
+                state.log_action(f"{char_name} fleeing from {criminal_name}!")
+                char.flee_from = criminal
+                char.flee_start_tick = state.ticks
+                char.reported_criminal_to = set()
+                flee_target = criminal
             else:
-                flee_distance = logic.get_flee_distance(CRIME_INTENSITY_MURDER)
-            
-            dist = state.get_distance(char, flee_target)
-            if dist > flee_distance:
                 char.flee_from = None
+                char.flee_start_tick = None
                 return False
-            
-            # Look for defender
-            defender = logic.find_nearby_defender(char, worst_crime['intensity'] if worst_crime else CRIME_INTENSITY_MURDER)
-            if defender:
-                char.goal = (defender.x, defender.y)
-            else:
-                char.goal = logic._get_flee_goal(char, flee_target)
+        
+        # Get crime intensity for flee distance calculation
+        worst_crime = logic.get_worst_known_crime(char, flee_target)
+        if worst_crime:
+            intensity = worst_crime['intensity']
+        else:
+            intensity = CRIME_INTENSITY_MURDER
+        
+        flee_distance = logic.get_flee_distance(intensity)
+        dist_to_threat = state.get_distance(char, flee_target)
+        
+        # Check timeout
+        flee_start = char.get('flee_start_tick')
+        if flee_start and state.ticks - flee_start > FLEE_TIMEOUT_TICKS:
+            char_name = char.get_display_name()
+            state.log_action(f"{char_name} stopped fleeing (timeout)")
+            char.flee_from = None
+            char.flee_start_tick = None
+            char.goal = None
+            self._face_target(char, flee_target)
             return False
         
-        # Find new criminal to flee from
-        criminal, intensity = logic.find_known_criminal_nearby(char)
-        if criminal:
-            char_name = char.get_display_name()
-            criminal_name = criminal.get_display_name()
-            state.log_action(f"{char_name} fleeing from {criminal_name}!")
-            char.flee_from = criminal
+        # OPPORTUNISTIC: Report to any adjacent defender we haven't reported to yet
+        reported_to = char.get('reported_criminal_to', set())
+        for other in state.characters:
+            if other == char or other == flee_target:
+                continue
+            if id(other) in reported_to:
+                continue
+            if state.get_distance(char, other) <= 1.5:
+                # Check if they're a defender
+                if logic.is_defender(other) or (other.get('job') == 'Soldier' and other.get('allegiance') == char.get('allegiance')):
+                    logic.report_crime_to_defender(char, flee_target, intensity, other)
+                    reported_to.add(id(other))
+                    char.reported_criminal_to = reported_to
+        
+        # At safe distance? Stop fleeing, face threat
+        if dist_to_threat >= flee_distance:
+            char.flee_from = None
+            char.flee_start_tick = None
+            char.goal = None
+            self._face_target(char, flee_target)
+            return False
+        
+        # Calculate base flee direction (directly away from threat)
+        flee_dx = char.x - flee_target.x
+        flee_dy = char.y - flee_target.y
+        flee_mag = (flee_dx ** 2 + flee_dy ** 2) ** 0.5
+        
+        if flee_mag > 0.01:
+            flee_dx /= flee_mag
+            flee_dy /= flee_mag
+        else:
+            # On top of threat - pick random direction
+            import random, math
+            angle = random.random() * 2 * math.pi
+            flee_dx = math.cos(angle)
+            flee_dy = math.sin(angle)
+        
+        # Check if there's a defender we can bias toward
+        defender = logic.find_nearby_defender(char, FLEE_DEFENDER_RANGE, exclude=flee_target)
+        
+        if defender and id(defender) not in reported_to:
+            def_dx = defender.x - char.x
+            def_dy = defender.y - char.y
+            def_mag = (def_dx ** 2 + def_dy ** 2) ** 0.5
             
-            defender = logic.find_nearby_defender(char, intensity)
-            if defender:
-                char.goal = (defender.x, defender.y)
-            else:
-                char.goal = logic._get_flee_goal(char, criminal)
+            if def_mag > 0.01:
+                def_dx /= def_mag
+                def_dy /= def_mag
+                
+                # Dot product: how aligned is defender with flee direction?
+                dot = flee_dx * def_dx + flee_dy * def_dy
+                
+                # Only bias toward defender if they're in a forward-ish direction (dot > 0.3)
+                # This means within about 72 degrees of the flee direction
+                if dot > 0.3:
+                    # Blend flee direction with defender direction
+                    # Weight heavily toward flee (0.7 flee, 0.3 defender)
+                    blend_dx = flee_dx * 0.7 + def_dx * 0.3
+                    blend_dy = flee_dy * 0.7 + def_dy * 0.3
+                    # Normalize
+                    blend_mag = (blend_dx ** 2 + blend_dy ** 2) ** 0.5
+                    if blend_mag > 0.01:
+                        flee_dx = blend_dx / blend_mag
+                        flee_dy = blend_dy / blend_mag
+        
+        # Set goal: flee in the calculated direction
+        char.goal = (char.x + flee_dx * 5.0, char.y + flee_dy * 5.0)
         return False
+    
+    def _face_target(self, char, target):
+        """Make character face toward a target."""
+        dx = target.x - char.x
+        dy = target.y - char.y
+        if abs(dx) > abs(dy):
+            char.facing = 'right' if dx > 0 else 'left'
+        else:
+            char.facing = 'down' if dy > 0 else 'up'
     
     def _do_eat(self, char, state, logic):
         """Eat bread."""

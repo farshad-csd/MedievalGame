@@ -20,6 +20,7 @@ if sys.platform == 'darwin':
         pass  # Already set
 
 import time
+import math
 import pygame
 import pygame.freetype
 from constants import (
@@ -89,8 +90,8 @@ class BoardGUI:
             self.window_height = screen_height - 100
             self.window_width = int(self.window_height * 16 / 9)
         
-        self.canvas_width = self.window_width - 20
-        self.canvas_height = self.window_height - 20
+        self.canvas_width = self.window_width
+        self.canvas_height = self.window_height
         
         # Create resizable window
         self.screen = pygame.display.set_mode(
@@ -231,37 +232,203 @@ class BoardGUI:
         self._handle_continuous_movement()
     
     def _handle_continuous_movement(self):
-        """Handle continuous player movement while keys are held - ALTTP style"""
+        """Handle continuous player movement (WASD) and camera panning (arrow keys)"""
         keys = pygame.key.get_pressed()
         
-        # Calculate movement direction
+        # === UPDATE PLAYER FACING BASED ON MOUSE ===
+        self._update_player_facing_to_mouse()
+        
+        # === PLAYER MOVEMENT (WASD only) ===
         dx = 0
         dy = 0
         
         # Vertical
-        if keys[pygame.K_w] or keys[pygame.K_UP]:
+        if keys[pygame.K_w]:
             dy = -1
-        elif keys[pygame.K_s] or keys[pygame.K_DOWN]:
+        elif keys[pygame.K_s]:
             dy = 1
         
         # Horizontal
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+        if keys[pygame.K_a]:
             dx = -1
-        elif keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+        elif keys[pygame.K_d]:
             dx = 1
         
         # Check if sprinting (shift held)
         sprinting = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
         
         if dx != 0 or dy != 0:
-            # Set player velocity via controller
-            self.player_controller.handle_movement_input(dx, dy, sprinting)
+            # Check if backpedaling (moving opposite to facing direction)
+            movement_dot = self._update_backpedal_state(dx, dy)
+            # Set player velocity via controller (don't update facing - mouse controls that)
+            self._handle_movement_no_facing(dx, dy, sprinting, movement_dot)
             self.player_moving = True
         else:
             # No movement keys held - stop player
             if self.player_moving:
                 self.player_controller.stop_movement()
                 self.player_moving = False
+            # Clear backpedal state
+            player = self.state.player
+            if player:
+                player['is_backpedaling'] = False
+        
+        # === CAMERA PANNING (Arrow keys) ===
+        pan_dx = 0
+        pan_dy = 0
+        
+        if keys[pygame.K_UP]:
+            pan_dy = -1
+        elif keys[pygame.K_DOWN]:
+            pan_dy = 1
+        
+        if keys[pygame.K_LEFT]:
+            pan_dx = -1
+        elif keys[pygame.K_RIGHT]:
+            pan_dx = 1
+        
+        if pan_dx != 0 or pan_dy != 0:
+            # Stop following player when manually panning
+            self.camera_following_player = False
+            # Pan speed in world units per frame
+            pan_speed = 0.15 / self.zoom  # Slower when zoomed in
+            self.camera_x += pan_dx * pan_speed
+            self.camera_y += pan_dy * pan_speed
+    
+    def _screen_to_world(self, screen_x, screen_y):
+        """Convert screen coordinates to world coordinates."""
+        canvas_center_x = self.canvas_width / 2
+        canvas_center_y = self.canvas_height / 2
+        cell_size = CELL_SIZE * self.zoom
+        
+        world_x = (screen_x - canvas_center_x) / cell_size + self.camera_x
+        world_y = (screen_y - canvas_center_y) / cell_size + self.camera_y
+        return world_x, world_y
+    
+    def _update_player_facing_to_mouse(self):
+        """Update player facing direction to face the mouse cursor."""
+        player = self.state.player
+        if not player:
+            return
+        
+        # Get mouse position in screen coords
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        
+        # Convert to world coords
+        world_x, world_y = self._screen_to_world(mouse_x, mouse_y)
+        
+        # Calculate direction from player to mouse
+        dx = world_x - player.x
+        dy = world_y - player.y
+        
+        # Determine 8-direction facing
+        angle = math.atan2(dy, dx)  # -PI to PI, 0 = right
+        
+        # Convert to 8 directions
+        # Angle ranges: each direction covers 45 degrees (PI/4)
+        if angle >= -math.pi/8 and angle < math.pi/8:
+            player.facing = 'right'
+        elif angle >= math.pi/8 and angle < 3*math.pi/8:
+            player.facing = 'down-right'
+        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
+            player.facing = 'down'
+        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
+            player.facing = 'down-left'
+        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
+            player.facing = 'left'
+        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
+            player.facing = 'up-left'
+        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
+            player.facing = 'up'
+        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
+            player.facing = 'up-right'
+    
+    def _update_backpedal_state(self, move_dx, move_dy):
+        """Check if player is backpedaling (moving opposite to facing).
+        Returns the dot product for speed calculations."""
+        player = self.state.player
+        if not player:
+            return 0
+        
+        facing = player.get('facing', 'down')
+        
+        # Map facing to direction vector
+        facing_vectors = {
+            'right': (1, 0),
+            'left': (-1, 0),
+            'up': (0, -1),
+            'down': (0, 1),
+            'up-right': (1, -1),
+            'up-left': (-1, -1),
+            'down-right': (1, 1),
+            'down-left': (-1, 1),
+        }
+        
+        face_dx, face_dy = facing_vectors.get(facing, (0, 1))
+        
+        # Normalize movement vector for accurate dot product
+        move_mag = math.sqrt(move_dx * move_dx + move_dy * move_dy)
+        if move_mag > 0:
+            move_dx_norm = move_dx / move_mag
+            move_dy_norm = move_dy / move_mag
+        else:
+            move_dx_norm, move_dy_norm = 0, 0
+        
+        # Normalize facing vector (diagonals need normalization)
+        face_mag = math.sqrt(face_dx * face_dx + face_dy * face_dy)
+        if face_mag > 0:
+            face_dx_norm = face_dx / face_mag
+            face_dy_norm = face_dy / face_mag
+        else:
+            face_dx_norm, face_dy_norm = 0, 1
+        
+        # Dot product: 1 = same direction, 0 = perpendicular, -1 = opposite
+        dot = move_dx_norm * face_dx_norm + move_dy_norm * face_dy_norm
+        
+        # Backpedaling if dot product is negative (moving opposite to facing)
+        player['is_backpedaling'] = dot < 0
+        
+        return dot
+    
+    def _handle_movement_no_facing(self, dx, dy, sprinting=False, movement_dot=0):
+        """Handle movement input without changing facing direction.
+        
+        Args:
+            dx, dy: Movement direction
+            sprinting: Whether sprint key is held
+            movement_dot: Dot product of movement vs facing direction
+        """
+        player = self.state.player
+        if not player:
+            return False
+        
+        # Can't move while frozen
+        if player.is_frozen:
+            player.vx = 0.0
+            player.vy = 0.0
+            return False
+        
+        # Calculate speed based on movement direction relative to facing
+        # dot > 0 means moving forward-ish, dot <= 0 means moving backward-ish
+        if movement_dot > 0:
+            # Moving forward - normal speed, can sprint
+            speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
+            player.is_sprinting = sprinting
+        else:
+            # Moving sideways or backward - 10% slower, no sprint
+            speed = MOVEMENT_SPEED * 0.9
+            player.is_sprinting = False
+        
+        # Normalize diagonal movement
+        if dx != 0 and dy != 0:
+            diagonal_factor = 1.0 / math.sqrt(2)
+            player.vx = dx * speed * diagonal_factor
+            player.vy = dy * speed * diagonal_factor
+        else:
+            player.vx = dx * speed
+            player.vy = dy * speed
+        
+        return True
     
     def _handle_keydown(self, event):
         """Handle keyboard input (non-movement actions)"""
@@ -272,9 +439,9 @@ class BoardGUI:
             self._handle_eat()
         elif key == pygame.K_t:
             self._handle_trade()
-        elif key == pygame.K_f:
-            self._handle_attack()
         elif key == pygame.K_c:
+            self._handle_make_camp()
+        elif key == pygame.K_r:
             # Recenter camera on player and resume following
             self.camera_following_player = True
             if self.state.player:
@@ -299,38 +466,20 @@ class BoardGUI:
     
     def _handle_mouse_click(self, event):
         """Handle mouse clicks"""
-        if event.button == 1:  # Left click
+        if event.button == 1:  # Left click - Attack
             pos = event.pos
-            
-            # Check if click is on canvas area - start dragging
-            canvas_left = 10
-            canvas_top = 10
-            canvas_rect = pygame.Rect(canvas_left, canvas_top, self.canvas_width, self.canvas_height)
+            # Only attack if clicking on canvas area
+            canvas_rect = pygame.Rect(0, 0, self.canvas_width, self.canvas_height)
             if canvas_rect.collidepoint(pos):
-                self.camera_dragging = True
-                self.camera_following_player = False  # Stop following player
-                self.drag_start_mouse = pos
-                self.drag_start_camera = (self.camera_x, self.camera_y)
+                self._handle_attack()
     
     def _handle_mouse_release(self, event):
         """Handle mouse button release"""
-        if event.button == 1:  # Left click released
-            self.camera_dragging = False
+        pass  # No drag functionality
     
     def _handle_mouse_motion(self, event):
-        """Handle mouse movement for panning"""
-        if self.camera_dragging and self.drag_start_mouse:
-            # Calculate how much mouse moved in screen pixels
-            dx = event.pos[0] - self.drag_start_mouse[0]
-            dy = event.pos[1] - self.drag_start_mouse[1]
-            
-            # Convert to world units (inverse because dragging moves view opposite direction)
-            world_dx = -dx / (self.zoom * CELL_SIZE)
-            world_dy = -dy / (self.zoom * CELL_SIZE)
-            
-            # Update camera position
-            self.camera_x = self.drag_start_camera[0] + world_dx
-            self.camera_y = self.drag_start_camera[1] + world_dy
+        """Handle mouse movement"""
+        pass  # No drag panning - use arrow keys instead
     
     def _handle_mouse_wheel(self, event):
         """Handle mouse wheel for zooming"""
@@ -351,8 +500,8 @@ class BoardGUI:
         """Handle window resize event"""
         self.window_width = event.w
         self.window_height = event.h
-        self.canvas_width = self.window_width - 20
-        self.canvas_height = self.window_height - 20
+        self.canvas_width = self.window_width
+        self.canvas_height = self.window_height
         
         # Recreate the display surface with new size
         self.screen = pygame.display.set_mode(
@@ -379,6 +528,32 @@ class BoardGUI:
     def _handle_bake(self):
         """Handle player bake input"""
         self.player_controller.handle_bake_input()
+    
+    def _handle_make_camp(self):
+        """Handle player camp creation - only one camp allowed"""
+        player = self.state.player
+        if not player:
+            return
+        
+        name = player.get_display_name()
+        
+        # Check if player already has a camp
+        if player.get('camp_position'):
+            self.state.log_action(f"{name} already has a camp")
+            return
+        
+        # Try to make camp at current position
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        
+        if not self.logic.can_make_camp_at(cell_x, cell_y):
+            self.state.log_action(f"{name} can't make a camp here (must be outside village)")
+            return
+        
+        # Make the camp
+        if self.logic.make_camp(player):
+            # Camp created successfully - log is handled by make_camp
+            pass
     
     # =========================================================================
     # GAME LOOP
@@ -455,16 +630,14 @@ class BoardGUI:
     
     def _draw_canvas(self):
         """Draw the game canvas with camera (zoom and pan)"""
-        # Canvas viewport on screen
-        canvas_left = 10
-        canvas_top = 10
+        # Canvas viewport on screen (full window)
         canvas_width = self.canvas_width
         canvas_height = self.canvas_height
-        canvas_center_x = canvas_left + canvas_width / 2
-        canvas_center_y = canvas_top + canvas_height / 2
+        canvas_center_x = canvas_width / 2
+        canvas_center_y = canvas_height / 2
         
         # Create clipping rect for canvas area
-        clip_rect = pygame.Rect(canvas_left, canvas_top, canvas_width, canvas_height)
+        clip_rect = pygame.Rect(0, 0, canvas_width, canvas_height)
         self.screen.set_clip(clip_rect)
         
         # Fill canvas background

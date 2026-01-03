@@ -9,7 +9,7 @@ MIN_ZOOM = 0.5             # Minimum zoom (zoomed out)
 MAX_ZOOM = 4.0             # Maximum zoom (zoomed in)
 ZOOM_SPEED = 0.1           # How much zoom changes per scroll
 SPEED_OPTIONS = [1, 2, 10, 20, 100]
-BG_COLOR = "#f0f0f0" # UI Background Color
+BG_COLOR = "#000000" # UI Background Color
 GRID_COLOR = "#cccccc" # UI Grid Color
 TEXT_COLOR = "white" # UI Text Color
 ROAD_COLOR = "#A89880" # Road cell color
@@ -138,34 +138,103 @@ CRIME_INTENSITY_THEFT = 10   # 10 cells (2.5x original)
 THEFT_PATIENCE_TICKS = 60 * TICK_MULTIPLIER  # 60 seconds at 1x speed - how long to wait for crops
 THEFT_COOLDOWN_TICKS = 30 * TICK_MULTIPLIER  # 30 seconds at 1x speed - cooldown after giving up
 
+# Flee behavior
+FLEE_DEFENDER_RANGE = 20  # Always run to defenders within this range (cells)
+FLEE_TIMEOUT_TICKS = 30 * TICK_MULTIPLIER  # Max time to flee without a defender (30 seconds)
+
 # =============================================================================
 # SKILL DEFINITIONS
 # =============================================================================
 # Skills have: name, category ('combat', 'benign', or 'both')
 # All characters have 0-100 points in each skill
 SKILLS = {
-    "strength": {"name": "Strength", "category": "combat"},
-    "agility": {"name": "Agility", "category": "combat"},
-    "stealth": {"name": "Stealth", "category": "combat"},
-    "weapon_mastery": {"name": "Weapon Mastery", "category": "combat"},
-    "explosives": {"name": "Explosives", "category": "combat"},
-    "blacksmithing": {"name": "Blacksmithing", "category": "benign"},
-    "lumberjacking": {"name": "Lumberjacking", "category": "benign"},
-    "mining": {"name": "Mining", "category": "benign"},
-    "construction": {"name": "Construction", "category": "both"},
-    "farming": {"name": "Farming", "category": "benign"},
-    "shepherding": {"name": "Shepherding", "category": "benign"},
-    "carpentry": {"name": "Carpentry", "category": "both"},
-    "doctor": {"name": "Doctor", "category": "both"},
-    "art": {"name": "Art", "category": "benign"},
-    "herbalism": {"name": "Herbalism", "category": "benign"},
-    "brewing": {"name": "Brewing", "category": "benign"},
-    "tailor": {"name": "Tailor", "category": "benign"},
-    "bard": {"name": "Bard", "category": "benign"},
-    "hospitality": {"name": "Hospitality", "category": "benign"},
-    "lockpicking": {"name": "Lockpicking", "category": "benign"},
-    "mercantile": {"name": "Mercantile", "category": "benign"},
+    "strength": {"name": "Strength", "category": "combat"}, # warrior
+    "endurance": {"name": "Strength", "category": "combat"}, # warrior
+    "stealth": {"name": "Stealth", "category": "combat"}, # thief
+    "agility": {"name": "Agility", "category": "combat"}, # warrior
+    "weapon_mastery": {"name": "Weapon Mastery", "category": "combat"}, # warrior
+    "mercantile": {"name": "Mercantile", "category": "benign"}, # vendor
+    "demolition": {"name": "Demolition", "category": "combat"}, # vendor
+    "smithing": {"name": "Smithing", "category": "benign"}, # vendor
+    "logging": {"name": "Logging", "category": "benign"}, # vendor
+    "mining": {"name": "Mining", "category": "benign"}, # vendor
+    "farming": {"name": "Farming", "category": "benign"}, # vendor
+    "herding": {"name": "Herding", "category": "benign"}, # vendor
+    "carpentry": {"name": "Carpentry", "category": "both"}, # vendor
+    "doctor": {"name": "Doctor", "category": "both"}, # vendor
+    "art": {"name": "Art", "category": "benign"}, # vendor
+    "herbalism": {"name": "Herbalism", "category": "benign"}, # vendor
+    "brewing": {"name": "Brewing", "category": "benign"}, # vendor
+    "tailor": {"name": "Tailor", "category": "benign"}, # vendor
+    "hospitality": {"name": "Hospitality", "category": "benign"}, # vendor
+    "finesse": {"name": "Grifting", "category": "benign"}, # thief: forging, lockpicking, breaking out, impersonation, trust building, lying, keeping stuff in jail
+    "bard": {"name": "Bard", "category": "benign"}, # thief
 }
+
+# in a village, there's a Headman - turns into a reeve if owned by a kingdom
+# you need a town hall, effectively a store house
+# you need somewhere for guards to sleep - lets call it a guard house
+# guards in a free village can be mercenaries, only need a few
+
+# reeve pays taxes for the entire village to the steward - steward 
+# town hall becomes a guarded store hosue
+# guard house becomes a proper tower, which is effectively an extra barracks - patrols come from the kingdom, stay in the barracks, then get relieved and go back to the kingdom
+
+# so you make a camp
+# you have some mercanaries - you can have them patrol the camp perimeter
+# you sleep, and then relieve them before they get too tired
+
+# you can own a shed
+# you make a house
+# same thing - and they need somewhere to sleep in your house
+
+# you have enough building skill, farming/shepherding skill in your party (no mercenaries), there are three houses, enough loyalty, enough net worth/experience 
+# you can become a village
+# your house becomes the storehouse - you become a reeve
+# guards can live out of your house, but you probably want a guard house (which you can now build)
+# you should make roads to existing roads so people visit
+# a sign wouldn't hurt
+# a bulletin board can be made - you can write to it from preset things
+
+# a reeve/headman can't naturally become a steward of a kingdom - thats reserved for in-kingdom traders with high literacy
+# if a king dies and there's no heir, a knight becomes king
+# a person can be come a noble if they are a steward, a knight, or have earned favor in some way - need to figure out how succession works
+# nobles have permanent, free housing in the castle (inner walls)
+# kingdoms have outer walls, gate guards, internal patrol, external patrol, royal guard
+# knights commanded troops of guards during war time? 
+# knights had squires
+# there's a weapon trainer who is a knight? guards could train with him? train with wooden swords?
+# guards could get knighted for valor? adventurers (mercenaries) who help citizens can get knighted? bards, artists can get knighted?
+# stewards who get kicked out are back to zero - travelling merchants - hold a grudge
+# kingdoms are expected to grow? 
+# land deeds and price for them, and taxation price, based on village occupancy - and kingdom space available
+# villages can grow infinitely and get walls, walls need to be created when the max village size is reached - at which point only farms/stables can be outside of them
+# knights could live in the castle, but dont have to - knights can do whatever they want in the entire kingdom - build anywhere, take guards, etc
+# but they have responsibilities during war time
+# knights who don't do their job get banished
+# when there's a major disturbance or there's a war effort, knights heed the call
+
+# criminal record
+# did villages have jails?
+# castle involved barrels
+
+# noble is a status - anybody could be one, but namely knights
+# stewards were automatically nobles - just being the best trader got you there
+# great artists, bards, etc could be made nobles
+# nobles + knights fight for succession
+
+# building skill increases via digging
+# should carpentry be a separate skill?
+
+# you can buy plots of land in a village, price and tax depending on the size
+# taxes should be payable in net value
+# roads will be built to your house
+
+# knights show up when summoned, create when needed
+# consider conseqwuences of poaching/shepherding/lumberjacking/mining on kingdoms' land
+# mining companies/vendor companies - how that works
+
+
 
 # =============================================================================
 # INVENTORY SETTINGS
@@ -231,47 +300,44 @@ JOB_TIERS = {
         "color": "#8B008B",
         "requires": {"mercantile": 50},  # Also requires allegiance (checked in code)
     },
-    "Historian": {"tier": 2},
-    "Weapons Trainer": {"tier": 2},
+    "Knight": {"tier": 2},
+
     
-    # TIER 3 — SKILLED TRADES WITH STATUS
-    "Trader": {
-        "tier": 3,
-        "color": "#FFD700",
-        "requires": {"mercantile": 20},
-    },
-    "Soldier": {
+    # TIER 3 - THINGS WE NEED OR THE GAME BREAKS
+    "Soldier": { # Knightable
         "tier": 3,
         "color": "#FF69B4",
         "requires": {"morality_min": 5, "confidence_min": 7, "cunning_max": 5},
     },
+    "Trader": { # Knightable based on brewing skills - may turn stuff into other stuff to sell for more based on skills - (i.e. medicine, alcohol, explosives) - but NOT FOOD
+        "tier": 3,
+        "color": "#FFD700",
+        "requires": {"mercantile": 30}, # becoming a trader may unlock by having, say 30 mercantile. so a farmer that's good at making explosives may start selling stuff with high enough mercantile
+    }, 
     "Farmer": {
         "tier": 3,
         "color": "#39db34",
         "requires": {"farming": 40},
     },
-    "Doctor": {"tier": 3},
-    "Blacksmith": {"tier": 3},
-    "Carpenter": {"tier": 3},
     "Innkeeper": {"tier": 3},
-    "Builder": {"tier": 3},
-    
+    "Weapons Trainer": {"tier": 3}, # Knightable
+
     # TIER 4 — COMFORTABLE SKILLED WORK
-    "Servant": {"tier": 4},
-    "Tailor": {"tier": 4},
-    "Medicine Vendor": {"tier": 4},
-    "Alcohol Vendor": {"tier": 4},
-    "Explosives Vendor": {"tier": 4},
-    "Artist": {"tier": 4},
+    "Doctor": {"tier": 3}, # Knightable
+    "Carpenter": {"tier": 3}, # Knightable
+    "Tailor": {"tier": 3}, # Knightable
+    "Artist": {"tier": 3}, # Knightable
+    "Blacksmith": {"tier": 3}, # Knightable
+    "Servant": {"tier": 3},
     
     # TIER 5 — RESPECTABLE BUT HARDER LABOR
     "Hunter": {"tier": 5},
     "Fisherman": {"tier": 5},
     "Shepherd": {"tier": 5},
-    "Mercenary": {"tier": 5},
     "Lumberjack": {"tier": 5},
     "Miner": {"tier": 5},
-    "Bard": {"tier": 5},
+    "Mercenary": {"tier": 5}, # Knightable
+    "Bard": {"tier": 5}, # Knightable
 }
 
 # Default tier for jobs not in JOB_TIERS (unemployed, etc.)
@@ -311,3 +377,21 @@ AREA_ROLES = {
     "farm": "Where wheat is grown, part of a village",
     "encampment": "No purpose"
 }
+
+
+# Soldier — The classic route. Valor in battle, knighted on the field.
+# Mercenary — Same deal, though looked down on. A mercenary captain who wins a crucial battle could be rewarded.
+# Weapons Trainer — Long service training a lord's household, possibly already from minor noble stock.
+
+# Plausible with royal favor:
+
+# Trader — Wealthy merchant who finances the crown's wars, loans money, provides ships. Later medieval period especially.
+# Doctor — Royal physician who saves the king's life or serves for decades.
+# Artist — Court painter or sculptor in direct service to royalty.
+# Bard — Troubadours and poets sometimes moved in noble circles. A famous one with a patron could be elevated.
+# Carpenter - makes nice furniture
+
+# every kid after should try to get knighted to - and keep the family's land entact - eventually, it'll get repocessesed if the kid isn't at least a squire
+
+# should be able to make easily: campfire, post (requires rope), wooden sword, fishing rod, torch
+# swinging a wooden sword forever would get you to be a better swordsman - up to a point. then you need real experience or a trainer

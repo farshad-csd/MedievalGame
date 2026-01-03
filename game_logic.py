@@ -882,47 +882,77 @@ class GameLogic:
                     return other
         return None
     
-    def find_nearby_defender(self, char, max_distance):
+    def find_nearby_defender(self, char, max_distance, exclude=None):
         """Find a defender within range.
-        Defenders are: Soldiers with confidence >= 5, or anyone with morality >= 7 and confidence >= 7
+        
+        Logic:
+        - Characters with allegiance first look for soldiers of same allegiance
+        - If no soldiers found (or no allegiance), look for general defenders
+        - General defenders: anyone with morality >= 7 and confidence >= 7
+        - Skip anyone the character KNOWS is a criminal (from their own memory)
+        
+        Args:
+            char: The character looking for a defender
+            max_distance: Maximum distance to search
+            exclude: Character to exclude (e.g., the attacker/threat)
         """
-        best_defender = None
-        best_dist = float('inf')
+        char_allegiance = char.get('allegiance')
+        known_crimes = char.get('known_crimes', {})
+        
+        best_soldier = None
+        best_soldier_dist = float('inf')
+        best_general = None
+        best_general_dist = float('inf')
         
         for other in self.state.characters:
             if other == char:
                 continue
+            # Skip the threat/attacker
+            if exclude and other == exclude:
+                continue
             # Skip dying characters
             if other.get('health', 100) <= 0:
+                continue
+            # Skip anyone this character knows is a criminal
+            if id(other) in known_crimes:
+                continue
+            
+            dist = self.state.get_distance(char, other)
+            if dist > max_distance:
                 continue
             
             morality = other.get_trait('morality')
             confidence = other.get_trait('confidence')
             is_soldier = other.get('job') == 'Soldier'
+            other_allegiance = other.get('allegiance')
             
-            # Soldier with confidence >= 5, or high morality + high confidence
-            is_defender = (is_soldier and confidence >= 5) or (morality >= 7 and confidence >= 7)
+            # Check if same-allegiance soldier (only if char has allegiance)
+            if char_allegiance and is_soldier and other_allegiance == char_allegiance:
+                if dist < best_soldier_dist:
+                    best_soldier_dist = dist
+                    best_soldier = other
             
-            if is_defender:
-                dist = self.state.get_distance(char, other)
-                if dist <= max_distance and dist < best_dist:
-                    best_dist = dist
-                    best_defender = other
+            # Check if general defender (high morality + high confidence)
+            if morality >= 7 and confidence >= 7:
+                if dist < best_general_dist:
+                    best_general_dist = dist
+                    best_general = other
         
-        return best_defender
+        # Characters with allegiance prefer soldiers, fall back to general defenders
+        if char_allegiance and best_soldier:
+            return best_soldier
+        
+        # No soldier found (or no allegiance) - use general defender
+        return best_general
     
     def is_defender(self, char):
         """Check if a character will defend others from crime.
-        Soldiers need confidence >= 5, others need morality >= 7 and confidence >= 7
+        General defenders have morality >= 7 and confidence >= 7.
+        Note: Soldiers are handled separately based on allegiance in find_nearby_defender.
         """
         morality = char.get_trait('morality')
         confidence = char.get_trait('confidence')
-        is_soldier = char.get('job') == 'Soldier'
-        
-        if is_soldier:
-            return confidence >= 5
-        else:
-            return morality >= 7 and confidence >= 7
+        return morality >= 7 and confidence >= 7
     
     def find_nearby_perpetrator(self, char):
         """Find someone committing a crime nearby (for backwards compatibility).
@@ -940,8 +970,8 @@ class GameLogic:
             return 5  # default fallback
     
     def get_flee_distance(self, intensity):
-        """Get how far to flee from a criminal. Returns intensity * 2."""
-        return intensity * 2
+        """Get how far to flee from a criminal. Returns intensity / 2."""
+        return intensity / 2
     
     def will_care_about_crime(self, responder, crime_allegiance, intensity=None):
         """Does this person care about this crime?
@@ -1319,6 +1349,26 @@ class GameLogic:
                 # Try to report if same allegiance
                 if char.get('allegiance') == crime_allegiance and crime_allegiance is not None:
                     self.try_report_crime(char, thief, intensity, crime_allegiance)
+    
+    def report_crime_to_defender(self, witness, criminal, intensity, defender):
+        """Directly report a crime to a specific defender.
+        
+        Used when a fleeing character reaches a defender for safety.
+        The defender will remember the crime and can respond.
+        """
+        witness_name = witness.get_display_name()
+        criminal_name = criminal.get_display_name()
+        defender_name = defender.get_display_name()
+        
+        # Defender learns about the crime
+        crime_allegiance = witness.get('allegiance')  # Crime against the witness's allegiance
+        self.remember_crime(defender, criminal, intensity, crime_allegiance)
+        
+        # Remove from witness's unreported crimes if present
+        crime_tuple = (id(criminal), intensity, crime_allegiance)
+        witness.get('unreported_crimes', set()).discard(crime_tuple)
+        
+        self.state.log_action(f"{witness_name} reported {criminal_name} to {defender_name}!")
     
     def try_report_crime(self, witness, criminal, intensity, crime_allegiance):
         """Try to report crime to an adjacent soldier. If none adjacent, save for later.

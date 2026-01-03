@@ -203,9 +203,15 @@ class SpriteManager:
             # Walk animation - continuous loop based on current time
             # Use faster animation when sprinting
             is_sprinting = char.get('is_sprinting', False)
+            is_backpedaling = char.get('is_backpedaling', False)
             frame_duration = SPRINT_FRAME_DURATION if is_sprinting else WALK_FRAME_DURATION
             elapsed = current_time % (frame_duration * FRAMES_PER_SHEET)
             frame_idx = int(elapsed / frame_duration)
+            
+            # Reverse animation for backpedaling
+            if is_backpedaling:
+                frame_idx = (FRAMES_PER_SHEET - 1) - frame_idx
+            
             return 'Walk', frame_idx
         else:
             # Idle - use first frame of walk

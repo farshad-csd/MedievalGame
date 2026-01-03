@@ -89,6 +89,8 @@ class Character:
         self.theft_target = None  # Farm cell being targeted for theft
         self.theft_waiting = False  # Waiting at farm for crops to grow
         self.flee_from = None
+        self.flee_start_tick = None  # When fleeing started (for timeout)
+        self.reported_criminal_to = set()  # Track defenders we've reported current threat to
         self.is_murderer = False
         self.is_thief = False
         self.is_aggressor = False

@@ -89,9 +89,9 @@ CHARACTER_TEMPLATES = {
     },
     "Cade Wren": {
         "attractiveness": 5,
-        "confidence": 6,
+        "confidence": 10,
         "cunning": 10,
-        "morality": 7,
+        "morality": 5,
         "starting_allegiance": None,
         "starting_job": None,
         "starting_money": 50,
