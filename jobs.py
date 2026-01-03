@@ -1,12 +1,13 @@
 # jobs.py - Job behavior classes with unified decide() pattern
 """
+SIMPLIFIED VERSION - Reusable baseline behaviors
+
 Each job defines:
 - decide() method: handles ALL character decisions each tick
 - Enrollment class methods: is_eligible, is_available, can_enlist, enlist
 
 The decide() method reads top-to-bottom as a priority list.
-Base Job class handles unemployed/default behavior.
-Subclasses override decide() and enrollment methods for job-specific logic.
+Base Job class handles core survival and needs - subclasses extend, not replace.
 """
 
 import math
@@ -14,31 +15,27 @@ import random
 from constants import (
     ITEMS, TICKS_PER_DAY, MAX_HUNGER,
     HUNGER_CHANCE_THRESHOLD, HUNGER_CRITICAL,
-    STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT,
     WHEAT_TO_BREAD_RATIO, BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
-    PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE, CRIME_INTENSITY_MURDER,
-    TAX_GRACE_PERIOD, JOB_TIERS, DEFAULT_JOB_TIER,
-    FLEE_DEFENDER_RANGE, FLEE_TIMEOUT_TICKS
+    PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE,
+    CRIME_INTENSITY_MURDER,
+    FLEE_TIMEOUT_TICKS,
+    JOB_TIERS, DEFAULT_JOB_TIER,
+    SOUND_RADIUS, VISION_RANGE
 )
 
 
 class Job:
     """
-    Base job - handles unemployed/default character behavior.
+    Base job - handles core character behavior.
     
     The decide() method is called each tick and should:
     1. Set char.goal = (x, y) if the character should move
     2. Execute any immediate actions (eating, attacking, etc.)
     3. Return True if an action was taken (consumes the tick)
     
-    Subclasses override decide() to inject job-specific priorities.
-    
-    Enrollment class methods (override in subclasses):
-    - is_eligible(char, state, logic): Can this character do this job?
-    - is_available(state, logic): Are there openings?
-    - can_enlist(char, state, logic): Can enlist right now? (eligible + available + location)
-    - enlist(char, state, logic): Actually assign the job
+    Subclasses should call super().decide() or selectively use _check_* methods
+    to build their own priority chains.
     """
     
     name = None
@@ -63,7 +60,7 @@ class Job:
     
     @classmethod
     def is_eligible(cls, char, state, logic):
-        """Check if character meets requirements for this job (traits, skills, etc.)."""
+        """Check if character meets requirements for this job."""
         return False
     
     @classmethod
@@ -73,7 +70,7 @@ class Job:
     
     @classmethod
     def can_enlist(cls, char, state, logic):
-        """Check if character can enlist right now (eligible + available + in right place)."""
+        """Check if character can enlist right now."""
         return False
     
     @classmethod
@@ -87,120 +84,175 @@ class Job:
         return None
     
     # =========================================================================
-    # DECIDE METHOD
+    # MAIN DECIDE METHOD
     # =========================================================================
     
     def decide(self, char, state, logic):
         """
-        Decide what this character should do this tick.
+        Core decision loop. Subclasses can override entirely or call this
+        as a fallback after checking job-specific priorities.
         
-        Args:
-            char: Character instance
-            state: GameState instance
-            logic: GameLogic instance
-            
-        Returns:
-            True if an action was taken, False otherwise
+        Returns True if an action was taken, False otherwise.
         """
         # ===== SURVIVAL (highest priority) =====
-        
-        # Flee if being attacked and not confident
-        if self._should_flee(char, state, logic):
+        if self._check_flee(char, state, logic):
             return self._do_flee(char, state, logic)
         
-        # Fight back if being attacked and confident
-        if self._should_fight_back(char, state, logic):
+        if self._check_watch_threat(char, state, logic):
+            return self._do_watch_threat(char, state, logic)
+        
+        if self._check_fight_back(char, state, logic):
             return self._do_fight_back(char, state, logic)
         
-        # Continue combat if we have a target
-        if self._in_combat(char, state, logic):
+        if self._check_combat(char, state, logic):
             return self._do_combat(char, state, logic)
         
-        # Flee from known criminals
-        if self._should_flee_criminal(char, state, logic):
+        if self._check_flee_criminal(char, state, logic):
             return self._do_flee_criminal(char, state, logic)
         
-        # Confront criminals if we're a defender (high morality + confidence)
-        if self._should_confront_criminal(char, state, logic):
+        if self._check_confront_criminal(char, state, logic):
             return self._do_confront_criminal(char, state, logic)
         
-        # ===== BASIC NEEDS =====
+        if self._check_watch_fleeing_person(char, state, logic):
+            return self._do_watch_fleeing_person(char, state, logic)
         
-        # Eat if hungry and have bread
-        if self._should_eat(char):
+        # ===== BASIC NEEDS =====
+        if self._check_eat(char, state, logic):
             return self._do_eat(char, state, logic)
         
-        # Cook if hungry, have wheat, need bread
-        if self._should_cook(char, state, logic):
+        if self._check_cook(char, state, logic):
             return self._do_cook(char, state, logic)
         
-        # Sleep if it's night
-        if self._should_sleep(char, state, logic):
+        if self._check_sleep(char, state, logic):
             return self._do_sleep(char, state, logic)
         
-        # ===== UNEMPLOYED BEHAVIOR =====
-        
-        # Seek employment
-        if self._should_seek_job(char, state, logic):
-            return self._do_seek_job(char, state, logic)
-        
-        # Forage/steal if hungry and no food
-        if self._should_forage(char, state, logic):
+        # ===== FORAGE/THEFT (when desperate) =====
+        if self._check_forage(char, state, logic):
             return self._do_forage(char, state, logic)
         
-        # Wander
+        # ===== DEFAULT =====
         return self._do_wander(char, state, logic)
     
     # =========================================================================
-    # CONDITION CHECKS (can be overridden by subclasses)
+    # CONDITION CHECKS - Override these to customize when behaviors trigger
     # =========================================================================
     
-    def _should_flee(self, char, state, logic):
-        """Should this character flee from an attacker?"""
-        attacker = logic.get_attacker(char)
-        if not attacker:
-            return False
-        confidence = char.get_trait('confidence')
-        return confidence < 7  # Low confidence = flee
-    
-    def _should_fight_back(self, char, state, logic):
-        """Should this character fight back against attacker?"""
-        attacker = logic.get_attacker(char)
-        if not attacker:
-            return False
-        confidence = char.get_trait('confidence')
-        return confidence >= 7  # High confidence = fight
-    
-    def _in_combat(self, char, state, logic):
-        """Is this character actively in combat?"""
-        target = char.get('robbery_target')
-        return target and target in state.characters
-    
-    def _should_flee_criminal(self, char, state, logic):
-        """Should flee from a known criminal nearby?"""
-        # Check if already fleeing
-        flee_target = char.get('flee_from')
-        if flee_target and flee_target in state.characters:
-            # Check timeout - stop fleeing after FLEE_TIMEOUT_TICKS
-            flee_start = char.get('flee_start_tick')
-            if flee_start:
-                elapsed = state.ticks - flee_start
-                if elapsed > FLEE_TIMEOUT_TICKS:
-                    return False
-            return True
+    def _check_flee(self, char, state, logic):
+        """Should flee from an attacker?"""
+        # Already have flee intent - continue if target is valid
+        if char.intent and char.intent.get('action') == 'flee':
+            target = char.intent.get('target')
+            if target and target in state.characters and target.health > 0:
+                # For fleeing violence (not being attacked ourselves), 
+                # stop if we can't perceive it anymore
+                if char.intent.get('reason') == 'fleeing_violence':
+                    can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                    if not can_perceive:
+                        char.clear_intent()
+                        return False
+                return True
         
-        # Check for criminals we know about
-        criminal, intensity = logic.find_known_criminal_nearby(char)
-        if criminal and char.get_trait('confidence') < 7:
-            return True
+        # Check if someone is actively attacking us (recent attack + nearby)
+        attacker = char.get_active_attacker(state.ticks, state.characters)
+        if not attacker:
+            return False
+        return char.get_trait('confidence') < 7
+    
+    def _check_watch_threat(self, char, state, logic):
+        """Should watch a threat from safe distance?"""
+        if char.intent and char.intent.get('action') == 'watch':
+            # Only handle watching threats or violence, not watching someone in distress
+            reason = char.intent.get('reason')
+            if reason not in ('monitoring_threat', 'observing_violence'):
+                return False
+            target = char.intent.get('target')
+            if target and target in state.characters and target.health > 0:
+                return True
         return False
     
-    def _should_eat(self, char):
-        """Should this character eat?"""
+    def _check_fight_back(self, char, state, logic):
+        """Should fight back against attacker?"""
+        attacker = char.get_active_attacker(state.ticks, state.characters)
+        if not attacker:
+            return False
+        return char.get_trait('confidence') >= 7
+    
+    def _check_combat(self, char, state, logic):
+        """Is actively in combat with a target?"""
+        if char.intent is None:
+            return False
+        if char.intent.get('action') != 'attack':
+            return False
+        target = char.intent.get('target')
+        return target and target in state.characters and target.health > 0
+    
+    def _check_flee_criminal(self, char, state, logic):
+        """Should flee from a known criminal?"""
+        # Already have flee intent - continue if target is valid
+        if char.intent and char.intent.get('action') == 'flee':
+            target = char.intent.get('target')
+            if target and target in state.characters and target.health > 0:
+                return True
+        
+        # New criminal nearby?
+        criminal, intensity = logic.find_known_criminal_nearby(char)
+        return criminal is not None and char.get_trait('confidence') < 7
+    
+    def _check_confront_criminal(self, char, state, logic):
+        """Should confront a known criminal? (High morality + confidence)"""
+        if char.get_trait('morality') < 7 or char.get_trait('confidence') < 7:
+            return False
+        # Don't switch targets if already attacking someone
+        if char.intent and char.intent.get('action') == 'attack':
+            return False
+        criminal, intensity = logic.find_known_criminal_nearby(char)
+        return criminal is not None
+    
+    def _check_watch_fleeing_person(self, char, state, logic):
+        """Should watch someone who is fleeing? (Potential defenders only)"""
+        # Only potential defenders do this
+        if char.get_trait('morality') < 7 or char.get_trait('confidence') < 7:
+            return False
+        # Don't switch if already attacking or confronting
+        if char.intent and char.intent.get('action') == 'attack':
+            return False
+        # Already watching someone fleeing - continue if valid
+        if char.intent and char.intent.get('action') == 'watch':
+            if char.intent.get('reason') == 'monitoring_distress':
+                target = char.intent.get('target')
+                if target and target in state.characters:
+                    # Still fleeing and we can perceive them?
+                    if target.intent and target.intent.get('action') == 'flee':
+                        can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                        if can_perceive:
+                            return True
+                # Target no longer fleeing or out of range - clear and check for new
+                char.clear_intent()
+        # Look for someone fleeing within perception range
+        fleeing_person = self._find_fleeing_person_nearby(char, state, logic)
+        return fleeing_person is not None
+    
+    def _find_fleeing_person_nearby(self, char, state, logic):
+        """Find someone fleeing within perception range."""
+        for other in state.characters:
+            if other == char:
+                continue
+            if other.get('health', 100) <= 0:
+                continue
+            # Check if they're fleeing
+            if other.intent and other.intent.get('action') == 'flee':
+                # Can we perceive them?
+                can_perceive, _ = logic.can_perceive_event(char, other.x, other.y)
+                if can_perceive:
+                    return other
+        return None
+    
+    def _check_eat(self, char, state, logic):
+        """Should eat?"""
         return char.hunger <= HUNGER_CHANCE_THRESHOLD and char.get_item('bread') >= BREAD_PER_BITE
     
-    def _should_cook(self, char, state, logic):
-        """Should this character cook bread?"""
+    def _check_cook(self, char, state, logic):
+        """Should cook bread?"""
         if char.hunger > HUNGER_CHANCE_THRESHOLD:
             return False
         if char.get_item('bread') >= BREAD_PER_BITE:
@@ -209,139 +261,273 @@ class Job:
             return False
         return logic.can_bake_bread(char)
     
-    def _should_sleep(self, char, state, logic):
-        """Should this character go to sleep?"""
+    def _check_sleep(self, char, state, logic):
+        """Should sleep?"""
         return state.is_sleep_time()
     
-    def _should_seek_job(self, char, state, logic):
-        """Should this character look for a job?"""
-        from jobs import get_best_available_job as get_best_job
-        return get_best_job(char, state, logic) is not None
-    
-    def _should_forage(self, char, state, logic):
-        """Should this character forage/steal for food?"""
+    def _check_forage(self, char, state, logic):
+        """Should forage/steal for food?"""
+        # Don't forage if we have bread
         if char.get_item('bread') >= BREAD_PER_BITE:
             return False
+        # Don't forage if not hungry enough
         if char.hunger > HUNGER_CRITICAL:
             return False
         return True
     
-    def _should_confront_criminal(self, char, state, logic):
-        """Should this character confront a known criminal?
-        
-        Only for 'general defenders' - high morality (>=7) AND high confidence (>=7).
-        Soldiers handle this differently in SoldierJob.
-        """
-        # Must be a general defender (high morality + confidence)
-        morality = char.get_trait('morality')
-        confidence = char.get_trait('confidence')
-        if morality < 7 or confidence < 7:
-            return False
-        
-        # Skip if already in combat
-        if char.get('robbery_target'):
-            return False
-        
-        # Look for a known criminal to confront
-        criminal, intensity = logic.find_known_criminal_nearby(char)
-        return criminal is not None
-    
-    def _do_confront_criminal(self, char, state, logic):
-        """Confront a known criminal."""
-        criminal, intensity = logic.find_known_criminal_nearby(char)
-        if not criminal:
-            return False
-        
-        char_name = char.get_display_name()
-        criminal_name = criminal.get_display_name()
-        
-        # If adjacent, start fighting
-        if logic.is_adjacent(char, criminal):
-            if char.get('robbery_target') != criminal:
-                state.log_action(f"{char_name} confronting {criminal_name}!")
-                char.robbery_target = criminal
-            
-            # Attack if we can
-            if logic.can_attack(char):
-                logic._do_attack(char, criminal)
-                return True
-        
-        # Move toward criminal
-        char.goal = (criminal.x, criminal.y)
-        return False
-    
     # =========================================================================
-    # ACTIONS
+    # ACTIONS - The actual behavior implementations
     # =========================================================================
     
     def _do_flee(self, char, state, logic):
-        """Flee from attacker (being actively attacked).
+        """Flee from attacker.
         
-        CONCURRENT priorities:
-        1. ALWAYS flee away from attacker (non-negotiable)
-        2. If a defender is in the flee direction, bias toward them
+        Behavior:
+        1. If attacker is dangerously close (< VISION_RANGE/2), flee! (self-preservation)
+        2. If at safe distance and defender nearby, stay near defender (hope they witness attack)
+        3. If at safe distance with no defender, stop and watch attacker
+        4. Can report crimes to same-allegiance soldiers via sound
         """
-        attacker = logic.get_attacker(char)
+        # Get attacker from intent first, fall back to get_active_attacker
+        attacker = None
+        if char.intent and char.intent.get('action') in ('flee', 'watch'):
+            attacker = char.intent.get('target')
+            if attacker and (attacker not in state.characters or attacker.health <= 0):
+                attacker = None
+        
         if not attacker:
+            attacker = char.get_active_attacker(state.ticks, state.characters)
+        
+        if not attacker:
+            char.clear_intent()
             return False
         
-        # Calculate flee direction (away from attacker)
-        dx_from_attacker = char.x - attacker.x
-        dy_from_attacker = char.y - attacker.y
+        # Get current flee reason
+        flee_reason = char.intent.get('reason') if char.intent else None
         
-        # Look for a defender in the flee direction
-        defender = logic.find_nearby_defender(char, FLEE_DEFENDER_RANGE, exclude=attacker)
+        # Bystanders fleeing violence - flee to safe distance, then watch
+        if flee_reason == 'fleeing_violence':
+            can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+            if not can_perceive:
+                # Out of perception - stop caring, return to normal
+                char.clear_intent()
+                return False
+            
+            # Check distance
+            dx = attacker.x - char.x
+            dy = attacker.y - char.y
+            dist = math.sqrt(dx*dx + dy*dy)
+            
+            if dist >= VISION_RANGE:
+                # Safe distance - switch to watching
+                char.goal = None
+                self._face_target(char, attacker)
+                char.set_intent('watch', attacker, reason='observing_violence', started_tick=state.ticks)
+                return False
+            
+            # Still too close - keep fleeing
+            char.goal = logic._get_flee_goal(char, attacker)
+            return False
+        
+        # Below here is victim flee logic (being_attacked, witnessed_crime, etc.)
+        
+        # Set flee intent if not already set
+        if char.intent is None or char.intent.get('action') not in ('flee', 'watch'):
+            char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
+        
+        # Calculate distance and direction to attacker
+        dx_to_attacker = attacker.x - char.x
+        dy_to_attacker = attacker.y - char.y
+        dist_to_attacker = math.sqrt(dx_to_attacker**2 + dy_to_attacker**2)
+        
+        # Normalize direction to attacker
+        if dist_to_attacker > 0.01:
+            dir_to_attacker_x = dx_to_attacker / dist_to_attacker
+            dir_to_attacker_y = dy_to_attacker / dist_to_attacker
+        else:
+            dir_to_attacker_x, dir_to_attacker_y = 0, 0
+        
+        # PRIORITY 1: Self-preservation - if attacker is too close, FLEE!
+        if dist_to_attacker < VISION_RANGE / 2:
+            char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
+            char.goal = logic._get_flee_goal(char, attacker)
+            return False
+        
+        # Look for any defender in range
+        defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=attacker)
         
         if defender:
-            # Check if defender is in the "away from attacker" direction using dot product
             dx_to_defender = defender.x - char.x
             dy_to_defender = defender.y - char.y
+            dist_to_defender = math.sqrt(dx_to_defender**2 + dy_to_defender**2)
             
-            # Dot product: positive means defender is in flee direction
-            dot = dx_to_defender * dx_from_attacker + dy_to_defender * dy_from_attacker
+            # Check if going to defender would move us toward attacker
+            dot = dx_to_defender * dir_to_attacker_x + dy_to_defender * dir_to_attacker_y
             
-            if dot > 0:
-                # Defender is in flee direction - go toward them while fleeing
+            if dist_to_defender > 0.01:
+                cos_angle = dot / dist_to_defender
+                defender_is_safe_direction = (cos_angle < 0.5)  # Safe if > 60° from attacker
+            else:
+                defender_is_safe_direction = True
+            
+            # Can we report via sound? (sound circles overlap)
+            can_report_via_sound = dist_to_defender <= (SOUND_RADIUS * 2)
+            
+            if can_report_via_sound:
+                # Report the crime if defender doesn't already know (only works for same-allegiance soldiers)
+                self._try_report_attack_to_defender(char, attacker, defender, state, logic)
+            
+            # PRIORITY 2: If defender is in a safe direction, go to them
+            if defender_is_safe_direction:
                 char.goal = (defender.x, defender.y)
                 return False
         
-        # No defender in flee direction - just flee directly away
+        # PRIORITY 3: No safe defender - if at safe distance, stop and watch
+        if dist_to_attacker >= VISION_RANGE:
+            char.goal = None
+            self._face_target(char, attacker)
+            char.set_intent('watch', attacker, reason='monitoring_threat', started_tick=state.ticks)
+            return False
+        
+        # Between safe and danger distance - keep moving away
         char.goal = logic._get_flee_goal(char, attacker)
-        return False  # Movement, not action
+        return False
+    
+    def _do_watch_threat(self, char, state, logic):
+        """Watch a threat from safe distance.
+        
+        Behavior:
+        - Stand still and face the threat
+        - If threat approaches (< VISION_RANGE/2), switch back to flee
+        - If defender comes in range, try to report and maybe go to them
+        - For observing_violence, stop if violence moves out of perception
+        """
+        threat = char.intent.get('target') if char.intent else None
+        if not threat or threat not in state.characters or threat.health <= 0:
+            char.clear_intent()
+            return False
+        
+        reason = char.intent.get('reason') if char.intent else None
+        
+        # For observing violence (not a victim), stop watching if out of perception
+        if reason == 'observing_violence':
+            can_perceive, _ = logic.can_perceive_event(char, threat.x, threat.y)
+            if not can_perceive:
+                char.clear_intent()
+                return False
+        
+        # Calculate distance to threat
+        dx = threat.x - char.x
+        dy = threat.y - char.y
+        dist_to_threat = math.sqrt(dx * dx + dy * dy)
+        
+        # If threat got too close, switch to flee
+        if dist_to_threat < VISION_RANGE / 2:
+            char.set_intent('flee', threat, reason='threat_approaching', started_tick=state.ticks)
+            char.goal = logic._get_flee_goal(char, threat)
+            state.log_action(f"{char.get_display_name()} fleeing - {threat.get_display_name()} too close!")
+            return False
+        
+        # Stand still and face threat
+        char.goal = None
+        self._face_target(char, threat)
+        
+        # Only victims (monitoring_threat) look for defenders and try to report
+        # Bystanders (observing_violence) just watch
+        if reason == 'monitoring_threat':
+            dir_to_threat_x = dx / dist_to_threat if dist_to_threat > 0.01 else 0
+            dir_to_threat_y = dy / dist_to_threat if dist_to_threat > 0.01 else 0
+            
+            defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=threat)
+            if defender:
+                dx_to_defender = defender.x - char.x
+                dy_to_defender = defender.y - char.y
+                dist_to_defender = math.sqrt(dx_to_defender**2 + dy_to_defender**2)
+                
+                # Can we report via sound?
+                if dist_to_defender <= (SOUND_RADIUS * 2):
+                    self._try_report_attack_to_defender(char, threat, defender, state, logic)
+                
+                # Check if defender is in safe direction (> 60° from threat)
+                dot = dx_to_defender * dir_to_threat_x + dy_to_defender * dir_to_threat_y
+                if dist_to_defender > 0.01:
+                    cos_angle = dot / dist_to_defender
+                    if cos_angle < 0.5:  # Safe direction
+                        char.goal = (defender.x, defender.y)
+        
+        return False
+    
+    def _try_report_attack_to_defender(self, char, attacker, defender, state, logic):
+        """Try to report an attack to a defender via sound.
+        
+        Can only verbally report to same-allegiance soldiers.
+        Non-soldiers can still be sought as defenders (so they can witness the crime).
+        """
+        # Can only verbally report to same-allegiance soldiers
+        char_allegiance = char.get('allegiance')
+        is_same_allegiance_soldier = (defender.get('job') == 'Soldier' and 
+                                       defender.get('allegiance') == char_allegiance and
+                                       char_allegiance is not None)
+        
+        if not is_same_allegiance_soldier:
+            return  # Can't report, but will still flee toward them so they can see
+        
+        # Check if defender already knows about this attacker
+        if defender.has_memory_of('crime', attacker):
+            return  # Already knows
+        
+        # Get attack memories about this attacker
+        attack_memories = char.get_memories(memory_type='attacked_by', subject=attacker)
+        
+        if attack_memories:
+            # Report the attack
+            memory = attack_memories[-1]  # Most recent attack
+            defender.add_memory('crime', attacker, state.ticks,
+                               location=memory['location'],
+                               intensity=memory['intensity'],
+                               source='told_by',
+                               reported=False,
+                               crime_type='assault',
+                               victim=char,
+                               victim_allegiance=char.get('allegiance'),
+                               informant=char)
+            
+            logic.evaluate_crime_reaction(defender, attacker, memory['intensity'], char.get('allegiance'))
+            state.log_action(f"{char.get_display_name()} told {defender.get_display_name()} about {attacker.get_display_name()}'s attack!")
     
     def _do_fight_back(self, char, state, logic):
         """Fight back against attacker."""
-        attacker = logic.get_attacker(char)
+        attacker = char.get_active_attacker(state.ticks, state.characters)
         if not attacker:
             return False
         
-        # Set attacker as our target
-        if char.get('robbery_target') != attacker:
-            name = char.get_display_name()
-            state.log_action(f"{name} FIGHTING BACK against {attacker.get_display_name()}!")
-            char.robbery_target = attacker
+        # Set attack intent if not already targeting this attacker
+        if char.intent is None or char.intent.get('target') is not attacker:
+            state.log_action(f"{char.get_display_name()} FIGHTING BACK against {attacker.get_display_name()}!")
+            char.set_intent('attack', attacker, reason='self_defense', started_tick=state.ticks)
         
-        # Attack if adjacent and can attack
         if logic.is_adjacent(char, attacker) and logic.can_attack(char):
             logic._do_attack(char, attacker)
             return True
         
-        # Move toward attacker
         char.goal = (attacker.x, attacker.y)
         return False
     
     def _do_combat(self, char, state, logic):
         """Continue combat with target."""
-        target = char.get('robbery_target')
-        if not target or target not in state.characters:
-            char.robbery_target = None
+        if char.intent is None or char.intent.get('action') != 'attack':
+            return False
+        
+        target = char.intent.get('target')
+        if not target or target not in state.characters or target.health <= 0:
+            char.clear_intent()
             return False
         
         if logic.is_adjacent(char, target):
             if logic.can_attack(char):
                 logic._do_attack(char, target)
                 return True
-            char.goal = None  # Stay still, waiting for cooldown
+            char.goal = None
         else:
             char.goal = (target.x, target.y)
         return False
@@ -349,125 +535,176 @@ class Job:
     def _do_flee_criminal(self, char, state, logic):
         """Flee from a known criminal.
         
-        ALWAYS flee away from threat. If a defender is in a compatible direction,
-        bias toward them but never compromise on distance from threat.
+        Behavior (same as _do_flee):
+        1. Run AWAY from criminal (not toward defender)
+        2. Stop at safe distance and face criminal (watch them)
+        3. If criminal approaches again, resume fleeing
+        4. If defender comes in range and is in safe direction, go to them
+        5. Report crime via sound radius (not adjacency)
+        6. Can report to multiple defenders
+        7. Prioritize fleeing over going to defender if defender is in dangerous direction
         """
-        flee_target = char.get('flee_from')
+        # Get flee target from intent or find new one
+        flee_target = None
+        if char.intent and char.intent.get('action') == 'flee':
+            flee_target = char.intent.get('target')
         
-        # Find new criminal to flee from if we don't have one
-        if not flee_target or flee_target not in state.characters:
+        # Find new criminal if needed
+        if not flee_target or flee_target not in state.characters or flee_target.health <= 0:
             criminal, intensity = logic.find_known_criminal_nearby(char)
             if criminal:
-                char_name = char.get_display_name()
-                criminal_name = criminal.get_display_name()
-                state.log_action(f"{char_name} fleeing from {criminal_name}!")
-                char.flee_from = criminal
-                char.flee_start_tick = state.ticks
-                char.reported_criminal_to = set()
+                state.log_action(f"{char.get_display_name()} fleeing from {criminal.get_display_name()}!")
+                char.set_intent('flee', criminal, reason='known_criminal', started_tick=state.ticks)
                 flee_target = criminal
             else:
-                char.flee_from = None
-                char.flee_start_tick = None
+                char.clear_intent()
                 return False
         
-        # Get crime intensity for flee distance calculation
-        worst_crime = logic.get_worst_known_crime(char, flee_target)
-        if worst_crime:
-            intensity = worst_crime['intensity']
+        # Calculate distance and direction to criminal
+        dx_to_criminal = flee_target.x - char.x
+        dy_to_criminal = flee_target.y - char.y
+        dist_to_criminal = math.sqrt(dx_to_criminal**2 + dy_to_criminal**2)
+        
+        # Normalize direction to criminal
+        if dist_to_criminal > 0.01:
+            dir_to_criminal_x = dx_to_criminal / dist_to_criminal
+            dir_to_criminal_y = dy_to_criminal / dist_to_criminal
         else:
-            intensity = CRIME_INTENSITY_MURDER
+            dir_to_criminal_x, dir_to_criminal_y = 0, 0
         
-        flee_distance = logic.get_flee_distance(intensity)
-        dist_to_threat = state.get_distance(char, flee_target)
+        # Look for any defender in range
+        defender = logic.find_nearby_defender(char, VISION_RANGE, exclude=flee_target)
         
-        # Check timeout
-        flee_start = char.get('flee_start_tick')
-        if flee_start and state.ticks - flee_start > FLEE_TIMEOUT_TICKS:
-            char_name = char.get_display_name()
-            state.log_action(f"{char_name} stopped fleeing (timeout)")
-            char.flee_from = None
-            char.flee_start_tick = None
-            char.goal = None
-            self._face_target(char, flee_target)
-            return False
-        
-        # OPPORTUNISTIC: Report to any adjacent defender we haven't reported to yet
-        reported_to = char.get('reported_criminal_to', set())
-        for other in state.characters:
-            if other == char or other == flee_target:
-                continue
-            if id(other) in reported_to:
-                continue
-            if state.get_distance(char, other) <= 1.5:
-                # Check if they're a defender
-                if logic.is_defender(other) or (other.get('job') == 'Soldier' and other.get('allegiance') == char.get('allegiance')):
-                    logic.report_crime_to_defender(char, flee_target, intensity, other)
-                    reported_to.add(id(other))
-                    char.reported_criminal_to = reported_to
-        
-        # At safe distance? Stop fleeing, face threat
-        if dist_to_threat >= flee_distance:
-            char.flee_from = None
-            char.flee_start_tick = None
-            char.goal = None
-            self._face_target(char, flee_target)
-            return False
-        
-        # Calculate base flee direction (directly away from threat)
-        flee_dx = char.x - flee_target.x
-        flee_dy = char.y - flee_target.y
-        flee_mag = (flee_dx ** 2 + flee_dy ** 2) ** 0.5
-        
-        if flee_mag > 0.01:
-            flee_dx /= flee_mag
-            flee_dy /= flee_mag
-        else:
-            # On top of threat - pick random direction
-            import random, math
-            angle = random.random() * 2 * math.pi
-            flee_dx = math.cos(angle)
-            flee_dy = math.sin(angle)
-        
-        # Check if there's a defender we can bias toward
-        defender = logic.find_nearby_defender(char, FLEE_DEFENDER_RANGE, exclude=flee_target)
-        
-        if defender and id(defender) not in reported_to:
-            def_dx = defender.x - char.x
-            def_dy = defender.y - char.y
-            def_mag = (def_dx ** 2 + def_dy ** 2) ** 0.5
+        if defender:
+            dx_to_defender = defender.x - char.x
+            dy_to_defender = defender.y - char.y
+            dist_to_defender = math.sqrt(dx_to_defender**2 + dy_to_defender**2)
             
-            if def_mag > 0.01:
-                def_dx /= def_mag
-                def_dy /= def_mag
-                
-                # Dot product: how aligned is defender with flee direction?
-                dot = flee_dx * def_dx + flee_dy * def_dy
-                
-                # Only bias toward defender if they're in a forward-ish direction (dot > 0.3)
-                # This means within about 72 degrees of the flee direction
-                if dot > 0.3:
-                    # Blend flee direction with defender direction
-                    # Weight heavily toward flee (0.7 flee, 0.3 defender)
-                    blend_dx = flee_dx * 0.7 + def_dx * 0.3
-                    blend_dy = flee_dy * 0.7 + def_dy * 0.3
-                    # Normalize
-                    blend_mag = (blend_dx ** 2 + blend_dy ** 2) ** 0.5
-                    if blend_mag > 0.01:
-                        flee_dx = blend_dx / blend_mag
-                        flee_dy = blend_dy / blend_mag
+            # Check if going to defender would move us toward criminal
+            # dot > 0 means defender is somewhat in criminal's direction
+            # We use a threshold: only dangerous if defender is within ~60° of criminal direction
+            dot = dx_to_defender * dir_to_criminal_x + dy_to_defender * dir_to_criminal_y
+            
+            # Normalize to get cos(angle): cos < 0.5 means angle > 60°, which is safe
+            if dist_to_defender > 0.01:
+                cos_angle = dot / dist_to_defender
+                defender_is_safe_direction = (cos_angle < 0.5)  # Safe if > 60° from criminal
+            else:
+                defender_is_safe_direction = True
+            
+            # Can we report via sound? (sound circles overlap)
+            can_report_via_sound = dist_to_defender <= (SOUND_RADIUS * 2)
+            
+            if can_report_via_sound:
+                # Report crimes if defender doesn't already know
+                self._try_report_crimes_to_defender(char, flee_target, defender, state, logic)
+            
+            # Go to defender only if they're in a safe direction
+            if defender_is_safe_direction:
+                char.goal = (defender.x, defender.y)
+                return False
         
-        # Set goal: flee in the calculated direction
-        char.goal = (char.x + flee_dx * 5.0, char.y + flee_dy * 5.0)
+        # No safe defender - decide whether to flee or watch based on distance
+        if dist_to_criminal >= VISION_RANGE:
+            # Safe distance - stop and watch the criminal
+            char.goal = None
+            self._face_target(char, flee_target)
+            # Clear flee intent since we're just watching now
+            char.set_intent('watch', flee_target, reason='monitoring_threat', started_tick=state.ticks)
+            return False
+        
+        if dist_to_criminal < VISION_RANGE / 2:
+            # Too close - flee!
+            char.goal = logic._get_flee_goal(char, flee_target)
+            return False
+        
+        # Between safe and danger - keep moving away
+        char.goal = logic._get_flee_goal(char, flee_target)
         return False
     
-    def _face_target(self, char, target):
-        """Make character face toward a target."""
-        dx = target.x - char.x
-        dy = target.y - char.y
-        if abs(dx) > abs(dy):
-            char.facing = 'right' if dx > 0 else 'left'
-        else:
-            char.facing = 'down' if dy > 0 else 'up'
+    def _try_report_crimes_to_defender(self, char, criminal, defender, state, logic):
+        """Try to report crimes to a defender via sound.
+        
+        Can only verbally report to same-allegiance soldiers.
+        Non-soldiers can still be sought as defenders (so they can witness the crime).
+        """
+        # Can only verbally report to same-allegiance soldiers
+        char_allegiance = char.get('allegiance')
+        is_same_allegiance_soldier = (defender.get('job') == 'Soldier' and 
+                                       defender.get('allegiance') == char_allegiance and
+                                       char_allegiance is not None)
+        
+        if not is_same_allegiance_soldier:
+            return  # Can't report, but will still flee toward them so they can see
+        
+        # Check if defender already knows about this criminal
+        if defender.has_memory_of('crime', criminal):
+            return  # Already knows
+        
+        # Get unreported crimes about this criminal
+        crimes = char.get_unreported_crimes_about(criminal)
+        
+        if crimes:
+            # Report the most recent crime
+            memory = crimes[-1]
+            logic.report_crime_to(char, defender, memory)
+            state.log_action(f"{char.get_display_name()} told {defender.get_display_name()} about {criminal.get_display_name()}'s crime!")
+    
+    def _do_confront_criminal(self, char, state, logic):
+        """Confront a known criminal."""
+        criminal, intensity = logic.find_known_criminal_nearby(char)
+        if not criminal:
+            return False
+        
+        if logic.is_adjacent(char, criminal):
+            # Set attack intent if not already
+            if char.intent is None or char.intent.get('target') is not criminal:
+                state.log_action(f"{char.get_display_name()} confronting {criminal.get_display_name()}!")
+                char.set_intent('attack', criminal, reason='confronting_criminal', started_tick=state.ticks)
+            
+            if logic.can_attack(char):
+                logic._do_attack(char, criminal)
+                return True
+        
+        char.goal = (criminal.x, criminal.y)
+        return False
+    
+    def _do_watch_fleeing_person(self, char, state, logic):
+        """Watch someone who is fleeing - stay in place and observe."""
+        # Get current target or find new one
+        fleeing_person = None
+        if char.intent and char.intent.get('action') == 'watch':
+            if char.intent.get('reason') == 'monitoring_distress':
+                fleeing_person = char.intent.get('target')
+        
+        if not fleeing_person or fleeing_person not in state.characters:
+            fleeing_person = self._find_fleeing_person_nearby(char, state, logic)
+        
+        if not fleeing_person:
+            char.clear_intent()
+            return False
+        
+        # Check if they're still fleeing
+        if not fleeing_person.intent or fleeing_person.intent.get('action') != 'flee':
+            char.clear_intent()
+            return False
+        
+        # Can we still perceive them?
+        can_perceive, _ = logic.can_perceive_event(char, fleeing_person.x, fleeing_person.y)
+        if not can_perceive:
+            char.clear_intent()
+            return False
+        
+        # Set watch intent if not already
+        if char.intent is None or char.intent.get('target') is not fleeing_person:
+            char.set_intent('watch', fleeing_person, reason='monitoring_distress', started_tick=state.ticks)
+            state.log_action(f"{char.get_display_name()} noticed {fleeing_person.get_display_name()} fleeing!")
+        
+        # Stay in place and face the fleeing person
+        char.goal = None
+        self._face_target(char, fleeing_person)
+        
+        return False
     
     def _do_eat(self, char, state, logic):
         """Eat bread."""
@@ -484,11 +721,11 @@ class Job:
     def _do_cook(self, char, state, logic):
         """Cook bread at current location."""
         if logic.can_bake_bread(char):
-            amount_to_bake = min(char.get_item('wheat') // WHEAT_TO_BREAD_RATIO, BREAD_BUFFER_TARGET)
-            logic.bake_bread(char, amount_to_bake)
+            amount = min(char.get_item('wheat') // WHEAT_TO_BREAD_RATIO, BREAD_BUFFER_TARGET)
+            logic.bake_bread(char, amount)
             return True
         
-        # Need to go to cooking spot
+        # Go to cooking spot
         cooking_spot, cooking_pos = logic.get_nearest_cooking_spot(char)
         if cooking_pos:
             char.goal = cooking_pos
@@ -506,22 +743,16 @@ class Job:
             dist = math.sqrt((char.x - sleep_center[0])**2 + (char.y - sleep_center[1])**2)
             
             if dist < 0.15:
-                # At sleep position
                 if not char.get('is_sleeping'):
                     char.is_sleeping = True
-                    name = char.get_display_name()
-                    bed = state.get_character_bed(char)
-                    if bed:
-                        state.log_action(f"{name} went to sleep in bed")
-                    else:
-                        state.log_action(f"{name} went to sleep at camp")
+                    state.log_action(f"{char.get_display_name()} went to sleep")
                 char.goal = None
                 return True
             else:
                 char.goal = sleep_center
                 return False
         else:
-            # No bed - find camp spot
+            # No bed - make camp
             if logic.can_make_camp_at(char.x, char.y):
                 logic.make_camp(char)
                 char.is_sleeping = True
@@ -530,32 +761,17 @@ class Job:
                 char.goal = logic._find_camp_spot(char)
                 return False
     
-    def _do_seek_job(self, char, state, logic):
-        """Try to get a job using job class enrollment methods."""
-        # Import here to avoid circular import at module level
-        # (These are defined later in the file)
-        from jobs import get_best_available_job as get_best_job, JOB_CLASSES
-        
-        best_job = get_best_job(char, state, logic)
-        if not best_job:
-            return False
-        
-        job_cls = JOB_CLASSES.get(best_job)
-        if not job_cls:
-            return False
-        
-        # Try to enlist
-        if job_cls.can_enlist(char, state, logic):
-            return job_cls.enlist(char, state, logic)
-        
-        # Need to go somewhere to enlist
-        goal = job_cls.get_enlistment_goal(char, state, logic)
-        if goal:
-            char.goal = goal
+    def _do_wander(self, char, state, logic):
+        """Wander aimlessly."""
+        home = char.get('home')
+        if home:
+            char.goal = logic._get_wander_goal(char, home)
+        else:
+            char.goal = logic._get_homeless_idle_goal(char)
         return False
     
     def _do_forage(self, char, state, logic):
-        """Forage or steal food."""
+        """Forage or steal food from farms."""
         # Check for theft in progress
         theft_target = char.get('theft_target')
         if theft_target:
@@ -566,366 +782,52 @@ class Job:
             else:
                 char.theft_target = None
         
-        # Waiting at farm
+        # Waiting at farm for crops to grow
         if char.get('theft_waiting'):
             farm_pos = logic.get_farm_waiting_position(char)
             if farm_pos:
                 char.goal = farm_pos
             return logic.continue_theft(char)
         
-        # Critical hunger - start stealing
+        # Critical hunger - start looking for food to steal
         if char.hunger <= HUNGER_CRITICAL:
-            wheat_goal = logic._get_wheat_goal(char)
-            if wheat_goal:
-                char.goal = wheat_goal
-            return logic.continue_theft(char) if char.get('theft_target') else False
+            # Find nearest ready farm cell
+            ready_cell = logic.find_nearby_ready_farm_cell(char)
+            if ready_cell:
+                char.theft_target = ready_cell
+                char.goal = (ready_cell[0] + 0.5, ready_cell[1] + 0.5)
+                return logic.continue_theft(char)
+            else:
+                # No ready crops - wait near farm
+                char.theft_waiting = True
+                farm_pos = logic.get_farm_waiting_position(char)
+                if farm_pos:
+                    char.goal = farm_pos
+                return False
         
         return False
     
-    def _do_wander(self, char, state, logic):
-        """Wander aimlessly."""
-        # Get character's home area for wandering
-        home = char.get('home')
-        if home:
-            char.goal = logic._get_wander_goal(char, home)
+    # =========================================================================
+    # UTILITY METHODS
+    # =========================================================================
+    
+    def _face_target(self, char, target):
+        """Make character face toward a target."""
+        dx = target.x - char.x
+        dy = target.y - char.y
+        if abs(dx) > abs(dy):
+            char.facing = 'right' if dx > 0 else 'left'
         else:
-            # Homeless - use homeless wandering
-            char.goal = logic._get_homeless_idle_goal(char)
-        return False
-
-
-class FarmerJob(Job):
-    """Farmer: tends crops, pays taxes, sells at market."""
-    
-    name = "Farmer"
-    
-    # =========================================================================
-    # ENROLLMENT
-    # =========================================================================
-    
-    @classmethod
-    def is_eligible(cls, char, state, logic):
-        """Farmers need farming skill requirement from JOB_TIERS."""
-        if char.get('job') is not None:
-            return False
-        reqs = cls.get_requirements()
-        min_farming = reqs.get('farming', 0)
-        farming_skill = char.get('skills', {}).get('farming', 0)
-        return farming_skill >= min_farming
-    
-    @classmethod
-    def is_available(cls, state, logic):
-        """Check if there's an unowned farm for the steward's allegiance."""
-        steward = state.get_steward()
-        if not steward:
-            return False
-        steward_allegiance = steward.get('allegiance')
-        if not steward_allegiance:
-            return False
-        return cls._get_unowned_farm(state, steward_allegiance) is not None
-    
-    @classmethod
-    def can_enlist(cls, char, state, logic):
-        """Must be eligible, available, and adjacent to steward."""
-        if not cls.is_eligible(char, state, logic):
-            return False
-        if not cls.is_available(state, logic):
-            return False
-        steward = state.get_steward()
-        if not steward:
-            return False
-        return logic.is_adjacent(char, steward)
-    
-    @classmethod
-    def enlist(cls, char, state, logic):
-        """Assign farmer job, home, bed, barrel."""
-        if not cls.can_enlist(char, state, logic):
-            return False
-        
-        steward = state.get_steward()
-        steward_allegiance = steward.get('allegiance')
-        
-        farm_name = cls._get_unowned_farm(state, steward_allegiance)
-        if not farm_name:
-            return False
-        
-        allegiance = state.get_allegiance_of_area(farm_name)
-        old_allegiance = char.get('allegiance')
-        
-        char.job = 'Farmer'
-        char.home = farm_name
-        char.allegiance = allegiance
-        char.tax_due_tick = state.ticks + STEWARD_TAX_INTERVAL  # First tax due after 1 year
-        
-        # Assign farm barrel
-        farm_barrel = state.interactables.get_barrel_by_home(farm_name)
-        if farm_barrel:
-            farm_barrel.owner = char.name
-        
-        # Assign farm bed
-        bed = state.interactables.get_unowned_bed_by_home(farm_name)
-        if bed:
-            bed.assign_owner(char.name)
-        
-        name = char.get_display_name()
-        if old_allegiance is None:
-            state.log_action(f"{name} ENLISTED as Farmer! (gained {allegiance} allegiance)")
-        elif old_allegiance != allegiance:
-            state.log_action(f"{name} ENLISTED as Farmer! (allegiance changed from {old_allegiance} to {allegiance})")
-        else:
-            state.log_action(f"{name} ENLISTED as Farmer!")
-        return True
-    
-    @classmethod
-    def get_enlistment_goal(cls, char, state, logic):
-        """Go to steward to enlist."""
-        steward = state.get_steward()
-        if steward:
-            return (steward.x, steward.y)
-        return None
-    
-    @classmethod
-    def _get_unowned_farm(cls, state, allegiance):
-        """Find a farm area belonging to allegiance with no farmer assigned."""
-        from scenario_world import AREAS
-        
-        for area in AREAS:
-            if area.get('has_farm_cells') and area.get('allegiance') == allegiance:
-                farm_name = area['name']
-                # Check if any farmer owns this farm
-                farm_has_farmer = False
-                for char in state.characters:
-                    if char.get('job') == 'Farmer' and char.get('home') == farm_name:
-                        farm_has_farmer = True
-                        break
-                if not farm_has_farmer:
-                    return farm_name
-        return None
-    
-    # =========================================================================
-    # DECIDE
-    # =========================================================================
-    
-    def decide(self, char, state, logic):
-        """Farmer decision logic."""
-        
-        # ===== SURVIVAL =====
-        if self._should_flee(char, state, logic):
-            return self._do_flee(char, state, logic)
-        
-        if self._should_fight_back(char, state, logic):
-            return self._do_fight_back(char, state, logic)
-        
-        if self._in_combat(char, state, logic):
-            return self._do_combat(char, state, logic)
-        
-        if self._should_flee_criminal(char, state, logic):
-            return self._do_flee_criminal(char, state, logic)
-        
-        # Frozen - can only try to trade
-        if char.get('is_frozen'):
-            logic._try_frozen_trade(char)
-            return True
-        
-        # ===== TAXES (farmer-specific, high priority) =====
-        if self._should_pay_tax(char, state, logic):
-            return self._do_pay_tax(char, state, logic)
-        
-        # ===== BASIC NEEDS =====
-        if self._should_eat(char):
-            return self._do_eat(char, state, logic)
-        
-        if self._should_cook(char, state, logic):
-            return self._do_cook(char, state, logic)
-        
-        # Need wheat from barrel for cooking
-        if self._should_get_wheat_from_barrel(char, state, logic):
-            return self._do_get_wheat_from_barrel(char, state, logic)
-        
-        if self._should_sleep(char, state, logic):
-            return self._do_sleep(char, state, logic)
-        
-        # ===== FARMING =====
-        
-        # Deposit full stacks to barrel
-        if self._should_deposit_wheat(char, state, logic):
-            return self._do_deposit_wheat(char, state, logic)
-        
-        # Market time - sell wheat
-        if self._is_market_time(state) and self._should_sell_wheat(char, state, logic):
-            return self._do_sell_wheat(char, state, logic)
-        
-        # Farm - harvest ready crops
-        return self._do_farm(char, state, logic)
-    
-    # ===== FARMER-SPECIFIC CONDITIONS =====
-    
-    def _should_pay_tax(self, char, state, logic):
-        """Is tax due?"""
-        tax_due_tick = char.get('tax_due_tick')
-        if tax_due_tick is None:
-            return False
-        return state.ticks >= tax_due_tick
-    
-    def _should_get_wheat_from_barrel(self, char, state, logic):
-        """Need to get wheat from barrel for food?"""
-        if char.hunger > HUNGER_CHANCE_THRESHOLD:
-            return False
-        if char.get_item('bread') >= BREAD_PER_BITE:
-            return False
-        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO:
-            return False
-        
-        farm_barrel = state.interactables.get_barrel_by_home(char.home)
-        if not farm_barrel:
-            return False
-        return farm_barrel.get_item('wheat') > 0
-    
-    def _should_deposit_wheat(self, char, state, logic):
-        """Should deposit wheat to barrel?"""
-        farm_barrel = state.interactables.get_barrel_by_home(char.home)
-        if not farm_barrel:
-            return False
-        
-        # Deposit if inventory full
-        if char.is_inventory_full():
-            return True
-        
-        # Deposit full stacks (keep buffer)
-        farmer_wheat = char.get_item('wheat')
-        wheat_to_keep = BREAD_BUFFER_TARGET
-        if farmer_wheat - wheat_to_keep >= ITEMS["wheat"]["stack_size"]:
-            if farm_barrel.can_add_item('wheat', 1):
-                return True
-        return False
-    
-    def _is_market_time(self, state):
-        """Is it market time?"""
-        day_tick = state.ticks % TICKS_PER_DAY
-        return TICKS_PER_DAY // 2 <= day_tick < TICKS_PER_DAY * 2 // 3
-    
-    def _should_sell_wheat(self, char, state, logic):
-        """Has wheat to sell?"""
-        return logic.get_vendor_sellable_goods(char, 'wheat') >= 1
-    
-    # ===== FARMER-SPECIFIC ACTIONS =====
-    
-    def _do_pay_tax(self, char, state, logic):
-        """Pay tax to steward."""
-        steward = state.get_steward_for_allegiance(char.allegiance)
-        if not steward:
-            return False
-        
-        # Go to steward if not adjacent
-        if not logic.is_adjacent(char, steward):
-            char.goal = (steward.x, steward.y)
-            return False
-        
-        # Pay tax
-        name = char.get_display_name()
-        farm_barrel = state.interactables.get_barrel_by_home(char.home)
-        
-        farmer_wheat = char.get_item('wheat')
-        barrel_wheat = farm_barrel.get_item('wheat') if farm_barrel else 0
-        total_wheat = farmer_wheat + barrel_wheat
-        
-        if total_wheat >= STEWARD_TAX_AMOUNT:
-            # Pay from inventory first, then barrel
-            amount_needed = STEWARD_TAX_AMOUNT
-            from_inventory = min(farmer_wheat, amount_needed)
-            if from_inventory > 0:
-                char.remove_item('wheat', from_inventory)
-                amount_needed -= from_inventory
-            if amount_needed > 0 and farm_barrel:
-                farm_barrel.remove_item('wheat', amount_needed)
-            
-            steward.add_item('wheat', STEWARD_TAX_AMOUNT)
-            char.tax_due_tick = state.ticks + STEWARD_TAX_INTERVAL
-            steward.tax_collection_target = None
-            state.log_action(f"{name} paid {STEWARD_TAX_AMOUNT} wheat tax")
-        else:
-            # Failed to pay - lose job
-            state.log_action(f"{name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
-            char.job = None
-            char.home = None
-            char.tax_due_tick = None
-            steward.tax_collection_target = None
-            state.interactables.unassign_bed_owner(char.name)
-        return True
-    
-    def _do_get_wheat_from_barrel(self, char, state, logic):
-        """Get wheat from farm barrel."""
-        farm_barrel = state.interactables.get_barrel_by_home(char.home)
-        if not farm_barrel:
-            return False
-        
-        # Go to barrel if not adjacent
-        if not farm_barrel.is_adjacent(char):
-            barrel_pos = farm_barrel.position
-            if barrel_pos:
-                char.goal = (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-            return False
-        
-        # Withdraw wheat
-        barrel_wheat = farm_barrel.get_item('wheat')
-        amount_needed = BREAD_BUFFER_TARGET - char.get_item('wheat')
-        amount_to_withdraw = min(amount_needed, barrel_wheat)
-        if amount_to_withdraw > 0 and char.can_add_item('wheat', amount_to_withdraw):
-            farm_barrel.remove_item('wheat', amount_to_withdraw)
-            char.add_item('wheat', amount_to_withdraw)
-            state.log_action(f"{char.get_display_name()} withdrew {amount_to_withdraw} wheat from barrel for food")
-            return True
-        return False
-    
-    def _do_deposit_wheat(self, char, state, logic):
-        """Deposit wheat to farm barrel."""
-        farm_barrel = state.interactables.get_barrel_by_home(char.home)
-        if not farm_barrel:
-            return False
-        
-        # Go to barrel if not adjacent
-        if not farm_barrel.is_adjacent(char):
-            barrel_pos = farm_barrel.position
-            if barrel_pos:
-                char.goal = (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-            return False
-        
-        # Deposit wheat
-        farmer_wheat = char.get_item('wheat')
-        wheat_to_keep = BREAD_BUFFER_TARGET
-        excess = farmer_wheat - wheat_to_keep
-        if excess > 0 and farm_barrel.can_add_item('wheat', excess):
-            char.remove_item('wheat', excess)
-            farm_barrel.add_item('wheat', excess)
-            state.log_action(f"{char.get_display_name()} deposited {excess} wheat to barrel")
-            return True
-        return False
-    
-    def _do_sell_wheat(self, char, state, logic):
-        """Go to market and sell wheat."""
-        market_area = state.get_area_by_role('market')
-        if not market_area:
-            return False
-        
-        # Go to market if not there
-        if state.get_area_at(char.x, char.y) != market_area:
-            char.goal = logic._nearest_in_area(char, market_area)
-            return False
-        
-        # At market - wait for buyers (steward comes to us)
-        char.goal = None
-        return False
-    
-    def _do_farm(self, char, state, logic):
-        """Farm - go to ready crops and harvest."""
-        # Find nearest ready farm cell for our home
-        goal = logic._nearest_ready_farm_cell(char, char.home)
-        char.goal = goal
-        return False
+            char.facing = 'down' if dy > 0 else 'up'
 
 
 class SoldierJob(Job):
-    """Soldier: patrols, responds to crimes, protects citizens."""
+    """
+    Soldier: patrols area, responds to threats.
+    
+    Soldiers don't flee - they always fight back.
+    Main duty is patrolling waypoints.
+    """
     
     name = "Soldier"
     
@@ -951,24 +853,12 @@ class SoldierJob(Job):
     
     @classmethod
     def is_available(cls, state, logic):
-        """Check if there's a bed and wheat in barracks."""
+        """Check if there's a bed in barracks."""
         military_area = state.get_area_by_role('military_housing')
         if not military_area:
             return False
-        
-        # Need available bed
         bed = state.interactables.get_unowned_bed_by_home(military_area)
-        if not bed:
-            return False
-        
-        # Need wheat in barracks barrel
-        barracks_barrel = state.interactables.get_barrel_by_home(military_area)
-        if not barracks_barrel:
-            return False
-        if barracks_barrel.get_item('wheat') < SOLDIER_WHEAT_PAYMENT:
-            return False
-        
-        return True
+        return bed is not None
     
     @classmethod
     def can_enlist(cls, char, state, logic):
@@ -986,28 +876,19 @@ class SoldierJob(Job):
         if not cls.can_enlist(char, state, logic):
             return False
         
-        old_allegiance = char.get('allegiance')
         military_area = state.get_area_by_role('military_housing')
         allegiance = state.get_allegiance_of_area(military_area)
         
         char.job = 'Soldier'
         char.home = military_area
         char.allegiance = allegiance
-        char.soldier_stopped = False
-        char.asked_steward_for_wheat = False
         
-        # Assign bed in barracks
+        # Assign bed
         bed = state.interactables.get_unowned_bed_by_home(military_area)
         if bed:
             bed.assign_owner(char.name)
         
-        name = char.get_display_name()
-        if old_allegiance is None:
-            state.log_action(f"{name} ENLISTED as Soldier! (gained {allegiance} allegiance)")
-        elif old_allegiance != allegiance:
-            state.log_action(f"{name} ENLISTED as Soldier! (allegiance changed from {old_allegiance} to {allegiance})")
-        else:
-            state.log_action(f"{name} RE-ENLISTED as Soldier!")
+        state.log_action(f"{char.get_display_name()} ENLISTED as Soldier!")
         return True
     
     @classmethod
@@ -1019,73 +900,47 @@ class SoldierJob(Job):
         return None
     
     # =========================================================================
-    # DECIDE
+    # DECIDE - Soldiers have modified priorities
     # =========================================================================
     
     def decide(self, char, state, logic):
-        """Soldier decision logic."""
+        """Soldier decision logic - soldiers don't flee, they fight."""
         
-        # ===== SURVIVAL (soldiers flee less readily) =====
-        
-        # Only flee at very low health
-        if char.health < 10:
-            attacker = logic.get_attacker(char)
-            if attacker:
-                return self._do_flee(char, state, logic)
-        
-        # Fight back (soldiers always fight)
-        if self._should_fight_back(char, state, logic):
+        # ===== COMBAT (soldiers always fight) =====
+        if self._check_fight_back(char, state, logic):
             return self._do_fight_back(char, state, logic)
         
-        if self._in_combat(char, state, logic):
+        if self._check_combat(char, state, logic):
             return self._do_combat(char, state, logic)
         
-        # Frozen
-        if char.get('is_frozen'):
-            logic._try_frozen_trade(char)
-            return True
-        
-        # ===== BASIC NEEDS =====
-        if self._should_eat(char):
-            return self._do_eat(char, state, logic)
-        
-        if self._should_cook(char, state, logic):
-            return self._do_cook(char, state, logic)
-        
-        # Request wheat from steward if hungry and low on wheat
-        if self._should_request_wheat(char, state, logic):
-            char.requested_wheat = True
-        
-        if self._should_sleep(char, state, logic):
-            return self._do_sleep(char, state, logic)
-        
-        # ===== SOLDIER DUTIES =====
-        
-        # Respond to criminals (soldiers confront, don't flee)
+        # ===== RESPOND TO CRIMINALS =====
         criminal, intensity = logic.find_known_criminal_nearby(char)
         if criminal:
-            return self._do_confront_criminal(char, criminal, state, logic)
+            return self._do_confront_criminal_soldier(char, criminal, state, logic)
         
-        # Patrol
+        # ===== BASIC NEEDS =====
+        if self._check_eat(char, state, logic):
+            return self._do_eat(char, state, logic)
+        
+        if self._check_cook(char, state, logic):
+            return self._do_cook(char, state, logic)
+        
+        if self._check_sleep(char, state, logic):
+            return self._do_sleep(char, state, logic)
+        
+        # ===== PATROL (default duty) =====
         return self._do_patrol(char, state, logic)
     
-    # ===== SOLDIER-SPECIFIC =====
+    def _check_fight_back(self, char, state, logic):
+        """Soldiers ALWAYS fight back."""
+        return char.get_active_attacker(state.ticks, state.characters) is not None
     
-    def _should_fight_back(self, char, state, logic):
-        """Soldiers always fight back."""
-        return logic.get_attacker(char) is not None
-    
-    def _should_request_wheat(self, char, state, logic):
-        """Should request wheat from steward?"""
-        if char.get('requested_wheat'):
-            return False
-        return logic.needs_wheat_buffer(char) and char.get_item('wheat') < BREAD_BUFFER_TARGET
-    
-    def _do_confront_criminal(self, char, criminal, state, logic):
-        """Confront and attack a criminal."""
-        if char.get('robbery_target') != criminal:
+    def _do_confront_criminal_soldier(self, char, criminal, state, logic):
+        """Soldiers confront criminals aggressively."""
+        # Set attack intent if not already targeting this criminal
+        if char.intent is None or char.intent.get('target') is not criminal:
             state.log_action(f"{char.get_display_name()} confronting {criminal.get_display_name()}!")
-            char.robbery_target = criminal
+            char.set_intent('attack', criminal, reason='law_enforcement', started_tick=state.ticks)
         
         if logic.is_adjacent(char, criminal):
             if logic.can_attack(char):
@@ -1097,19 +952,14 @@ class SoldierJob(Job):
         return False
     
     def _do_patrol(self, char, state, logic):
-        """Patrol the area."""
-        # Get patrol waypoints
-        military_area = state.get_area_by_role('military_housing')
-        if not military_area:
-            return self._do_wander(char, state, logic)
-        
+        """Patrol between waypoints."""
         waypoints = state.get_patrol_waypoints()
         if not waypoints:
             return self._do_wander(char, state, logic)
         
         char.is_patrolling = True
         
-        # Handle checking state
+        # Handle checking/pausing state
         if char.get('patrol_state') == 'checking':
             wait_ticks = char.get('patrol_wait_ticks', 0)
             if wait_ticks > 0:
@@ -1134,7 +984,7 @@ class SoldierJob(Job):
         dist = math.sqrt((char.x - target_x)**2 + (char.y - target_y)**2)
         
         if dist < PATROL_APPROACH_DISTANCE:
-            # Maybe pause to check
+            # Maybe pause to check area
             if random.random() < PATROL_CHECK_CHANCE:
                 char.patrol_state = 'checking'
                 char.patrol_wait_ticks = random.randint(PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS)
@@ -1153,573 +1003,57 @@ class SoldierJob(Job):
         return False
 
 
-class StewardJob(Job):
-    """Steward: collects taxes, feeds soldiers, manages economy."""
-    
-    name = "Steward"
-    
-    # =========================================================================
-    # ENROLLMENT
-    # =========================================================================
-    
-    @classmethod
-    def is_eligible(cls, char, state, logic):
-        """Stewards need allegiance and mercantile skill requirement from JOB_TIERS."""
-        # Can be unemployed or Trader (promotion)
-        current_job = char.get('job')
-        if current_job is not None and current_job != 'Trader':
-            return False
-        if not char.get('allegiance'):
-            return False
-        reqs = cls.get_requirements()
-        min_mercantile = reqs.get('mercantile', 0)
-        mercantile_skill = char.get('skills', {}).get('mercantile', 0)
-        return mercantile_skill >= min_mercantile
-    
-    @classmethod
-    def is_available(cls, state, logic):
-        """Check if steward position is vacant."""
-        return state.get_steward() is None
-    
-    @classmethod
-    def is_best_candidate(cls, char, state, logic):
-        """Check if this character has the highest mercantile among eligible."""
-        if not cls.is_eligible(char, state, logic):
-            return False
-        
-        char_mercantile = char.get('skills', {}).get('mercantile', 0)
-        
-        for other in state.characters:
-            if other == char:
-                continue
-            if not cls.is_eligible(other, state, logic):
-                continue
-            other_mercantile = other.get('skills', {}).get('mercantile', 0)
-            if other_mercantile > char_mercantile:
-                return False
-        
-        return True
-    
-    @classmethod
-    def can_enlist(cls, char, state, logic):
-        """Must be eligible, available, best candidate, and in barracks."""
-        if not cls.is_available(state, logic):
-            return False
-        if not cls.is_best_candidate(char, state, logic):
-            return False
-        military_area = state.get_area_by_role('military_housing')
-        return state.get_area_at(char.x, char.y) == military_area
-    
-    @classmethod
-    def enlist(cls, char, state, logic):
-        """Assign steward job (may be promotion from Trader)."""
-        if not cls.can_enlist(char, state, logic):
-            return False
-        
-        old_job = char.get('job')
-        military_area = state.get_area_by_role('military_housing')
-        allegiance = state.get_allegiance_of_area(military_area)
-        
-        char.job = 'Steward'
-        char.home = military_area
-        char.allegiance = allegiance
-        
-        # Reassign bed to barracks
-        state.interactables.unassign_bed_owner(char.name)
-        bed = state.interactables.get_unowned_bed_by_home(military_area)
-        if bed:
-            bed.assign_owner(char.name)
-        
-        # Assign barracks barrel
-        barracks_barrel = state.interactables.get_barrel_by_home(military_area)
-        if barracks_barrel:
-            barracks_barrel.owner = char.name
-        
-        name = char.get_display_name()
-        if old_job:
-            state.log_action(f"{name} was promoted from {old_job} to STEWARD!")
-        else:
-            state.log_action(f"{name} became the village STEWARD!")
-        return True
-    
-    @classmethod
-    def get_enlistment_goal(cls, char, state, logic):
-        """Go to barracks to become steward."""
-        military_area = state.get_area_by_role('military_housing')
-        if military_area and state.get_area_at(char.x, char.y) != military_area:
-            return logic._nearest_in_area(char, military_area)
-        return None
-    
-    # =========================================================================
-    # DECIDE
-    # =========================================================================
-    
-    def decide(self, char, state, logic):
-        """Steward decision logic."""
-        
-        # ===== SURVIVAL =====
-        if self._should_flee(char, state, logic):
-            return self._do_flee(char, state, logic)
-        
-        if self._should_fight_back(char, state, logic):
-            return self._do_fight_back(char, state, logic)
-        
-        if self._in_combat(char, state, logic):
-            return self._do_combat(char, state, logic)
-        
-        if self._should_flee_criminal(char, state, logic):
-            return self._do_flee_criminal(char, state, logic)
-        
-        if char.get('is_frozen'):
-            logic._try_frozen_trade(char)
-            return True
-        
-        # ===== TAX COLLECTION (steward-specific, high priority) =====
-        if self._should_collect_tax(char, state, logic):
-            return self._do_collect_tax(char, state, logic)
-        
-        # ===== FEED SOLDIERS (before own needs) =====
-        if self._should_feed_soldiers(char, state, logic):
-            return self._do_feed_soldiers(char, state, logic)
-        
-        # ===== BASIC NEEDS =====
-        if self._should_eat(char):
-            return self._do_eat(char, state, logic)
-        
-        if self._should_cook(char, state, logic):
-            return self._do_cook(char, state, logic)
-        
-        # Get wheat from barrel if hungry
-        if self._should_get_wheat_from_barrel(char, state, logic):
-            return self._do_get_wheat_from_barrel(char, state, logic)
-        
-        if self._should_sleep(char, state, logic):
-            return self._do_sleep(char, state, logic)
-        
-        # ===== STEWARD DUTIES =====
-        
-        # Deposit excess wheat
-        if self._should_deposit_wheat(char, state, logic):
-            return self._do_deposit_wheat(char, state, logic)
-        
-        # Buy wheat from farmers
-        if self._should_buy_wheat(char, state, logic):
-            return self._do_buy_wheat(char, state, logic)
-        
-        # Wander in barracks
-        return self._do_wander_barracks(char, state, logic)
-    
-    # ===== STEWARD-SPECIFIC CONDITIONS =====
-    
-    def _should_collect_tax(self, char, state, logic):
-        """Has a tax collection target?"""
-        target = char.get('tax_collection_target')
-        return target and target in state.characters
-    
-    def _should_feed_soldiers(self, char, state, logic):
-        """Are there hungry soldiers requesting wheat?"""
-        soldiers = logic._get_soldiers_requesting_wheat()
-        return len(soldiers) > 0
-    
-    def _should_get_wheat_from_barrel(self, char, state, logic):
-        """Need to get wheat from barrel?"""
-        if char.hunger > HUNGER_CHANCE_THRESHOLD:
-            return False
-        if char.get_item('bread') >= BREAD_PER_BITE:
-            return False
-        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO:
-            return False
-        
-        barracks_barrel = state.interactables.get_barrel_by_home(state.get_area_by_role('military_housing'))
-        return barracks_barrel and barracks_barrel.get_item('wheat') > 0
-    
-    def _should_deposit_wheat(self, char, state, logic):
-        """Should deposit excess wheat?"""
-        # Only if no hungry soldiers
-        if logic._get_soldiers_requesting_wheat():
-            return False
-        
-        personal_wheat = char.get_item('wheat')
-        personal_reserve = 3
-        return personal_wheat > personal_reserve
-    
-    def _should_buy_wheat(self, char, state, logic):
-        """Should buy wheat from farmers?"""
-        return logic.steward_needs_to_buy_wheat(char) and logic.can_afford_goods(char, 'wheat')
-    
-    # ===== STEWARD-SPECIFIC ACTIONS =====
-    
-    def _do_collect_tax(self, char, state, logic):
-        """Go collect tax from target."""
-        target = char.tax_collection_target
-        if not target or target not in state.characters:
-            char.tax_collection_target = None
-            return False
-        
-        # Go to target if not adjacent
-        if not logic.is_adjacent(char, target):
-            char.goal = (target.x, target.y)
-            return False
-        
-        # Adjacent - collect tax
-        name = char.get_display_name()
-        target_name = target.get_display_name()
-        farm_barrel = state.interactables.get_barrel_by_home(target.home)
-        
-        farmer_wheat = target.get_item('wheat')
-        barrel_wheat = farm_barrel.get_item('wheat') if farm_barrel else 0
-        total_wheat = farmer_wheat + barrel_wheat
-        
-        if total_wheat >= STEWARD_TAX_AMOUNT:
-            amount_needed = STEWARD_TAX_AMOUNT
-            from_inventory = min(farmer_wheat, amount_needed)
-            if from_inventory > 0:
-                target.remove_item('wheat', from_inventory)
-                amount_needed -= from_inventory
-            if amount_needed > 0 and farm_barrel:
-                farm_barrel.remove_item('wheat', amount_needed)
-            
-            char.add_item('wheat', STEWARD_TAX_AMOUNT)
-            target.tax_due_tick = state.ticks + STEWARD_TAX_INTERVAL
-            char.tax_collection_target = None
-            state.log_action(f"Steward {name} collected {STEWARD_TAX_AMOUNT} wheat tax from {target_name}")
-        else:
-            state.log_action(f"{target_name} FAILED to pay tax! (had {total_wheat}, needed {STEWARD_TAX_AMOUNT})")
-            target.job = None
-            target.home = None
-            target.tax_due_tick = None
-            char.tax_collection_target = None
-            state.interactables.unassign_bed_owner(target.name)
-        return True
-    
-    def _do_feed_soldiers(self, char, state, logic):
-        """Feed hungry soldiers."""
-        soldiers = logic._get_soldiers_requesting_wheat()
-        if not soldiers:
-            return False
-        
-        steward_wheat = char.get_item('wheat')
-        
-        if steward_wheat >= SOLDIER_WHEAT_PAYMENT:
-            # Have wheat - go to closest requesting soldier
-            closest = min(soldiers, key=lambda s: state.get_distance(char, s))
-            
-            if logic.is_adjacent(char, closest):
-                # Feed soldier
-                if closest.can_add_item('wheat', SOLDIER_WHEAT_PAYMENT):
-                    char.remove_item('wheat', SOLDIER_WHEAT_PAYMENT)
-                    closest.add_item('wheat', SOLDIER_WHEAT_PAYMENT)
-                    closest.requested_wheat = False
-                    state.log_action(f"Steward {char.get_display_name()} gave {SOLDIER_WHEAT_PAYMENT} wheat to {closest.get_display_name()}")
-                    return True
-            else:
-                char.goal = (closest.x, closest.y)
-                return False
-        else:
-            # Need wheat from barrel
-            barracks_barrel = state.interactables.get_barrel_by_home(state.get_area_by_role('military_housing'))
-            if barracks_barrel and barracks_barrel.get_item('wheat') > 0:
-                if barracks_barrel.is_adjacent(char):
-                    # Withdraw wheat
-                    amount = min(SOLDIER_WHEAT_PAYMENT * 2, barracks_barrel.get_item('wheat'))
-                    if char.can_add_item('wheat', amount):
-                        barracks_barrel.remove_item('wheat', amount)
-                        char.add_item('wheat', amount)
-                        state.log_action(f"Steward {char.get_display_name()} withdrew {amount} wheat from barrel")
-                        return True
-                else:
-                    barrel_pos = barracks_barrel.position
-                    if barrel_pos:
-                        char.goal = (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-                    return False
-        return False
-    
-    def _do_get_wheat_from_barrel(self, char, state, logic):
-        """Get wheat from barracks barrel."""
-        barracks_barrel = state.interactables.get_barrel_by_home(state.get_area_by_role('military_housing'))
-        if not barracks_barrel:
-            return False
-        
-        if not barracks_barrel.is_adjacent(char):
-            barrel_pos = barracks_barrel.position
-            if barrel_pos:
-                char.goal = (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-            return False
-        
-        # Withdraw wheat
-        amount = min(BREAD_BUFFER_TARGET, barracks_barrel.get_item('wheat'))
-        if amount > 0 and char.can_add_item('wheat', amount):
-            barracks_barrel.remove_item('wheat', amount)
-            char.add_item('wheat', amount)
-            state.log_action(f"Steward {char.get_display_name()} withdrew {amount} wheat from barrel")
-            return True
-        return False
-    
-    def _do_deposit_wheat(self, char, state, logic):
-        """Deposit wheat to barracks barrel."""
-        barracks_barrel = state.interactables.get_barrel_by_home(state.get_area_by_role('military_housing'))
-        if not barracks_barrel:
-            return False
-        
-        if not barracks_barrel.is_adjacent(char):
-            barrel_pos = barracks_barrel.position
-            if barrel_pos:
-                char.goal = (barrel_pos[0] + 0.5, barrel_pos[1] + 0.5)
-            return False
-        
-        personal_wheat = char.get_item('wheat')
-        personal_reserve = 3
-        excess = personal_wheat - personal_reserve
-        if excess > 0 and barracks_barrel.can_add_item('wheat', excess):
-            char.remove_item('wheat', excess)
-            barracks_barrel.add_item('wheat', excess)
-            state.log_action(f"Steward {char.get_display_name()} deposited {excess} wheat into barracks barrel")
-            return True
-        return False
-    
-    def _do_buy_wheat(self, char, state, logic):
-        """Buy wheat from farmers at market."""
-        # Go to market area
-        market_area = state.get_area_by_role('market')
-        if market_area and state.get_area_at(char.x, char.y) != market_area:
-            char.goal = logic._nearest_in_area(char, market_area)
-            return False
-        
-        # Find adjacent farmer willing to sell
-        farmer = logic.find_adjacent_vendor(char, 'wheat')
-        if farmer and logic.vendor_willing_to_trade(farmer, char, 'wheat'):
-            amount = logic.get_max_vendor_trade_amount(farmer, char, 'wheat')
-            if amount > 0:
-                price = int(amount * ITEMS["wheat"]["price"])
-                logic.execute_vendor_trade(farmer, char, 'wheat', amount)
-                state.log_action(f"Steward {char.get_display_name()} bought {amount} wheat for ${price}")
-                return True
-        
-        char.goal = None
-        return False
-    
-    def _do_wander_barracks(self, char, state, logic):
-        """Wander in barracks area."""
-        military_area = state.get_area_by_role('military_housing')
-        if military_area and state.get_area_at(char.x, char.y) != military_area:
-            char.goal = logic._nearest_in_area(char, military_area)
-        else:
-            char.goal = logic._get_wander_goal(char, military_area)
-        return False
-
-
-class TraderJob(Job):
-    """Trader: self-employed merchant, can be promoted to steward."""
-    
-    name = "Trader"
-    
-    # =========================================================================
-    # ENROLLMENT
-    # =========================================================================
-    
-    @classmethod
-    def is_eligible(cls, char, state, logic):
-        """Traders need mercantile skill requirement from JOB_TIERS."""
-        if char.get('job') is not None:
-            return False
-        reqs = cls.get_requirements()
-        min_mercantile = reqs.get('mercantile', 0)
-        mercantile_skill = char.get('skills', {}).get('mercantile', 0)
-        return mercantile_skill >= min_mercantile
-    
-    @classmethod
-    def is_available(cls, state, logic):
-        """Trader is self-employed - always available."""
-        return True
-    
-    @classmethod
-    def can_enlist(cls, char, state, logic):
-        """Traders can start anytime, anywhere if eligible."""
-        return cls.is_eligible(char, state, logic)
-    
-    @classmethod
-    def enlist(cls, char, state, logic):
-        """Become a self-employed trader."""
-        if not cls.can_enlist(char, state, logic):
-            return False
-        
-        char.job = 'Trader'
-        # Traders are self-employed - keep current home/camp if they have one
-        
-        name = char.get_display_name()
-        state.log_action(f"{name} became a self-employed Trader!")
-        return True
-    
-    @classmethod
-    def get_enlistment_goal(cls, char, state, logic):
-        """Traders don't need to go anywhere to start."""
-        return None
-    
-    # =========================================================================
-    # DECIDE
-    # =========================================================================
-    
-    def decide(self, char, state, logic):
-        """Trader decision logic - mostly like unemployed but can become steward."""
-        
-        # ===== SURVIVAL =====
-        if self._should_flee(char, state, logic):
-            return self._do_flee(char, state, logic)
-        
-        if self._should_fight_back(char, state, logic):
-            return self._do_fight_back(char, state, logic)
-        
-        if self._in_combat(char, state, logic):
-            return self._do_combat(char, state, logic)
-        
-        if self._should_flee_criminal(char, state, logic):
-            return self._do_flee_criminal(char, state, logic)
-        
-        if char.get('is_frozen'):
-            logic._try_frozen_trade(char)
-            return True
-        
-        # ===== PROMOTION TO STEWARD =====
-        if self._can_become_steward(char, state, logic):
-            return self._do_become_steward(char, state, logic)
-        
-        # ===== BASIC NEEDS =====
-        if self._should_eat(char):
-            return self._do_eat(char, state, logic)
-        
-        if self._should_cook(char, state, logic):
-            return self._do_cook(char, state, logic)
-        
-        if self._should_sleep(char, state, logic):
-            return self._do_sleep(char, state, logic)
-        
-        # ===== DEFAULT BEHAVIOR =====
-        if self._should_forage(char, state, logic):
-            return self._do_forage(char, state, logic)
-        
-        return self._do_wander(char, state, logic)
-    
-    def _can_become_steward(self, char, state, logic):
-        """Can this trader be promoted to steward?"""
-        return StewardJob.is_available(state, logic) and StewardJob.is_best_candidate(char, state, logic)
-    
-    def _do_become_steward(self, char, state, logic):
-        """Try to become steward."""
-        if StewardJob.can_enlist(char, state, logic):
-            StewardJob.enlist(char, state, logic)
-            return True
-        
-        # Go to barracks
-        goal = StewardJob.get_enlistment_goal(char, state, logic)
-        if goal:
-            char.goal = goal
-        return False
-
-
 # =============================================================================
 # JOB REGISTRY
 # =============================================================================
 
-# Instance registry for decide() calls
 JOB_REGISTRY = {
-    'Farmer': FarmerJob(),
     'Soldier': SoldierJob(),
-    'Steward': StewardJob(),
-    'Trader': TraderJob(),
 }
 
-# Class registry for enrollment (class methods)
 JOB_CLASSES = {
-    'Farmer': FarmerJob,
     'Soldier': SoldierJob,
-    'Steward': StewardJob,
-    'Trader': TraderJob,
 }
 
-# Jobs sorted by tier at module load (lower tier = higher priority)
-# This pulls tier from JOB_TIERS in constants.py
 JOBS_BY_TIER = sorted(JOB_CLASSES.values(), key=lambda cls: cls.get_tier())
 
-# Default job for unemployed characters
 DEFAULT_JOB = Job()
 
 
 def get_job(job_name):
-    """Get the job instance for a job name.
-    
-    Args:
-        job_name: String job name, or None for unemployed
-        
-    Returns:
-        Job instance (never None - returns DEFAULT_JOB for unemployed)
-    """
+    """Get the job instance for a job name."""
     if job_name is None:
         return DEFAULT_JOB
     return JOB_REGISTRY.get(job_name, DEFAULT_JOB)
 
 
 def get_job_class(job_name):
-    """Get the job class for a job name.
-    
-    Args:
-        job_name: String job name
-        
-    Returns:
-        Job class or None if not found
-    """
+    """Get the job class for a job name."""
     return JOB_CLASSES.get(job_name)
 
 
 def get_best_available_job(char, state, logic):
-    """Get the best available job for this character.
-    
-    Checks jobs in tier order. Within same tier, picks randomly.
-    
-    Args:
-        char: Character seeking job
-        state: GameState
-        logic: GameLogic
-        
-    Returns:
-        Job name string or None if no jobs available
-    """
+    """Get the best available job for this character."""
     if char.get('job') is not None:
         return None
     
-    # Group available jobs by tier
     available_by_tier = {}
     for job_cls in JOBS_BY_TIER:
         if job_cls.is_eligible(char, state, logic) and job_cls.is_available(state, logic):
-            # Special case: Steward also needs to be best candidate
-            if job_cls == StewardJob and not StewardJob.is_best_candidate(char, state, logic):
-                continue
-            
             tier = job_cls.get_tier()
             if tier not in available_by_tier:
                 available_by_tier[tier] = []
             available_by_tier[tier].append(job_cls.name)
     
-    # Return job from lowest tier (highest priority)
     if available_by_tier:
         min_tier = min(available_by_tier.keys())
-        jobs = available_by_tier[min_tier]
-        return random.choice(jobs)
+        return random.choice(available_by_tier[min_tier])
     
     return None
 
 
 def try_enlist(char, job_name, state, logic):
-    """Try to enlist character in a specific job.
-    
-    Args:
-        char: Character to enlist
-        job_name: Job name string
-        state: GameState
-        logic: GameLogic
-        
-    Returns:
-        True if successfully enlisted
-    """
+    """Try to enlist character in a specific job."""
     job_cls = JOB_CLASSES.get(job_name)
     if job_cls:
         return job_cls.enlist(char, state, logic)

@@ -9,19 +9,6 @@
 # - starting_job determines where they live (Steward -> military_housing, Farmer -> farm, etc.)
 # - starting_home is only for characters with no job (homeless/wanderer spawn point)
 CHARACTER_TEMPLATES = {
-    "Edmund Cole": {
-        "attractiveness": 5,
-        "confidence": 3,
-        "cunning": 9,
-        "morality": 7,
-        "starting_allegiance": "Dunmere",
-        "starting_job": None,
-        "starting_money": 200,
-        "starting_wheat": 100,
-        "starting_age": 45,
-        "starting_skills": {"mercantile": 70},
-        "is_player": False
-    },
     "Wulfred Barley": {
         "attractiveness": 5,
         "confidence": 2,
@@ -46,6 +33,19 @@ CHARACTER_TEMPLATES = {
         "starting_wheat": 0,
         "starting_age": 25,
         "starting_skills": {"strength": 50},
+        "is_player": False
+    },
+    "Edmund Cole": {
+        "attractiveness": 5,
+        "confidence": 3,
+        "cunning": 9,
+        "morality": 7,
+        "starting_allegiance": "Dunmere",
+        "starting_job": None,
+        "starting_money": 200,
+        "starting_wheat": 100,
+        "starting_age": 45,
+        "starting_skills": {"mercantile": 70},
         "is_player": False
     },
     "Brynn Ashford": {

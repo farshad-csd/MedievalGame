@@ -56,6 +56,50 @@ class DebugWindowProcess:
         # Build character data
         characters = []
         for char in self.state.characters:
+            # Build memory summaries
+            memories_summary = []
+            for m in char.memories:
+                mem_type = m.get('type', '?')
+                subject = m.get('subject')
+                subject_name = subject.get('name', '?') if hasattr(subject, 'get') else str(subject)
+                tick = m.get('tick', 0)
+                source = m.get('source', '?')
+                details = m.get('details', {})
+                
+                mem_info = {
+                    'type': mem_type,
+                    'subject': subject_name,
+                    'tick': tick,
+                    'source': source,
+                }
+                
+                # Add type-specific details
+                if mem_type == 'crime':
+                    mem_info['crime_type'] = details.get('crime_type', '?')
+                    victim = details.get('victim')
+                    mem_info['victim'] = victim.get('name', '?') if hasattr(victim, 'get') else str(victim) if victim else None
+                    mem_info['reported'] = m.get('reported', False)
+                elif mem_type == 'committed_crime':
+                    mem_info['crime_type'] = details.get('crime_type', '?')
+                    victim = details.get('victim')
+                    mem_info['victim'] = victim.get('name', '?') if hasattr(victim, 'get') else str(victim) if victim else None
+                elif mem_type == 'attacked_by':
+                    mem_info['reported'] = m.get('reported', False)
+                
+                memories_summary.append(mem_info)
+            
+            # Build intent summary
+            intent_summary = None
+            if char.intent:
+                target = char.intent.get('target')
+                target_name = target.get('name', '?') if hasattr(target, 'get') else str(target) if target else None
+                intent_summary = {
+                    'action': char.intent.get('action'),
+                    'target': target_name,
+                    'reason': char.intent.get('reason'),
+                    'started_tick': char.intent.get('started_tick'),
+                }
+            
             char_data = {
                 'name': char['name'],
                 'x': char['x'],
@@ -63,6 +107,8 @@ class DebugWindowProcess:
                 'age': char['age'],
                 'health': char['health'],
                 'hunger': char['hunger'],
+                'fatigue': char.get('fatigue', 100),
+                'stamina': char.get('stamina', 100),
                 'inventory': char['inventory'][:],  # Copy
                 'home': char.get('home'),
                 'job': char.get('job'),
@@ -71,10 +117,13 @@ class DebugWindowProcess:
                 'skills': dict(char.get('skills', {})),
                 'is_frozen': char.get('is_frozen', False),
                 'is_starving': char.get('is_starving', False),
-                'is_murderer': char.get('is_murderer', False),
-                'is_thief': char.get('is_thief', False),
-                'known_crimes': dict(char.get('known_crimes', {})),
+                'is_murderer': char.has_committed_crime('murder'),
+                'is_thief': char.has_committed_crime('theft'),
+                'known_crimes_count': len(char.get_memories(memory_type='crime')),
                 'camp_position': char.get('camp_position'),
+                'memories': memories_summary,
+                'intent': intent_summary,
+                'facing': char.get('facing', 'down'),
             }
             characters.append(char_data)
         
@@ -485,9 +534,9 @@ class _DebugWindowInternal:
         scroll_pos = self.debug_text.yview()
         
         lines = []
-        header = f"{'Name':<18}{'Pos':<12}{'Age':<5}{'HP':<6}{'Hunger':<7}{'Inventory':<28}{'Home':<10}{'Job':<10}{'Alleg':<8}{'Traits':<12}{'Status':<12}"
+        header = f"{'Name':<18}{'Pos':<12}{'Age':<5}{'HP':<6}{'Hunger':<7}{'Fatig':<7}{'Stam':<7}{'Inventory':<28}{'Home':<10}{'Job':<10}{'Alleg':<8}{'Traits':<12}{'Status/Intent':<16}"
         lines.append(header)
-        lines.append("=" * 140)
+        lines.append("=" * 158)
         
         for char in self.snapshot['characters']:
             name = char['name']
@@ -514,27 +563,38 @@ class _DebugWindowInternal:
             moral = char.get('morality', 5)
             traits_str = f"{attr}/{conf}/{cunn}/{moral}"
             
-            # Status display
+            # Status display - use pre-computed values from snapshot
             status = ""
-            known_crimes = char.get('known_crimes', {})
-            known_criminals = len(known_crimes)
+            known_crimes = char.get('known_crimes_count', 0)
+            is_murderer = char.get('is_murderer', False)
+            is_thief = char.get('is_thief', False)
+            intent = char.get('intent')
+            
             if char.get('is_frozen', False):
                 status = "FROZEN"
             elif char.get('is_starving', False):
                 status = "STARVING"
-            elif char.get('is_murderer', False):
+            elif is_murderer:
                 status = "MURDERER"
-            elif char.get('is_thief', False):
+            elif is_thief:
                 status = "THIEF"
-            elif known_criminals > 0:
-                status = f"knows:{known_criminals}"
+            elif intent:
+                action = intent.get('action', '?')
+                target = intent.get('target', '?')
+                # Truncate target name for display
+                target_short = target[:8] if target and len(target) > 8 else target
+                status = f"{action}->{target_short}"
+            elif known_crimes > 0:
+                status = f"knows:{known_crimes}"
             else:
                 status = "-"
             
             hunger_display = f"{char['hunger']:.0f}"
+            fatigue_display = f"{char['fatigue']:.0f}"
+            stamina_display = f"{char['stamina']:.0f}"
             allegiance = char.get('allegiance', '-') or '-'
             
-            line = f"{name:<18}{pos:<12}{char['age']:<5}{char['health']:<6}{hunger_display:<7}{inv_display:<28}{home:<10}{job:<10}{allegiance:<8}{traits_str:<12}{status:<12}"
+            line = f"{name:<18}{pos:<12}{char['age']:<5}{char['health']:<6}{hunger_display:<7}{fatigue_display:<7}{stamina_display:<7}{inv_display:<28}{home:<10}{job:<10}{allegiance:<8}{traits_str:<12}{status:<16}"
             lines.append(line)
         
         # Barrels section
@@ -618,6 +678,69 @@ class _DebugWindowInternal:
                 
                 line = f"{char_name:<20} {', '.join(skill_strs)}"
                 lines.append(line)
+        
+        # Memories & Intents section
+        chars_with_memories_or_intents = []
+        for char in self.snapshot['characters']:
+            memories = char.get('memories', [])
+            intent = char.get('intent')
+            if memories or intent:
+                chars_with_memories_or_intents.append((char['name'], memories, intent, char.get('facing', 'down')))
+        
+        if chars_with_memories_or_intents:
+            lines.append("")
+            lines.append("=" * 120)
+            lines.append("MEMORIES & INTENTS")
+            lines.append("=" * 120)
+            
+            for char_name, memories, intent, facing in chars_with_memories_or_intents:
+                lines.append("")
+                lines.append(f">>> {char_name} (facing: {facing}) <<<")
+                
+                # Show intent prominently
+                if intent:
+                    action = intent.get('action', '?')
+                    target = intent.get('target', '?')
+                    reason = intent.get('reason', '?')
+                    started = intent.get('started_tick', '?')
+                    lines.append(f"    INTENT: [{action.upper()}] target={target}, reason={reason}, started=T{started}")
+                
+                # Show memories in a table format
+                if memories:
+                    lines.append(f"    MEMORIES ({len(memories)} total):")
+                    lines.append(f"    {'Type':<16} {'Subject':<18} {'Tick':<8} {'Source':<12} {'Details':<40}")
+                    lines.append(f"    {'-'*14:<16} {'-'*16:<18} {'-'*6:<8} {'-'*10:<12} {'-'*38:<40}")
+                    
+                    # Show all memories (or limit to last 10 per type if too many)
+                    for m in memories[-15:]:  # Show last 15 memories
+                        mtype = m.get('type', '?')
+                        subject = m.get('subject', '?')
+                        # Truncate subject name
+                        if len(str(subject)) > 16:
+                            subject = str(subject)[:14] + '..'
+                        tick = m.get('tick', '?')
+                        source = m.get('source', '?')
+                        
+                        # Build details string
+                        details_parts = []
+                        if m.get('crime_type'):
+                            details_parts.append(f"{m['crime_type']}")
+                        if m.get('victim'):
+                            victim_name = m['victim']
+                            if len(str(victim_name)) > 12:
+                                victim_name = str(victim_name)[:10] + '..'
+                            details_parts.append(f"vic:{victim_name}")
+                        if m.get('reported') is True:
+                            details_parts.append("REPORTED")
+                        elif m.get('reported') is False and mtype in ('crime', 'attacked_by'):
+                            details_parts.append("unreported")
+                        
+                        details_str = ', '.join(details_parts) if details_parts else '-'
+                        
+                        lines.append(f"    {mtype:<16} {subject:<18} T{tick:<6} {source:<12} {details_str}")
+                    
+                    if len(memories) > 15:
+                        lines.append(f"    ... and {len(memories) - 15} older memories")
         
         # Update text widget
         content = '\n'.join(lines)

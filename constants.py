@@ -11,7 +11,6 @@ ZOOM_SPEED = 0.1           # How much zoom changes per scroll
 SPEED_OPTIONS = [1, 2, 10, 20, 100]
 BG_COLOR = "#000000" # UI Background Color
 GRID_COLOR = "#cccccc" # UI Grid Color
-TEXT_COLOR = "white" # UI Text Color
 ROAD_COLOR = "#A89880" # Road cell color
 
 # =============================================================================
@@ -48,7 +47,7 @@ TICKS_PER_YEAR = BASE_TICKS_PER_YEAR * TICK_MULTIPLIER  # 45000 ticks
 # 1.5:1     | 1.5        | A Link to the Past
 # 1.6:1     | 2          | Sephiria
 # 1.8:1     | 1          | Fallout 2
-# 2:1       | 1          | Project Zomboid
+# 2:1       | 1          | Drova: Forsaken Kin
 # 2:1       | 1.5-2      | Children of Morta
 # 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
 # 2.4:1     | 2.25       | Chrono Trigger
@@ -58,7 +57,6 @@ SPRITE_TILES_TALL = 2.0   # How many tiles tall the sprite is
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
 CHARACTER_WIDTH = CHARACTER_HEIGHT / SPRITE_HW_RATIO
-CHARACTER_EYE_POSITION = 0.2  # Eyes at 20% from top of rectangle
 
 DIRECTIONS_CARDINAL = [(-1, 0), (1, 0), (0, -1), (0, 1)] # Cardinal directions
 DIRECTIONS_DIAGONAL = [(-1, -1), (1, -1), (-1, 1), (1, 1)] # Diagonal directions
@@ -66,7 +64,6 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardi
 
 # Movement speed - characters move once every this many ticks
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
-MOVEMENT_TICK_INTERVAL = TICK_MULTIPLIER
 MOVEMENT_SPEED = .8 # Float-based continuous movement: cells per second
 SPRINT_SPEED = 1.3      # Sprint (cells/second)
 
@@ -85,6 +82,19 @@ ADJACENCY_DISTANCE = 1.3 # Within 1.3 cells - can interact from reasonable dista
 COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
 ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
+
+# =============================================================================
+# PERCEPTION SETTINGS (Vision and Hearing)
+# =============================================================================
+# Sound radius - how far sound travels (attacks, screams, etc.)
+SOUND_RADIUS = 1.0  # cells - characters hear events within this range
+
+# Vision settings
+VISION_RANGE = 4.0  # cells - how far characters can see
+VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
+
+# Debug visualization
+SHOW_PERCEPTION_DEBUG = True  # Set to True to show vision cones and sound radii
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS
@@ -115,6 +125,8 @@ SLEEP_START_FRACTION = 2/3  # Sleep starts at 2/3 of the day (latter 1/3)
 # HUNGER AND HEALTH SETTINGS
 # =============================================================================
 MAX_HUNGER = 100
+MAX_FATIGUE = 100
+MAX_STAMINA = 100
 HUNGER_DECAY = 100 / TICKS_PER_DAY  # lose all hunger in 1 day (same rate, more ticks)
 HUNGER_CRITICAL = 40  # always seek wheat at or below this
 HUNGER_CHANCE_THRESHOLD = 60  # chance to seek wheat between CRITICAL and this
@@ -131,8 +143,9 @@ STARVATION_FREEZE_HEALTH = 20  # freeze in place when health drops to this while
 # =============================================================================
 # Crime intensity (affects witness/reaction/pursuit range)
 # The intensity IS the range in cells
-CRIME_INTENSITY_MURDER = 17  # 17 cells (2.5x original)
-CRIME_INTENSITY_THEFT = 10   # 10 cells (2.5x original)
+CRIME_INTENSITY_MURDER = 17
+CRIME_INTENSITY_ASSAULT = 15
+CRIME_INTENSITY_THEFT = 10
 
 # Theft timing (tick-based, scales with game speed)
 THEFT_PATIENCE_TICKS = 60 * TICK_MULTIPLIER  # 60 seconds at 1x speed - how long to wait for crops
@@ -141,6 +154,12 @@ THEFT_COOLDOWN_TICKS = 30 * TICK_MULTIPLIER  # 30 seconds at 1x speed - cooldown
 # Flee behavior
 FLEE_DEFENDER_RANGE = 20  # Always run to defenders within this range (cells)
 FLEE_TIMEOUT_TICKS = 30 * TICK_MULTIPLIER  # Max time to flee without a defender (30 seconds)
+FLEE_SAFE_DISTANCE = 10.0  # Stop fleeing when this far from attacker (cells)
+FLEE_DANGER_DISTANCE = 6.0  # Start fleeing again if attacker gets this close (cells)
+FLEE_DISTANCE_DIVISOR = 2  # Flee distance = crime intensity / this value
+
+# Reporting crimes
+REPORT_ADJACENCY_DISTANCE = 1  # Must be within this distance to report crimes to soldiers
 
 # =============================================================================
 # SKILL DEFINITIONS
@@ -149,8 +168,7 @@ FLEE_TIMEOUT_TICKS = 30 * TICK_MULTIPLIER  # Max time to flee without a defender
 # All characters have 0-100 points in each skill
 SKILLS = {
     "strength": {"name": "Strength", "category": "combat"}, # warrior
-    "endurance": {"name": "Strength", "category": "combat"}, # warrior
-    "stealth": {"name": "Stealth", "category": "combat"}, # thief
+    "arobics": {"name": "Strength", "category": "combat"}, # warrior
     "agility": {"name": "Agility", "category": "combat"}, # warrior
     "weapon_mastery": {"name": "Weapon Mastery", "category": "combat"}, # warrior
     "mercantile": {"name": "Mercantile", "category": "benign"}, # vendor
@@ -324,17 +342,17 @@ JOB_TIERS = {
 
     # TIER 4 — COMFORTABLE SKILLED WORK
     "Doctor": {"tier": 3}, # Knightable
-    "Carpenter": {"tier": 3}, # Knightable
-    "Tailor": {"tier": 3}, # Knightable
-    "Artist": {"tier": 3}, # Knightable
-    "Blacksmith": {"tier": 3}, # Knightable
+    "Carpenter": {"tier": 3}, # Knightable (commissions)
+    "Tailor": {"tier": 3}, # Knightable (commissions)
+    "Artist": {"tier": 3}, # Knightable (commissions)
+    "Blacksmith": {"tier": 3}, # Knightable (commissions)
     "Servant": {"tier": 3},
     
     # TIER 5 — RESPECTABLE BUT HARDER LABOR
-    "Hunter": {"tier": 5},
-    "Fisherman": {"tier": 5},
-    "Shepherd": {"tier": 5},
-    "Lumberjack": {"tier": 5},
+    "Hunter": {"tier": 5}, # son of (bow)
+    "Fisherman": {"tier": 5}, # son of (fishing pole)
+    "Logger": {"tier": 5}, # son of (axe, strength)
+    "Herder": {"tier": 5}, # son of (whip, dagger)
     "Miner": {"tier": 5},
     "Mercenary": {"tier": 5}, # Knightable
     "Bard": {"tier": 5}, # Knightable
@@ -363,20 +381,6 @@ STEWARD_TAX_AMOUNT = 90
 SOLDIER_WHEAT_PAYMENT = 6
 TAX_GRACE_PERIOD = TICKS_PER_DAY * 2 // 5  # 10 real minutes before steward goes to collect
 ALLEGIANCE_WHEAT_TIMEOUT = 30 * TICK_MULTIPLIER  # How long until soldiers quit
-
-# =============================================================================
-# AREA ROLES
-# =============================================================================
-# Standard roles that areas can have - game logic uses these roles, not area names
-# Scenarios assign roles to their areas
-AREA_ROLES = {
-    "village": "A settlement/economic hub",
-    "market": "Where trading happens, in a village",
-    "military_housing": "Where soldiers live and sleep, in a village",
-    "farmhouse": "Where a farmer with a farm lives",
-    "farm": "Where wheat is grown, part of a village",
-    "encampment": "No purpose"
-}
 
 
 # Soldier — The classic route. Valor in battle, knighted on the field.

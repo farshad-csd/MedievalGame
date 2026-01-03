@@ -7,12 +7,26 @@ Design:
 - Jobs are stored as strings (e.g., 'Farmer', 'Soldier'); behavior is in jobs.py
 - Player is just a Character with is_player=True (enables input controls)
 - Implements dict-like access for backward compatibility with existing code
+
+Memory System:
+- Each character has a list of memories (things they've seen, experienced, learned)
+- Memories replace scattered flags like robbery_target, flee_from, known_crimes
+- Current intent (what to do this tick) is derived from memories
+
+Memory Types:
+- 'crime': witnessed someone commit a crime
+- 'attacked_by': someone attacked me
+- 'helped_by': someone helped me
+- 'home_of': I know where someone lives
+- 'sighting': I saw someone at a location
+- 'location': I know about a place (market, farm, camp, etc.)
+- 'object': I know about an object (barrel, bed, etc.) - future use
 """
 
 import time  # Used for attack animation timing (visual only, doesn't scale with game speed)
 import math
 from constants import (
-    MAX_HUNGER, INVENTORY_SLOTS, ITEMS, SKILLS,
+    MAX_HUNGER, MAX_FATIGUE, MAX_STAMINA, INVENTORY_SLOTS, ITEMS, SKILLS,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     BREAD_PER_BITE, STARVATION_THRESHOLD,
     ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS
@@ -43,31 +57,53 @@ class Character:
         # Identity
         self.name = name
         self._is_player = template.get('is_player', False)
-        
-        # Static traits (from template, don't change)
-        self._attractiveness = template.get('attractiveness', 5)
-        self._confidence = template.get('confidence', 5)
-        self._cunning = template.get('cunning', 5)
-        
+
         # Position (float-based for smooth movement)
         # Characters spawn at CENTER of their starting cell
         self.x = float(x) + 0.5
         self.y = float(y) + 0.5
-        
         # Velocity for continuous movement (cells per second)
         self.vx = 0.0
         self.vy = 0.0
-        
         # Hitbox dimensions
         self.width = CHARACTER_WIDTH
         self.height = CHARACTER_HEIGHT
+        # Visual state
+        self.facing = 'down'
+        self.is_sprinting = False
+        # Animation tracking
+        self._last_anim_x = self.x
+        self._last_anim_y = self.y
+        # Attack animation state
+        self.attack_animation_start = None
+        self.attack_direction = None
+        self.last_attack_tick = 0
+        
+
         
         # Core stats (mutable)
         self.age = template.get('starting_age', 25)
         self.health = 100
         self.hunger = MAX_HUNGER
+        self.fatigue = MAX_FATIGUE
+        self.stamina = MAX_STAMINA
         self.morality = template.get('morality', 5)  # Mutable copy
         
+        # Starvation state
+        self.is_starving = False
+        self.is_frozen = False  # True when starving + health <= 20
+        self.starvation_health_lost = 0
+        self.ticks_starving = 0
+
+        # Sleep state
+        self.is_sleeping = False
+        self.camp_position = None  # (x, y) of camp
+
+        # Static traits (from template, don't change)
+        self._attractiveness = template.get('attractiveness', 5)
+        self._confidence = template.get('confidence', 5)
+        self._cunning = template.get('cunning', 5)
+
         # Skills (0-100 for each)
         self.skills = {skill_id: 0 for skill_id in SKILLS}
         for skill_id, value in template.get('starting_skills', {}).items():
@@ -84,41 +120,38 @@ class Character:
         self.allegiance = template.get('starting_allegiance')
         self.home = home_area
         
-        # Combat/social state
-        self.robbery_target = None
-        self.theft_target = None  # Farm cell being targeted for theft
-        self.theft_waiting = False  # Waiting at farm for crops to grow
-        self.flee_from = None
-        self.flee_start_tick = None  # When fleeing started (for timeout)
-        self.reported_criminal_to = set()  # Track defenders we've reported current threat to
-        self.is_murderer = False
-        self.is_thief = False
-        self.is_aggressor = False
+        # =====================================================================
+        # MEMORY SYSTEM
+        # =====================================================================
+        # List of memory dicts - see add_memory() for structure
+        self.memories = []
         
-        # Crime knowledge
-        self.known_crimes = {}  # {criminal_name: [{'intensity': int, 'allegiance': str/None}, ...]}
-        self.unreported_crimes = set()  # {(criminal_name, intensity, crime_allegiance), ...}
+        # Current intent - what this character has decided to do THIS tick
+        # Structure: {'action': str, 'target': Any, 'reason': memory or str, 'started_tick': int}
+        # Actions: 'attack', 'flee', 'follow', 'goto', 'stay_near', None
+        self.intent = None
+
+        # Movement goal - where this character is trying to go
+        # Set by job.decide(), used by movement system
+        self.goal = None
         
-        # Starvation state
-        self.is_starving = False
-        self.is_frozen = False  # True when starving + health <= 20
-        self.starvation_health_lost = 0
-        self.ticks_starving = 0
         
-        # Sleep state
-        self.is_sleeping = False
-        self.camp_position = None  # (x, y) of camp
+        # Theft state (ongoing goal-directed behavior, not a reaction)
+        self.theft_target = None  # Farm cell (x,y) being targeted
+        self.theft_waiting = False  # Waiting at farm for crops
+        self.theft_start_tick = None  # When attempt started
         
-        # Job-specific state
-        self.tax_due_tick = None
-        self.tax_late_ticks = 0
-        self.tax_collection_target = None
-        self.tax_paid_this_cycle = False
-        self.paid_this_cycle = False
-        self.soldier_stopped = False
-        self.asked_steward_for_wheat = False
-        self.requested_wheat = False
-        self.wheat_seek_ticks = 0
+
+        # Idle/wandering state
+        self.idle_state = 'choosing'
+        self.idle_destination = None
+        self.idle_wait_ticks = 0
+        self.idle_is_idle = False
+
+        # Squeeze/pathfinding state
+        self.blocked_ticks = 0
+        self.squeeze_direction = 0
+
         
         # Patrol state (soldiers)
         self.patrol_target = None
@@ -127,34 +160,7 @@ class Character:
         self.patrol_state = None
         self.patrol_wait_ticks = 0
         self.is_patrolling = False
-        
-        # Movement goal - where this character is trying to go
-        # Set by job.decide(), used by movement system
-        self.goal = None
-        
-        # Idle/wandering state
-        self.idle_state = 'choosing'
-        self.idle_destination = None
-        self.idle_wait_ticks = 0
-        self.idle_is_idle = False
-        
-        # Squeeze/pathfinding state
-        self.blocked_ticks = 0
-        self.squeeze_direction = 0
-        
-        # Attack animation state
-        self.attack_animation_start = None
-        self.attack_direction = None
-        self.last_attack_tick = 0
-        
-        # Visual state
-        self.facing = 'down'
-        self.is_sprinting = False
-        
-        # Animation tracking
-        self._last_anim_x = self.x
-        self._last_anim_y = self.y
-        
+    
         # Logging flags
         self._idle_logged = False
         self._work_logged = False
@@ -193,10 +199,6 @@ class Character:
         """Get attractiveness trait (static)."""
         return self._attractiveness
     
-    # =========================================================================
-    # DISPLAY HELPERS
-    # =========================================================================
-    
     def get_display_name(self):
         """Get short display name (first name only)."""
         return self.name.split()[0]
@@ -214,6 +216,167 @@ class Character:
         return 0
     
     # =========================================================================
+    # MEMORY SYSTEM
+    # =========================================================================
+    
+    def add_memory(self, memory_type, subject, tick, location=None, intensity=5,
+                   source='witnessed', reported=False, **details):
+        """Add a memory to this character.
+        
+        Args:
+            memory_type: Type of memory ('crime', 'attacked_by', 'helped_by', 
+                        'home_of', 'sighting', 'location', 'object')
+            subject: What/who this memory is about (Character, position tuple, 
+                    object ref, or string)
+            tick: Game tick when this was learned
+            location: (x, y) where it happened/was learned (optional)
+            intensity: How significant (1-20), affects reaction range
+            source: How we learned this ('witnessed', 'told_by', 'experienced', 'discovered')
+            reported: Whether we've told someone about this (for crimes)
+            **details: Type-specific extra data
+        
+        Returns:
+            The created memory dict
+        """
+        memory = {
+            'type': memory_type,
+            'subject': subject,
+            'tick': tick,
+            'location': location,
+            'intensity': intensity,
+            'source': source,
+            'reported': reported,
+            'details': details
+        }
+        self.memories.append(memory)
+        return memory
+    
+    def get_memories(self, memory_type=None, subject=None, source=None, 
+                     unreported_only=False, min_intensity=None):
+        """Query memories with optional filters.
+        
+        Args:
+            memory_type: Filter by type (str or list of str)
+            subject: Filter by subject (exact match)
+            source: Filter by source ('witnessed', 'told_by', etc.)
+            unreported_only: Only return memories with reported=False
+            min_intensity: Only return memories with intensity >= this
+        
+        Returns:
+            List of matching memory dicts
+        """
+        results = self.memories
+        
+        if memory_type is not None:
+            if isinstance(memory_type, str):
+                results = [m for m in results if m['type'] == memory_type]
+            else:
+                # List of types
+                results = [m for m in results if m['type'] in memory_type]
+        
+        if subject is not None:
+            results = [m for m in results if m['subject'] is subject]
+        
+        if source is not None:
+            results = [m for m in results if m.get('source') == source]
+        
+        if unreported_only:
+            results = [m for m in results if not m.get('reported', False)]
+        
+        if min_intensity is not None:
+            results = [m for m in results if m.get('intensity', 0) >= min_intensity]
+        
+        return results
+    
+    def has_memory_of(self, memory_type, subject):
+        """Check if we have any memory of this type about this subject."""
+        return len(self.get_memories(memory_type=memory_type, subject=subject)) > 0
+    
+    def get_unreported_crimes(self):
+        """Get all crime memories that haven't been reported yet."""
+        return self.get_memories(memory_type='crime', unreported_only=True)
+    
+    def get_unreported_crimes_about(self, criminal):
+        """Get unreported crime memories about a specific criminal."""
+        return self.get_memories(memory_type='crime', subject=criminal, unreported_only=True)
+    
+    def forget_memories_about(self, subject):
+        """Remove all memories about a subject (e.g., when they die)."""
+        self.memories = [m for m in self.memories if m['subject'] is not subject]
+        
+        # Clear intent if it was about this subject
+        if self.intent and self.intent.get('target') is subject:
+            self.intent = None
+    
+    def clear_intent(self):
+        """Clear current intent."""
+        self.intent = None
+    
+    def set_intent(self, action, target, reason=None, started_tick=None):
+        """Set current intent.
+        
+        Args:
+            action: 'attack', 'flee', 'follow', 'goto', 'stay_near'
+            target: Character, position, or other target
+            reason: Memory or string explaining why
+            started_tick: When this intent started (for timeouts)
+        """
+        self.intent = {
+            'action': action,
+            'target': target,
+            'reason': reason,
+            'started_tick': started_tick
+        }
+    
+    def get_active_attacker(self, current_tick, alive_characters, max_ticks_ago=50, max_distance=8.0):
+        """Find someone actively attacking me right now.
+        
+        Checks for recent attacked_by memories where attacker is still nearby.
+        
+        Args:
+            current_tick: Current game tick
+            alive_characters: List of alive characters
+            max_ticks_ago: How recent the attack must be
+            max_distance: How close attacker must still be
+        
+        Returns:
+            Attacker Character or None
+        """
+        alive_set = set(alive_characters)
+        
+        for m in self.get_memories(memory_type='attacked_by'):
+            # Recent?
+            if current_tick - m['tick'] > max_ticks_ago:
+                continue
+            
+            attacker = m['subject']
+            
+            # Still alive?
+            if attacker not in alive_set:
+                continue
+            
+            # Still nearby?
+            dist = math.sqrt((self.x - attacker.x)**2 + (self.y - attacker.y)**2)
+            if dist < max_distance:
+                return attacker
+        
+        return None
+    
+    def has_committed_crime(self, crime_type=None):
+        """Check if this character has committed a crime (has crime memory about self).
+        
+        Note: This checks our OWN memory of committing crimes, not what others know.
+        Use this for self-knowledge (e.g., "I know I'm a thief").
+        
+        For what others know, check their memories.
+        """
+        # We store self-knowledge of our own crimes as 'committed_crime' type
+        memories = self.get_memories(memory_type='committed_crime')
+        if crime_type:
+            memories = [m for m in memories if m['details'].get('crime_type') == crime_type]
+        return len(memories) > 0
+    
+    # =========================================================================
     # INVENTORY MANAGEMENT
     # =========================================================================
     
@@ -229,73 +392,50 @@ class Character:
         
         # Add wheat slots (stacks of ITEMS["wheat"]["stack_size"])
         remaining_wheat = wheat
+        stack_size = ITEMS["wheat"]["stack_size"]
         while remaining_wheat > 0 and slot_idx < INVENTORY_SLOTS:
-            stack_amount = min(remaining_wheat, ITEMS["wheat"]["stack_size"])
-            inventory[slot_idx] = {'type': 'wheat', 'amount': stack_amount}
-            remaining_wheat -= stack_amount
+            stack = min(remaining_wheat, stack_size)
+            inventory[slot_idx] = {'type': 'wheat', 'amount': stack}
+            remaining_wheat -= stack
             slot_idx += 1
         
         return inventory
     
     def get_item(self, item_type):
-        """Get total amount of an item type in inventory."""
+        """Get total amount of an item type across all inventory slots."""
         total = 0
         for slot in self.inventory:
             if slot and slot['type'] == item_type:
                 total += slot['amount']
         return total
     
-    def can_add_item(self, item_type, amount=1):
-        """Check if can add this much of an item.
-        
-        Money: just needs any slot (existing money slot or empty).
-        Stackable items (wheat, bread): checks stack space.
-        """
-        # Money is special - unlimited per slot
-        if item_type == 'money':
-            for slot in self.inventory:
-                if slot is None or slot['type'] == 'money':
-                    return True
-            return False
-        
-        # Stackable items
-        stack_size = ITEMS.get(item_type, {}).get("stack_size", 1)
-        space = 0
-        for slot in self.inventory:
-            if slot is None:
-                space += stack_size
-            elif slot['type'] == item_type and slot['amount'] < stack_size:
-                space += stack_size - slot['amount']
-        return space >= amount
+    def can_add_item(self, item_type, amount):
+        """Check if inventory can hold this amount of an item."""
+        return self.get_item_space(item_type) >= amount
     
     def add_item(self, item_type, amount):
-        """Add item to inventory. Returns amount actually added.
-        
-        Money: adds to existing money slot or creates one.
-        Stackable items: fills existing stacks first, then empty slots.
-        """
+        """Add item to inventory. Returns amount actually added."""
         if amount <= 0:
             return 0
         
-        # Money is special - unlimited per slot
+        # Money handling - unlimited stacking
         if item_type == 'money':
-            # Find existing money slot
             for slot in self.inventory:
                 if slot and slot['type'] == 'money':
                     slot['amount'] += amount
                     return amount
-            # Find empty slot
+            # No money slot exists, create one
             for i, slot in enumerate(self.inventory):
                 if slot is None:
                     self.inventory[i] = {'type': 'money', 'amount': amount}
                     return amount
-            return 0
+            return 0  # No space
         
         # Stackable items
         stack_size = ITEMS.get(item_type, {}).get("stack_size", 1)
         remaining = amount
         
-        # First, fill existing stacks of this type
+        # First, fill existing stacks
         for slot in self.inventory:
             if slot and slot['type'] == item_type and slot['amount'] < stack_size:
                 can_add = stack_size - slot['amount']
@@ -458,24 +598,6 @@ class Character:
         if 'right' in facing:
             return 'right'
         return 'down'
-    
-    def get_attack_direction_vector(self):
-        """Get unit direction vector for current facing.
-        
-        Returns:
-            (dx, dy) tuple
-        """
-        vectors = {
-            'up': (0, -1),
-            'down': (0, 1),
-            'left': (-1, 0),
-            'right': (1, 0),
-            'up-left': (-0.707, -0.707),
-            'up-right': (0.707, -0.707),
-            'down-left': (-0.707, 0.707),
-            'down-right': (0.707, 0.707),
-        }
-        return vectors.get(self.facing, (0, 1))
     
     # =========================================================================
     # DICT-LIKE ACCESS (backward compatibility)

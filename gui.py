@@ -29,7 +29,8 @@ from constants import (
     BG_COLOR, GRID_COLOR, ROAD_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
-    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED
+    DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
+    SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE, SHOW_PERCEPTION_DEBUG
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
@@ -722,6 +723,10 @@ class BoardGUI:
         # Draw camps
         self._draw_camps()
         
+        # Draw perception debug (sound radii and vision cones) - under characters
+        if SHOW_PERCEPTION_DEBUG:
+            self._draw_perception_debug()
+        
         # Draw characters
         self._draw_characters()
         
@@ -981,6 +986,106 @@ class BoardGUI:
                 pygame.draw.rect(self.screen, (0, 0, 0),
                                (hp_bar_x, hp_bar_y, hp_bar_width, hp_bar_height), 1)
     
+    def _draw_perception_debug(self):
+        """Draw perception debug visualization - sound radii and vision cones.
+        
+        Shows transparent red overlays for:
+        - Sound radius: circle around each character
+        - Vision cone: pie slice in facing direction
+        """
+        cell_size = self._cam_cell_size
+        
+        # Create a transparent surface for drawing
+        # We'll draw to main screen with alpha blending
+        
+        for char in self.state.characters:
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Get character screen position
+            screen_x, screen_y = self._world_to_screen(char.x, char.y)
+            
+            # === Draw Sound Radius (circle) ===
+            sound_radius_pixels = int(SOUND_RADIUS * cell_size)
+            
+            # Create a surface with per-pixel alpha for the circle
+            circle_surface = pygame.Surface((sound_radius_pixels * 2, sound_radius_pixels * 2), pygame.SRCALPHA)
+            # Draw filled circle with transparency (RGBA - red with alpha)
+            pygame.draw.circle(circle_surface, (255, 0, 0, 40), 
+                             (sound_radius_pixels, sound_radius_pixels), sound_radius_pixels)
+            # Draw circle outline
+            pygame.draw.circle(circle_surface, (255, 0, 0, 80), 
+                             (sound_radius_pixels, sound_radius_pixels), sound_radius_pixels, 1)
+            
+            # Blit the circle centered on character
+            self.screen.blit(circle_surface, 
+                           (int(screen_x - sound_radius_pixels), int(screen_y - sound_radius_pixels)))
+            
+            # === Draw Vision Cone ===
+            vision_radius_pixels = int(VISION_RANGE * cell_size)
+            
+            # Get facing direction
+            facing = char.get('facing', 'down')
+            facing_vectors = {
+                'up': (0, -1),
+                'down': (0, 1),
+                'left': (-1, 0),
+                'right': (1, 0),
+                'up-left': (-0.707, -0.707),
+                'up-right': (0.707, -0.707),
+                'down-left': (-0.707, 0.707),
+                'down-right': (0.707, 0.707),
+            }
+            face_x, face_y = facing_vectors.get(facing, (0, 1))
+            
+            # Calculate the angle of facing direction (in radians, 0 = right, counter-clockwise)
+            facing_angle = math.atan2(-face_y, face_x)  # Negative y because screen y is inverted
+            
+            # Half angle of the cone
+            half_angle = math.radians(VISION_CONE_ANGLE / 2)
+            
+            # Calculate the two edge points of the cone
+            angle1 = facing_angle - half_angle
+            angle2 = facing_angle + half_angle
+            
+            # Create points for the pie slice (vision cone)
+            # Start at character position, go to two arc endpoints
+            num_arc_points = 20  # Smoothness of the arc
+            points = [(int(screen_x), int(screen_y))]  # Center point
+            
+            for i in range(num_arc_points + 1):
+                t = i / num_arc_points
+                angle = angle1 + t * (angle2 - angle1)
+                px = screen_x + math.cos(angle) * vision_radius_pixels
+                py = screen_y - math.sin(angle) * vision_radius_pixels  # Negative because screen y is inverted
+                points.append((int(px), int(py)))
+            
+            # Draw the vision cone if we have enough points
+            if len(points) >= 3:
+                # Create a surface for the cone
+                # Need to find bounding box
+                min_x = min(p[0] for p in points)
+                max_x = max(p[0] for p in points)
+                min_y = min(p[1] for p in points)
+                max_y = max(p[1] for p in points)
+                
+                width = max_x - min_x + 1
+                height = max_y - min_y + 1
+                
+                if width > 0 and height > 0:
+                    cone_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+                    
+                    # Offset points to surface coordinates
+                    offset_points = [(p[0] - min_x, p[1] - min_y) for p in points]
+                    
+                    # Draw filled polygon with transparency
+                    pygame.draw.polygon(cone_surface, (255, 100, 100, 30), offset_points)
+                    # Draw outline
+                    pygame.draw.polygon(cone_surface, (255, 50, 50, 60), offset_points, 1)
+                    
+                    self.screen.blit(cone_surface, (min_x, min_y))
+
     def _draw_death_animations(self):
         """Draw death animations for characters that have died.
         

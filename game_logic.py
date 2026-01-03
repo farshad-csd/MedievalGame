@@ -20,8 +20,9 @@ from constants import (
     TRADE_COOLDOWN,
     STEWARD_TAX_INTERVAL, STEWARD_TAX_AMOUNT, SOLDIER_WHEAT_PAYMENT, TAX_GRACE_PERIOD,
     ALLEGIANCE_WHEAT_TIMEOUT, TICKS_PER_DAY, TICKS_PER_YEAR,
-    CRIME_INTENSITY_MURDER, CRIME_INTENSITY_THEFT,
+    CRIME_INTENSITY_MURDER, CRIME_INTENSITY_ASSAULT, CRIME_INTENSITY_THEFT,
     THEFT_PATIENCE_TICKS, THEFT_COOLDOWN_TICKS,
+    FLEE_DISTANCE_DIVISOR,
     SLEEP_START_FRACTION,
     MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
@@ -34,7 +35,8 @@ from constants import (
     WHEAT_TO_BREAD_RATIO,
     BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
-    PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE
+    PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE,
+    SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE
 )
 from scenario_world import SIZE
 from scenario_characters import CHARACTER_TEMPLATES
@@ -135,12 +137,8 @@ class GameLogic:
             self.state.log_action(f"{attacker_name} swings sword (missed)")
             return []
         
-        # Determine if attacker is a criminal
-        attacker_is_criminal = (
-            attacker.get('is_aggressor', False) or 
-            attacker.get('is_murderer', False) or 
-            attacker.get('is_thief', False)
-        )
+        # Determine if attacker is a known criminal to anyone
+        attacker_is_criminal = self.is_known_criminal(attacker)
         
         # Deal damage to all targets
         for target in targets_hit:
@@ -151,25 +149,30 @@ class GameLogic:
             target.health -= damage
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
-            # Set attacker's robbery_target so victim can detect and respond
-            # Only set if attacker doesn't already have a target (first hit)
-            if attacker.get('robbery_target') is None and target.health > 0:
-                attacker.robbery_target = target
+            # Target remembers being attacked
+            self.remember_attack(target, attacker, damage)
+            
+            # Update attacker's intent if not already attacking someone
+            if attacker.intent is None or attacker.intent.get('action') != 'attack':
+                attacker.set_intent('attack', target, reason='initiated_attack', started_tick=self.state.ticks)
             
             # Check if target was a criminal
-            target_was_criminal = (
-                target.get('is_aggressor', False) or 
-                target.get('is_murderer', False) or 
-                target.get('is_thief', False)
-            )
+            target_was_criminal = self.is_known_criminal(target)
             
-            # If attacking an innocent, mark as aggressor
-            if not target_was_criminal and not attacker_is_criminal:
-                attacker.is_aggressor = True
-                attacker_is_criminal = True
-                # Witness non-lethal attack if target survives
+            # If attacking an innocent, this is a crime
+            if not target_was_criminal:
+                # Attacker records they committed a crime (only once)
+                if not attacker_is_criminal:
+                    attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                       location=(attacker.x, attacker.y),
+                                       intensity=CRIME_INTENSITY_ASSAULT,
+                                       source='self',
+                                       crime_type='assault', victim=target)
+                    attacker_is_criminal = True
+                
+                # Witness EVERY attack against an innocent (not just first)
                 if target.health > 0:
-                    self.witness_murder(attacker, target, is_lethal=False)
+                    self.witness_crime(attacker, target, 'assault')
             
             # Handle death
             if target.health <= 0:
@@ -177,22 +180,31 @@ class GameLogic:
                     # Justified kill
                     self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
                 else:
-                    attacker.is_murderer = True
-                    self.witness_murder(attacker, target, is_lethal=True)
+                    # Murder - record and witness
+                    attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                       location=(attacker.x, attacker.y),
+                                       intensity=CRIME_INTENSITY_MURDER,
+                                       source='self',
+                                       crime_type='murder', victim=target)
+                    self.witness_crime(attacker, target, 'murder')
                 
                 # Transfer items to attacker
                 attacker.transfer_all_items_from(target)
                 
-                # Clear robbery_target if this was the target
-                if attacker.get('robbery_target') == target:
-                    attacker.robbery_target = None
+                # Clear intent if this was the target
+                if attacker.intent and attacker.intent.get('target') is target:
+                    attacker.clear_intent()
+        
+        # Broadcast violence to nearby characters (regardless of justification)
+        for target in targets_hit:
+            self.broadcast_violence(attacker, target)
         
         return targets_hit
     
     def resolve_melee_attack(self, attacker, target):
         """Resolve a direct melee attack against a specific target.
         
-        Used by NPCs who have a specific target (robbery, combat).
+        Used by NPCs who have a specific target (combat, murder intent).
         
         Args:
             attacker: Character performing the attack
@@ -224,17 +236,27 @@ class GameLogic:
         target.health -= damage
         self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
         
-        # Check criminal status
-        attacker_is_criminal = (
-            attacker.get('is_aggressor', False) or 
-            attacker.get('is_murderer', False) or 
-            attacker.get('is_thief', False)
-        )
-        target_was_criminal = (
-            target.get('is_aggressor', False) or 
-            target.get('is_murderer', False) or 
-            target.get('is_thief', False)
-        )
+        # Target remembers being attacked
+        self.remember_attack(target, attacker, damage)
+        
+        # Check criminal status via memories
+        attacker_is_criminal = self.is_known_criminal(attacker)
+        target_was_criminal = self.is_known_criminal(target)
+        
+        # If attacking an innocent, this is a crime
+        if not target_was_criminal:
+            # Attacker records they committed a crime (only once)
+            if not attacker_is_criminal:
+                attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                   location=(attacker.x, attacker.y),
+                                   intensity=CRIME_INTENSITY_ASSAULT,
+                                   source='self',
+                                   crime_type='assault', victim=target)
+                attacker_is_criminal = True
+            
+            # Witness EVERY attack against an innocent (not just first)
+            if target.health > 0:
+                self.witness_crime(attacker, target, 'assault')
         
         # Handle death
         if target.health <= 0:
@@ -243,11 +265,20 @@ class GameLogic:
             if not attacker_is_criminal and target_was_criminal:
                 self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
             else:
-                attacker.is_murderer = True
-                self.witness_murder(attacker, target, is_lethal=True)
+                # Murder - record and witness
+                attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                   location=(attacker.x, attacker.y),
+                                   intensity=CRIME_INTENSITY_MURDER,
+                                   source='self',
+                                   crime_type='murder', victim=target)
+                self.witness_crime(attacker, target, 'murder')
             
             # Transfer items
             attacker.transfer_all_items_from(target)
+        
+        # Broadcast violence to nearby characters (regardless of justification)
+        if result['hit']:
+            self.broadcast_violence(attacker, target)
         
         return result
     
@@ -500,341 +531,7 @@ class GameLogic:
         
         return False
     
-    # =========================================================================
-    # STEWARD / TAX SYSTEM
-    # =========================================================================
-    
-    def steward_has_wheat(self):
-        """Check if barracks barrel has wheat to pay soldiers"""
-        barracks_barrel = self.state.interactables.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-        return barracks_barrel is not None and barracks_barrel.get_item('wheat') > 0
-    
-    def get_steward_wheat_target(self, steward):
-        """Calculate how much wheat steward wants to stockpile.
-        Target: enough to feed all villagers for 2 days.
-        (~3 wheat per person per day to maintain hunger)
-        """
-        allegiance = steward.get('allegiance')
-        village_mouths = self.state.get_allegiance_count(allegiance) if allegiance else 0
-        wheat_per_person_per_day = 3
-        days_to_stockpile = 2
-        return village_mouths * wheat_per_person_per_day * days_to_stockpile
-    
-    def steward_needs_to_buy_wheat(self, steward):
-        """Check if barracks barrel wheat supply is below target"""
-        target = self.get_steward_wheat_target(steward)
-        barracks_barrel = self.state.interactables.get_barrel_by_home(self.state.get_area_by_role('military_housing'))
-        if not barracks_barrel:
-            return True
-        return barracks_barrel.get_item('wheat') < target
-    
-    # =========================================================================
-    # TRADING SYSTEM
-    # =========================================================================
-    # Unified vendor system - all characters buy goods from vendors
-    # Vendors are defined by VENDOR_GOODS mapping (job -> [goods_types])
-    
-    def get_vendors_selling(self, goods_type):
-        """Get list of all characters who sell a specific goods type."""
-        vendors = []
-        for char in self.state.characters:
-            job = char.get('job')
-            if job and job in VENDOR_GOODS:
-                if goods_type in VENDOR_GOODS[job]:
-                    vendors.append(char)
-        return vendors
-    
-    def is_vendor_of(self, char, goods_type):
-        """Check if a character sells a specific goods type."""
-        job = char.get('job')
-        if not job or job not in VENDOR_GOODS:
-            return False
-        return goods_type in VENDOR_GOODS[job]
-    
-    def find_nearest_vendor(self, char, goods_type):
-        """Find the nearest vendor selling a specific goods type."""
-        best_vendor = None
-        best_dist = float('inf')
-        
-        for vendor in self.get_vendors_selling(goods_type):
-            if vendor == char:  # Can't buy from self
-                continue
-            dist = self.state.get_distance(char, vendor)
-            if dist < best_dist:
-                best_dist = dist
-                best_vendor = vendor
-        
-        return best_vendor
-    
-    def find_adjacent_vendor(self, char, goods_type):
-        """Find an adjacent vendor selling a specific goods type."""
-        for vendor in self.state.characters:
-            if vendor != char and self.is_vendor_of(vendor, goods_type):
-                if self.is_adjacent(char, vendor):
-                    return vendor
-        return None
-    
-    def find_willing_vendor(self, char, goods_type):
-        """Find the nearest vendor willing to trade this goods type."""
-        best_vendor = None
-        best_dist = float('inf')
-        
-        for vendor in self.get_vendors_selling(goods_type):
-            if vendor == char:
-                continue
-            if self.vendor_willing_to_trade(vendor, char, goods_type):
-                dist = self.state.get_distance(char, vendor)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_vendor = vendor
-        
-        return best_vendor
-    
-    def any_valid_vendor_exists(self, char, goods_type):
-        """Check if any vendor exists who could potentially sell to this character."""
-        char_allegiance = char.get('allegiance')
-        
-        for vendor in self.get_vendors_selling(goods_type):
-            if vendor == char:
-                continue
-            vendor_allegiance = vendor.get('allegiance')
-            # Can trade if either has no allegiance or allegiances match
-            if char_allegiance is None or vendor_allegiance is None:
-                return True
-            if char_allegiance == vendor_allegiance:
-                return True
-        return False
-    
-    def get_vendor_sellable_goods(self, vendor, goods_type):
-        """Calculate how much of a goods type the vendor can sell.
-        
-        For farmers selling wheat, uses tax-aware calculation.
-        For other vendors, returns entire stock.
-        """
-        job = vendor.get('job')
-        
-        # Farmers have special tax-aware wheat selling logic
-        if job == 'Farmer' and goods_type == 'wheat':
-            return self._get_farmer_sellable_wheat(vendor)
-        
-        # For other vendors, can sell entire stock
-        return int(self.get_goods_amount(vendor, goods_type))
-    
-    def _get_farmer_sellable_wheat(self, farmer):
-        """Calculate how much wheat a farmer can sell while staying on track for taxes.
-        
-        Logic: sellable = current_wheat + expected_future_production - tax_target
-        Internal helper - use get_vendor_sellable_goods(vendor, 'wheat') instead.
-        """
-        # Get current wheat (inventory + barrel)
-        farmer_wheat = farmer.get_item('wheat')
-        farm_barrel = self.state.interactables.get_barrel_by_home(farmer.get('home'))
-        barrel_wheat = farm_barrel.get_item('wheat') if farm_barrel else 0
-        current_wheat = int(farmer_wheat + barrel_wheat)
-        
-        # Calculate expected production before tax is due
-        expected_production = self._get_farmer_expected_production(farmer)
-        
-        # No tax constraint - can sell all wheat
-        if expected_production >= 999999:
-            return current_wheat
-        
-        # Tax target with buffer for interruptions (1.5x)
-        tax_target = (STEWARD_TAX_AMOUNT * 3) // 2
-        
-        # Sellable = what we have + what we'll produce - what we need for taxes
-        sellable = current_wheat + expected_production - tax_target
-        
-        # Can't sell more than current stock
-        return max(0, min(sellable, current_wheat))
-    
-    def _get_farmer_expected_production(self, farmer):
-        """Estimate how much wheat the farmer can produce before tax is due.
-        Internal helper for tax calculations.
-        """
-        # Only farmers with an allegiance owe tax
-        if not farmer.get('allegiance'):
-            return 999999  # No allegiance = no tax
-        
-        tax_due_tick = farmer.get('tax_due_tick')
-        if tax_due_tick is None:
-            return 999999  # No tax due yet
-        
-        # If tax is already overdue, no selling allowed
-        if self.state.ticks >= tax_due_tick:
-            return 0
-        
-        # Calculate time until tax is due
-        ticks_until_tax = tax_due_tick - self.state.ticks
-        
-        # Count farm cells belonging to this farmer's home
-        farmer_home = farmer.get('home')
-        num_farm_cells = sum(1 for cell in self.state.farm_cells.values() 
-                           if cell.get('home') == farmer_home)
-        
-        # Rough estimate: 1 wheat per farm cell per day when working half the day
-        expected_production = (num_farm_cells * ticks_until_tax) // (TICKS_PER_DAY * 2)
-        
-        return expected_production
-    
-    def get_goods_amount(self, char, goods_type):
-        """Get total amount of a goods type in character's inventory."""
-        if goods_type == 'wheat':
-            return char.get_item('wheat')
-        elif goods_type == 'money':
-            return char.get_item('money')
-        # Placeholder for other goods
-        return char.get(f'{goods_type}_stock', 0)
-    
-    def get_goods_price(self, goods_type, amount=1):
-        """Get the price for a given amount of goods."""
-        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
-        return unit_price * amount
-    
-    def can_afford_goods(self, char, goods_type):
-        """Check if character can afford at least 1 unit of goods."""
-        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
-        return char.get_item('money') >= unit_price
-    
-    def get_desired_goods_amount(self, char, goods_type):
-        """Calculate how much of a goods type a character wants to buy.
-        
-        For wheat: enough to fill hunger deficit + buffer.
-        For other goods: 1 unit (placeholder).
-        """
-        if goods_type == 'wheat':
-            current_wheat = int(char.get_item('wheat'))
-            current_bread = int(char.get_item('bread'))
-            
-            # Want enough wheat to fill hunger deficit (will be converted to bread)
-            hunger_deficit = int(MAX_HUNGER - char['hunger'])
-            wheat_for_hunger = max(0, hunger_deficit // ITEMS["bread"]["hunger_value"] + 1)
-            
-            # Account for bread we already have
-            wheat_for_hunger = max(0, wheat_for_hunger - current_bread)
-            
-            # Also want buffer
-            buffer_want = max(0, BREAD_BUFFER_TARGET - current_wheat - current_bread)
-            
-            return wheat_for_hunger + buffer_want
-        
-        # Default for other goods
-        return 1
-    
-    def vendor_willing_to_trade(self, vendor, buyer, goods_type, amount=None):
-        """Check if vendor is willing to trade goods with this buyer.
-        
-        Checks: trade cooldown, criminal status, allegiance, stock, money space.
-        Traders are self-employed and trade with anyone regardless of allegiance.
-        """
-        if vendor == buyer:
-            return False
-        
-        # Check buyer's trade cooldown
-        last_trade = buyer.get('last_trade_tick', -TRADE_COOLDOWN)
-        if self.state.ticks - last_trade < TRADE_COOLDOWN:
-            return False
-        
-        # Don't trade with known criminals
-        if self.cares_about_criminal(vendor, buyer):
-            return False
-        
-        # Check allegiance compatibility (Traders trade with anyone)
-        vendor_job = vendor.get('job')
-        if vendor_job != 'Trader':
-            buyer_allegiance = buyer.get('allegiance')
-            vendor_allegiance = vendor.get('allegiance')
-            
-            if buyer_allegiance is not None and vendor_allegiance is not None:
-                if vendor_allegiance != buyer_allegiance:
-                    return False
-        
-        # Check if vendor has goods to sell
-        sellable = self.get_vendor_sellable_goods(vendor, goods_type)
-        min_amount = amount if amount is not None else 1
-        if sellable < min_amount:
-            return False
-        
-        # Check if vendor has space for money
-        if not vendor.can_add_item('money'):
-            return False
-        
-        return True
-    
-    def get_max_vendor_trade_amount(self, vendor, buyer, goods_type):
-        """Calculate maximum amount that can be traded.
-        
-        Considers: vendor stock, buyer money, buyer inventory space, buyer desire.
-        """
-        sellable = self.get_vendor_sellable_goods(vendor, goods_type)
-        if sellable <= 0:
-            return 0
-        
-        # How much can buyer afford?
-        buyer_money = int(buyer.get_item('money'))
-        unit_price = ITEMS.get(goods_type, {}).get("price", 10)
-        affordable = buyer_money // unit_price if unit_price > 0 else 0
-        
-        # How much space does buyer have?
-        if goods_type == 'wheat':
-            buyer_space = buyer.get_inventory_space()
-        else:
-            buyer_space = INVENTORY_SLOTS  # Placeholder
-        
-        # How much does buyer want?
-        desired = self.get_desired_goods_amount(buyer, goods_type)
-        
-        return max(0, min(sellable, affordable, buyer_space, desired))
-    
-    def execute_vendor_trade(self, vendor, buyer, goods_type, amount):
-        """Execute a trade between vendor and buyer.
-        
-        For farmers selling wheat, also draws from their barrel if needed.
-        """
-        if amount <= 0:
-            return False
-        
-        price = self.get_goods_price(goods_type, amount)
-        
-        # Handle wheat specially - farmers may use barrel
-        if goods_type == 'wheat':
-            amount_needed = amount
-            
-            # For farmers, take from inventory first, then barrel
-            if vendor.get('job') == 'Farmer':
-                vendor_wheat = vendor.get_item('wheat')
-                from_inventory = min(vendor_wheat, amount_needed)
-                if from_inventory > 0:
-                    vendor.remove_item('wheat', from_inventory)
-                    amount_needed -= from_inventory
-                
-                # If still need more, take from barrel
-                if amount_needed > 0:
-                    farm_barrel = self.state.interactables.get_barrel_by_home(vendor.get('home'))
-                    if farm_barrel:
-                        farm_barrel.remove_item('wheat', amount_needed)
-            else:
-                # Non-farmer vendors just use inventory
-                vendor.remove_item('wheat', amount)
-            
-            buyer.add_item('wheat', amount)
-        else:
-            # Generic goods trade
-            vendor_stock_key = f'{goods_type}_stock'
-            buyer_stock_key = f'{goods_type}_stock'
-            vendor[vendor_stock_key] = vendor.get(vendor_stock_key, 0) - amount
-            buyer[buyer_stock_key] = buyer.get(buyer_stock_key, 0) + amount
-        
-        # Transfer money
-        vendor.add_item('money', price)
-        buyer.remove_item('money', price)
-        
-        # Set trade cooldown
-        buyer['last_trade_tick'] = self.state.ticks
-        
-        return True
-    
-    def try_buy_from_nearest_vendor(self, char, goods_type):
+
         """Attempt to buy goods from the nearest willing vendor.
         
         Returns True if a purchase was made or if moving toward a vendor.
@@ -867,20 +564,170 @@ class GameLogic:
         return False
 
     # =========================================================================
-    # COMBAT / ROBBERY SYSTEM
+    # COMBAT SYSTEM (Memory-Based)
     # =========================================================================
     
-    def get_attacker(self, char):
-        """Find anyone who is targeting this character and is close enough"""
-        for other in self.state.characters:
-            # Skip dying attackers
-            if other.get('health', 100) <= 0:
-                continue
-            if other.get('robbery_target') == char:
-                dist = self.state.get_distance(char, other)
-                if dist <= 5:
-                    return other
-        return None
+    # -------------------------------------------------------------------------
+    # PERCEPTION SYSTEM (Vision Cones and Sound Radii)
+    # -------------------------------------------------------------------------
+    
+    def get_facing_vector(self, char):
+        """Get unit vector for character's facing direction."""
+        facing = char.get('facing', 'down')
+        vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        return vectors.get(facing, (0, 1))
+    
+    def is_point_in_vision_cone(self, observer, target_x, target_y):
+        """Check if a specific point is within observer's vision cone.
+        
+        Args:
+            observer: Character doing the looking
+            target_x, target_y: Point to check
+            
+        Returns:
+            True if point is within vision cone
+        """
+        # Get vector from observer to target
+        dx = target_x - observer.x
+        dy = target_y - observer.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Too far to see
+        if dist > VISION_RANGE:
+            return False
+        
+        # Very close - can always see (within 1 cell)
+        if dist < 1.0:
+            return True
+        
+        # Normalize
+        dx /= dist
+        dy /= dist
+        
+        # Get observer's facing direction
+        face_x, face_y = self.get_facing_vector(observer)
+        
+        # Calculate angle between facing and target direction
+        # dot product = cos(angle)
+        dot = dx * face_x + dy * face_y
+        
+        # Convert cone angle to cosine threshold
+        # VISION_CONE_ANGLE is total angle, so half for each side
+        half_angle_rad = math.radians(VISION_CONE_ANGLE / 2)
+        cos_threshold = math.cos(half_angle_rad)
+        
+        return dot >= cos_threshold
+    
+    def does_vision_cone_overlap_circle(self, observer, circle_x, circle_y, circle_radius):
+        """Check if observer's vision cone overlaps with a circle (sound radius).
+        
+        We check if any part of the circle is visible:
+        - Center of circle in cone, OR
+        - Edge of circle (toward observer) in cone
+        
+        Args:
+            observer: Character with vision cone
+            circle_x, circle_y: Center of the circle
+            circle_radius: Radius of the circle
+            
+        Returns:
+            True if vision cone overlaps the circle
+        """
+        # Distance from observer to circle center
+        dx = circle_x - observer.x
+        dy = circle_y - observer.y
+        dist_to_center = math.sqrt(dx * dx + dy * dy)
+        
+        # If observer is inside the circle, they can see it
+        if dist_to_center <= circle_radius:
+            return True
+        
+        # Check if center is in vision cone
+        if self.is_point_in_vision_cone(observer, circle_x, circle_y):
+            return True
+        
+        # Check closest point on circle to observer
+        # This is along the line from circle center toward observer
+        if dist_to_center > 0:
+            # Direction from circle to observer
+            to_obs_x = -dx / dist_to_center
+            to_obs_y = -dy / dist_to_center
+            # Closest point on circle edge
+            closest_x = circle_x + to_obs_x * circle_radius
+            closest_y = circle_y + to_obs_y * circle_radius
+            if self.is_point_in_vision_cone(observer, closest_x, closest_y):
+                return True
+        
+        return False
+    
+    def do_circles_overlap(self, x1, y1, r1, x2, y2, r2):
+        """Check if two circles overlap."""
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.sqrt(dx * dx + dy * dy)
+        return dist <= (r1 + r2)
+    
+    def can_perceive_event(self, witness, event_x, event_y, sound_radius=None):
+        """Check if witness can perceive an event at a location.
+        
+        A witness perceives an event if:
+        - Their VISION CONE overlaps with the event's SOUND RADIUS, OR
+        - Their SOUND RADIUS overlaps with the event's SOUND RADIUS
+        
+        Args:
+            witness: Character who might perceive
+            event_x, event_y: Position of the event (attacker position)
+            sound_radius: Radius of sound emitted by event (default SOUND_RADIUS)
+            
+        Returns:
+            Tuple of (can_perceive: bool, method: str or None)
+            method is 'vision', 'sound', or None
+        """
+        if sound_radius is None:
+            sound_radius = SOUND_RADIUS
+        
+        # Check if witness's vision cone overlaps attacker's sound radius
+        if self.does_vision_cone_overlap_circle(witness, event_x, event_y, sound_radius):
+            return (True, 'vision')
+        
+        # Check if witness's hearing radius overlaps attacker's sound radius
+        if self.do_circles_overlap(witness.x, witness.y, SOUND_RADIUS, 
+                                   event_x, event_y, sound_radius):
+            return (True, 'sound')
+        
+        return (False, None)
+    
+    # -------------------------------------------------------------------------
+    # Criminal Status and Memory
+    # -------------------------------------------------------------------------
+    
+    def is_known_criminal(self, char):
+        """Check if this character is known as a criminal by anyone.
+        
+        Checks if char has committed a crime (self-knowledge).
+        """
+        return char.has_committed_crime()
+    
+    def remember_attack(self, victim, attacker, damage):
+        """Record that victim was attacked by attacker.
+        Only stores one memory per attacker - doesn't track each hit.
+        """
+        # Check if victim already has a memory of being attacked by this attacker
+        if victim.has_memory_of('attacked_by', attacker):
+            return  # Already remembered, don't duplicate
+        
+        victim.add_memory('attacked_by', attacker, self.state.ticks,
+                         intensity=CRIME_INTENSITY_ASSAULT,
+                         source='experienced')
     
     def find_nearby_defender(self, char, max_distance, exclude=None):
         """Find a defender within range.
@@ -889,7 +736,7 @@ class GameLogic:
         - Characters with allegiance first look for soldiers of same allegiance
         - If no soldiers found (or no allegiance), look for general defenders
         - General defenders: anyone with morality >= 7 and confidence >= 7
-        - Skip anyone the character KNOWS is a criminal (from their own memory)
+        - Skip anyone the character knows is a criminal (from their memories)
         
         Args:
             char: The character looking for a defender
@@ -897,7 +744,6 @@ class GameLogic:
             exclude: Character to exclude (e.g., the attacker/threat)
         """
         char_allegiance = char.get('allegiance')
-        known_crimes = char.get('known_crimes', {})
         
         best_soldier = None
         best_soldier_dist = float('inf')
@@ -914,7 +760,7 @@ class GameLogic:
             if other.get('health', 100) <= 0:
                 continue
             # Skip anyone this character knows is a criminal
-            if id(other) in known_crimes:
+            if char.has_memory_of('crime', other):
                 continue
             
             dist = self.state.get_distance(char, other)
@@ -954,24 +800,20 @@ class GameLogic:
         confidence = char.get_trait('confidence')
         return morality >= 7 and confidence >= 7
     
-    def find_nearby_perpetrator(self, char):
-        """Find someone committing a crime nearby (for backwards compatibility).
-        Use find_known_criminal_nearby for the unified system.
-        """
-        return self.find_known_criminal_nearby(char)
-    
     def get_crime_range(self, crime_type):
         """Get the range for a crime type. The intensity IS the range."""
         if crime_type == 'murder':
-            return CRIME_INTENSITY_MURDER  # 7 cells
+            return CRIME_INTENSITY_MURDER
+        elif crime_type == 'assault':
+            return CRIME_INTENSITY_ASSAULT
         elif crime_type == 'theft':
-            return CRIME_INTENSITY_THEFT   # 4 cells
+            return CRIME_INTENSITY_THEFT
         else:
             return 5  # default fallback
     
     def get_flee_distance(self, intensity):
-        """Get how far to flee from a criminal. Returns intensity / 2."""
-        return intensity / 2
+        """Get how far to flee from a criminal. Returns intensity / FLEE_DISTANCE_DIVISOR."""
+        return intensity / FLEE_DISTANCE_DIVISOR
     
     def will_care_about_crime(self, responder, crime_allegiance, intensity=None):
         """Does this person care about this crime?
@@ -993,84 +835,32 @@ class GameLogic:
         
         return effective_morality >= 7
     
-    def remember_crime(self, witness, criminal, intensity, crime_allegiance):
-        """Add crime to witness's memory."""
-        criminal_id = id(criminal)
-        if criminal_id not in witness['known_crimes']:
-            witness['known_crimes'][criminal_id] = []
-        # Add this crime (could have multiple crimes from same criminal)
-        witness['known_crimes'][criminal_id].append({
-            'intensity': intensity,
-            'allegiance': crime_allegiance
-        })
-    
-    def get_worst_known_crime(self, observer, criminal):
-        """Get the most severe crime this observer knows about for this criminal.
-        Returns (intensity, allegiance) or None if no known crimes.
-        """
-        criminal_id = id(criminal)
-        crimes = observer.get('known_crimes', {}).get(criminal_id, [])
-        if not crimes:
-            return None
-        # Return highest intensity crime
-        return max(crimes, key=lambda c: c['intensity'])
-    
-    def cares_about_criminal(self, observer, criminal):
-        """Check if observer cares about any crime committed by this criminal."""
-        criminal_id = id(criminal)
-        crimes = observer.get('known_crimes', {}).get(criminal_id, [])
-        
-        for crime in crimes:
-            if self.will_care_about_crime(observer, crime['allegiance'], crime['intensity']):
-                return True
-        return False
-    
     def find_known_criminal_nearby(self, char):
         """Find any known criminal within range that this character cares about.
         
-        Uses intensity-based ranges.
-        Only returns criminals the character cares about (based on morality/allegiance).
+        Only returns criminals this character KNOWS about (has crime memory).
+        Uses perception system - must be able to see or hear the criminal.
         
         Returns (criminal, intensity) or (None, None) if none found.
         """
-        # Check for active robbers (crime in progress - treat as murder intensity)
-        murder_range = self.get_crime_range('murder')
-        for other in self.state.characters:
-            if other == char:
+        # Check crime memories - only react to criminals we actually know about
+        for m in char.get_memories(memory_type='crime'):
+            criminal = m['subject']
+            
+            # Skip if criminal is dead/gone
+            if criminal not in self.state.characters:
                 continue
-            # Skip dying characters - they're no longer a threat
-            if other.get('health', 100) <= 0:
-                continue
-            if other.get('is_aggressor') and other.get('robbery_target'):
-                target = other.get('robbery_target')
-                if target in self.state.characters:
-                    dist = self.state.get_distance(char, other)
-                    if dist <= murder_range:
-                        # Active aggression - check if we care
-                        crime_allegiance = target.get('allegiance')
-                        if self.will_care_about_crime(char, crime_allegiance, CRIME_INTENSITY_MURDER):
-                            return (other, CRIME_INTENSITY_MURDER)
-        
-        # Check known crimes
-        for other in self.state.characters:
-            if other == char:
-                continue
-            # Skip dying characters
-            if other.get('health', 100) <= 0:
+            if criminal.get('health', 100) <= 0:
                 continue
             
-            criminal_id = id(other)
-            crimes = char.get('known_crimes', {}).get(criminal_id, [])
+            intensity = m.get('intensity', 10)
+            crime_allegiance = m['details'].get('victim_allegiance')
             
-            for crime in crimes:
-                intensity = crime['intensity']
-                crime_allegiance = crime['allegiance']
-                crime_range = intensity  # Range = intensity
-                
-                dist = self.state.get_distance(char, other)
-                if dist <= crime_range:
-                    if self.will_care_about_crime(char, crime_allegiance, intensity):
-                        return (other, intensity)
+            # Must be able to perceive the criminal to react to them
+            can_perceive, method = self.can_perceive_event(char, criminal.x, criminal.y)
+            if can_perceive:
+                if self.will_care_about_crime(char, crime_allegiance, intensity):
+                    return (criminal, intensity)
         
         return (None, None)
     
@@ -1112,11 +902,11 @@ class GameLogic:
         
         return random.random() < chance
     
-    def should_attempt_robbery(self, char):
-        """Determine if character will attempt robbery.
-        Returns True if they decide to rob.
+    def should_attempt_murder(self, char):
+        """Determine if character will attempt to kill someone.
+        Returns True if they decide to attack with intent to kill.
         
-        Morality 5+: Never robs
+        Morality 5+: Never attempts murder
         Morality 4-3: Only when starving, +10% per tick starving
         Morality 2-1: Same chance as farm theft (50-100% based on hunger)
         """
@@ -1126,7 +916,7 @@ class GameLogic:
             return False
         
         if morality >= 3:  # Morality 4-3
-            # Only robs when starving
+            # Only kills when starving
             if not char.get('is_starving', False):
                 return False
             # 10% per tick starving
@@ -1141,9 +931,9 @@ class GameLogic:
     
     def decide_crime_action(self, char):
         """Decide what crime action (if any) to take.
-        Returns: 'theft', 'robbery', or None
+        Returns: 'theft', 'murder', or None
         
-        For morality 2-1, if both theft and robbery would trigger,
+        For morality 2-1, if both theft and murder would trigger,
         randomly choose between them (50/50).
         """
         morality = char.get_trait('morality')
@@ -1152,22 +942,22 @@ class GameLogic:
             return None
         
         will_steal = self.should_attempt_farm_theft(char)
-        will_rob = self.should_attempt_robbery(char)
+        will_kill = self.should_attempt_murder(char)
         
         if morality <= 2:
-            # Equal chance between theft and robbery if both trigger
-            if will_steal and will_rob:
-                return random.choice(['theft', 'robbery'])
+            # Equal chance between theft and murder if both trigger
+            if will_steal and will_kill:
+                return random.choice(['theft', 'murder'])
             elif will_steal:
                 return 'theft'
-            elif will_rob:
-                return 'robbery'
+            elif will_kill:
+                return 'murder'
         else:
-            # Morality 3-6: prioritize theft over robbery
+            # Morality 3-6: prioritize theft over murder
             if will_steal:
                 return 'theft'
-            elif will_rob:
-                return 'robbery'
+            elif will_kill:
+                return 'murder'
         
         return None
     
@@ -1288,115 +1078,84 @@ class GameLogic:
             data['state'] = 'replanting'
             data['timer'] = FARM_REPLANT_TIME
             
-            # Mark as thief
-            char['is_thief'] = True
+            # Clear theft state
             char['theft_target'] = None
             char['theft_waiting'] = False
             char['theft_start_tick'] = None
             
             self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
-            self.witness_theft(char, cell)
+            self.witness_theft(char, cell)  # Records crime in memory system
             return True
         
         # Still in transit - movement handled by _get_goal
         return True
     
     def witness_theft(self, thief, cell):
-        """Witnesses within theft range learn about the theft and may react.
+        """Witnesses within perception range learn about the theft and may react.
         
-        Range: CRIME_INTENSITY_THEFT (4 cells)
+        Uses perception system - witness's vision cone or sound radius must
+        overlap with thief's sound radius.
         """
         thief_name = thief.get_display_name()
         cx, cy = cell
         intensity = CRIME_INTENSITY_THEFT
-        witness_range = intensity
+        
+        # Sound emanates from the thief
+        event_x, event_y = thief.x, thief.y
         
         # Get the farm's allegiance (this is the crime allegiance)
         crime_allegiance = self.state.get_farm_cell_allegiance(cx, cy)
         
+        # Thief records they committed theft (self-knowledge)
+        thief.add_memory('committed_crime', thief, self.state.ticks,
+                        location=(cx, cy),
+                        intensity=intensity,
+                        source='self',
+                        crime_type='theft',
+                        target_location=cell)
+        
         for char in self.state.characters:
-            if char == thief:
+            if char is thief:
                 continue
             
-            dist = abs(char['x'] - cx) + abs(char['y'] - cy)
-            if dist <= witness_range:
+            # Check if this character can perceive the theft
+            can_perceive, method = self.can_perceive_event(char, event_x, event_y)
+            
+            if can_perceive:
                 witness_name = char.get_display_name()
                 
-                # Everyone remembers the crime
-                self.remember_crime(char, thief, intensity, crime_allegiance)
+                # Everyone who perceives it remembers the crime
+                char.add_memory('crime', thief, self.state.ticks,
+                               location=(cx, cy),
+                               intensity=intensity,
+                               source='witnessed' if method == 'vision' else 'heard',
+                               reported=False,
+                               crime_type='theft',
+                               victim=None,  # Theft doesn't have a direct victim
+                               victim_allegiance=crime_allegiance,
+                               perception_method=method)
                 
                 # Check if this witness cares
                 cares = self.will_care_about_crime(char, crime_allegiance, intensity)
                 
                 # Check if this is the farm owner (always reacts as victim)
-                # A farmer owns a cell if the cell's home matches the farmer's home
                 cell_data = self.state.farm_cells.get((cx, cy), {})
                 is_owner = (char.get('job') == 'Farmer' and 
                            char.get('home') and 
                            cell_data.get('home') == char.get('home'))
                 
+                perception_verb = "WITNESSED" if method == 'vision' else "HEARD"
+                
                 if cares or is_owner:
                     confidence = char.get_trait('confidence')
                     if confidence >= 7:
-                        char['robbery_target'] = thief
-                        self.state.log_action(f"{witness_name} WITNESSED {thief_name} stealing! Attacking!")
+                        char.set_intent('attack', thief, reason='witnessed_theft', started_tick=self.state.ticks)
+                        self.state.log_action(f"{witness_name} {perception_verb} {thief_name} stealing! Attacking!")
                     else:
-                        char['flee_from'] = thief
-                        self.state.log_action(f"{witness_name} WITNESSED {thief_name} stealing! Fleeing!")
+                        char.set_intent('flee', thief, reason='witnessed_theft', started_tick=self.state.ticks)
+                        self.state.log_action(f"{witness_name} {perception_verb} {thief_name} stealing! Fleeing!")
                 else:
-                    self.state.log_action(f"{witness_name} witnessed {thief_name} stealing.")
-                
-                # Try to report if same allegiance
-                if char.get('allegiance') == crime_allegiance and crime_allegiance is not None:
-                    self.try_report_crime(char, thief, intensity, crime_allegiance)
-    
-    def report_crime_to_defender(self, witness, criminal, intensity, defender):
-        """Directly report a crime to a specific defender.
-        
-        Used when a fleeing character reaches a defender for safety.
-        The defender will remember the crime and can respond.
-        """
-        witness_name = witness.get_display_name()
-        criminal_name = criminal.get_display_name()
-        defender_name = defender.get_display_name()
-        
-        # Defender learns about the crime
-        crime_allegiance = witness.get('allegiance')  # Crime against the witness's allegiance
-        self.remember_crime(defender, criminal, intensity, crime_allegiance)
-        
-        # Remove from witness's unreported crimes if present
-        crime_tuple = (id(criminal), intensity, crime_allegiance)
-        witness.get('unreported_crimes', set()).discard(crime_tuple)
-        
-        self.state.log_action(f"{witness_name} reported {criminal_name} to {defender_name}!")
-    
-    def try_report_crime(self, witness, criminal, intensity, crime_allegiance):
-        """Try to report crime to an adjacent soldier. If none adjacent, save for later.
-        
-        Only reports to soldiers of same allegiance as the crime.
-        Requires adjacency (distance 1).
-        """
-        if crime_allegiance is None:
-            return  # Can't report crimes against unaligned
-        
-        witness_name = witness.get_display_name()
-        criminal_name = criminal.get_display_name()
-        
-        # Look for an adjacent soldier of the same allegiance
-        for char in self.state.characters:
-            if char == witness or char == criminal:
-                continue
-            if char.get('job') == 'Soldier' and char.get('allegiance') == crime_allegiance:
-                dist = abs(char['x'] - witness['x']) + abs(char['y'] - witness['y'])
-                if dist <= 1:  # Must be adjacent
-                    # Report to this soldier
-                    self.remember_crime(char, criminal, intensity, crime_allegiance)
-                    soldier_name = char.get_display_name()
-                    self.state.log_action(f"{witness_name} reported {criminal_name} to {soldier_name}!")
-                    return  # Reported successfully
-        
-        # No soldier adjacent - save for later
-        witness['unreported_crimes'].add((id(criminal), intensity, crime_allegiance))
+                    self.state.log_action(f"{witness_name} {perception_verb.lower()} {thief_name} stealing.")
     
     def find_richest_target(self, robber):
         """Find the best target to rob"""
@@ -1405,98 +1164,200 @@ class GameLogic:
             return None
         return max(targets, key=lambda c: (c.get_item('wheat'), c.get_item('money')))
     
-    def try_robbery(self, robber):
-        """Character decides to rob someone - sets target and starts pursuit"""
-        target = self.find_richest_target(robber)
+    def try_murder(self, attacker):
+        """Character decides to attack someone with intent to kill - sets intent and starts pursuit.
+        No crime is committed until actual swing (handled in resolve_melee_attack).
+        """
+        target = self.find_richest_target(attacker)
         if target:
-            robber_name = robber.get_display_name()
+            attacker_name = attacker.get_display_name()
             target_name = target.get_display_name()
-            self.state.log_action(f"{robber_name} DECIDED TO ROB {target_name} (target has ${target.get_item('money')})")
-            robber['robbery_target'] = target
-            robber['is_aggressor'] = True
-            return self.continue_robbery(robber)
+            self.state.log_action(f"{attacker_name} is hunting {target_name}!")
+            
+            # Set attack intent - no crime until actual swing
+            attacker.set_intent('attack', target, reason='murder_intent', started_tick=self.state.ticks)
+            
+            return self.continue_murder(attacker)
         return False
     
-    def continue_robbery(self, robber):
-        """Continue robbery in progress - returns True if still robbing"""
-        target = robber.get('robbery_target')
+    def continue_murder(self, attacker):
+        """Continue murder pursuit - returns True if still pursuing"""
+        if attacker.intent is None or attacker.intent.get('action') != 'attack':
+            return False
         
-        if robber not in self.state.characters:
+        target = attacker.intent.get('target')
+        
+        if attacker not in self.state.characters:
             return False
         
         if target is None or target not in self.state.characters:
-            robber['robbery_target'] = None
+            attacker.clear_intent()
             return False
         
         # Don't attack dying characters
         if target.get('health', 100) <= 0:
-            robber['robbery_target'] = None
+            attacker.clear_intent()
             return False
         
         # Movement is handled by velocity system in _get_goal
         # We just check if adjacent and attack if so
         
-        if self.is_adjacent(robber, target):
-            result = self.resolve_melee_attack(robber, target)
+        if self.is_adjacent(attacker, target):
+            result = self.resolve_melee_attack(attacker, target)
             
             if result['killed']:
-                robber['robbery_target'] = None
-                robber['is_aggressor'] = False
+                attacker.clear_intent()
         
         return True
     
-    def witness_murder(self, attacker, victim, is_lethal=False):
-        """Witnesses within range learn about the crime and may react.
+    def witness_crime(self, criminal, victim, crime_type):
+        """Witnesses within perception range learn about the crime and may react.
+        
+        Uses perception system - witnesses must either:
+        - Have their VISION CONE overlap the criminal's SOUND RADIUS, OR
+        - Have their SOUND RADIUS overlap the criminal's SOUND RADIUS
         
         Args:
-            attacker: The character who attacked
-            victim: The character who was attacked
-            is_lethal: True if this was a killing blow, False if just an attack
+            criminal: The character who committed the crime
+            victim: The victim of the crime
+            crime_type: 'murder', 'assault', or 'theft'
         
-        For murders (is_lethal=True): witnesses permanently remember the crime
-        For assaults (is_lethal=False): triggers immediate reaction but not remembered
-        
-        Range: CRIME_INTENSITY_MURDER (17 cells)
+        Creates memories for witnesses and triggers reactions.
         """
-        attacker_name = attacker.get_display_name()
+        criminal_name = criminal.get_display_name()
         victim_name = victim.get_display_name()
-        intensity = CRIME_INTENSITY_MURDER
-        witness_range = intensity
         
-        # Crime allegiance = victim's allegiance
+        # Determine intensity based on crime type
+        if crime_type == 'murder':
+            intensity = CRIME_INTENSITY_MURDER
+        elif crime_type == 'assault':
+            intensity = CRIME_INTENSITY_ASSAULT
+        else:
+            intensity = CRIME_INTENSITY_THEFT
+        
         crime_allegiance = victim.get('allegiance')
         
-        # Choose appropriate log message
-        crime_verb = "murder" if is_lethal else "attack"
+        # Sound emanates from the criminal (attacker)
+        event_x, event_y = criminal.x, criminal.y
         
         for char in self.state.characters:
-            if char == attacker or char == victim:
+            if char is criminal or char is victim:
                 continue
             
-            dist = abs(char['x'] - victim['x']) + abs(char['y'] - victim['y'])
-            if dist <= witness_range:
+            # Check if this character can perceive the event
+            # Their vision cone or sound radius must overlap criminal's sound radius
+            can_perceive, method = self.can_perceive_event(char, event_x, event_y)
+            
+            if can_perceive:
                 witness_name = char.get_display_name()
                 
-                # Only permanently remember murders, not assaults
-                # Assaults trigger immediate reaction via is_aggressor flag
-                if is_lethal:
-                    self.remember_crime(char, attacker, intensity, crime_allegiance)
-                    self.state.log_action(f"{witness_name} WITNESSED {attacker_name} {crime_verb} {victim_name}!")
-                    
-                    # Try to report if same allegiance
-                    if char.get('allegiance') == crime_allegiance and crime_allegiance is not None:
-                        self.try_report_crime(char, attacker, intensity, crime_allegiance)
-                else:
-                    # Just log the assault - immediate reaction handled by is_aggressor check
-                    self.state.log_action(f"{witness_name} WITNESSED {attacker_name} {crime_verb} {victim_name}!")
+                # Create memory of the crime
+                char.add_memory('crime', criminal, self.state.ticks,
+                               location=(victim.x, victim.y),
+                               intensity=intensity,
+                               source='witnessed' if method == 'vision' else 'heard',
+                               reported=False,
+                               crime_type=crime_type,
+                               victim=victim,
+                               victim_allegiance=crime_allegiance,
+                               perception_method=method)
+                
+                perception_verb = "WITNESSED" if method == 'vision' else "HEARD"
+                self.state.log_action(f"{witness_name} {perception_verb} {criminal_name} {crime_type} {victim_name}!")
+                
+                # Evaluate reaction based on personality
+                self.evaluate_crime_reaction(char, criminal, intensity, crime_allegiance)
+    
+    def evaluate_crime_reaction(self, witness, criminal, intensity, crime_allegiance):
+        """Evaluate how a witness should react to a crime.
+        
+        Sets witness intent based on their personality.
+        """
+        # Check if witness cares about this crime
+        if not self.will_care_about_crime(witness, crime_allegiance, intensity):
+            return  # Doesn't care, no reaction
+        
+        confidence = witness.get_trait('confidence')
+        
+        if confidence >= 7:
+            # High confidence - confront/attack
+            witness.set_intent('attack', criminal, reason='witnessed_crime', started_tick=self.state.ticks)
+            self.state.log_action(f"{witness.get_display_name()} will confront {criminal.get_display_name()}!")
+        else:
+            # Low confidence - flee
+            witness.set_intent('flee', criminal, reason='witnessed_crime', started_tick=self.state.ticks)
+            self.state.log_action(f"{witness.get_display_name()} fleeing from {criminal.get_display_name()}!")
+    
+    def broadcast_violence(self, attacker, target):
+        """Notify nearby characters of ongoing violence (any fight, justified or not).
+        
+        Characters who perceive a fight but aren't involved will react:
+        - High confidence (>= 7): Watch from current position
+        - Low confidence (< 7): Flee from the violence
+        
+        This is separate from witness_crime - it's just "I see a fight happening"
+        without any judgment about who is in the wrong.
+        """
+        for char in self.state.characters:
+            if char is attacker or char is target:
+                continue
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Already reacting to something? Don't interrupt
+            if char.intent and char.intent.get('action') in ('attack', 'flee', 'watch'):
+                continue
+            
+            # Can perceive the violence?
+            can_perceive, method = self.can_perceive_event(char, attacker.x, attacker.y)
+            if not can_perceive:
+                continue
+            
+            confidence = char.get_trait('confidence')
+            if confidence >= 7:
+                char.set_intent('watch', attacker, reason='observing_violence', started_tick=self.state.ticks)
+            else:
+                char.set_intent('flee', attacker, reason='fleeing_violence', started_tick=self.state.ticks)
+                self.state.log_action(f"{char.get_display_name()} fleeing from violence!")
+    
+    def report_crime_to(self, reporter, defender, crime_memory):
+        """Reporter tells defender about a crime they know about.
+        
+        Creates a copy of the memory for the defender.
+        """
+        reporter_name = reporter.get_display_name()
+        criminal = crime_memory['subject']
+        criminal_name = criminal.get_display_name()
+        defender_name = defender.get_display_name()
+        
+        # Create a copy of the memory for the defender
+        defender.add_memory('crime', criminal, self.state.ticks,
+                           location=crime_memory['location'],
+                           intensity=crime_memory['intensity'],
+                           source='told_by',
+                           reported=False,
+                           crime_type=crime_memory['details'].get('crime_type'),
+                           victim=crime_memory['details'].get('victim'),
+                           victim_allegiance=crime_memory['details'].get('victim_allegiance'),
+                           informant=reporter,
+                           original_tick=crime_memory['tick'])
+        
+        # Mark reporter's memory as reported
+        crime_memory['reported'] = True
+        
+        self.state.log_action(f"{reporter_name} told {defender_name} about {criminal_name}'s crime!")
+        
+        # Defender evaluates reaction
+        self.evaluate_crime_reaction(defender, criminal, 
+                                    crime_memory['intensity'],
+                                    crime_memory['details'].get('victim_allegiance'))
     
     def try_report_crimes_to_soldier(self, char):
         """If character has unreported crimes and is adjacent to a soldier, report to them.
         
         Only reports to soldiers of same allegiance as the crime.
-        Requires adjacency (distance 1).
         """
-        unreported = char.get('unreported_crimes', set())
+        unreported = char.get_unreported_crimes()
         
         if not unreported:
             return
@@ -1509,147 +1370,23 @@ class GameLogic:
             if other.get('job') != 'Soldier':
                 continue
             
-            dist = abs(char['x'] - other['x']) + abs(char['y'] - other['y'])
-            if dist > 1:  # Must be adjacent
+            dx = char.x - other.x
+            dy = char.y - other.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > SOUND_RADIUS:  # Must be within sound range
                 continue
                 
-            soldier_name = other.get_display_name()
             soldier_allegiance = other.get('allegiance')
             
             # Check each unreported crime
-            for crime_tuple in list(unreported):
-                criminal_id, intensity, crime_allegiance = crime_tuple
+            for crime_memory in list(unreported):
+                crime_allegiance = crime_memory['details'].get('victim_allegiance')
                 
                 # Only report to soldiers of same allegiance
                 if crime_allegiance == soldier_allegiance:
-                    # Find the criminal for logging and to pass to remember_crime
-                    criminal = next((c for c in self.state.characters if id(c) == criminal_id), None)
-                    if criminal:
-                        criminal_name = criminal.get_display_name()
-                        self.remember_crime(other, criminal, intensity, crime_allegiance)
-                        self.state.log_action(f"{char_name} reported {criminal_name} to {soldier_name}")
-                    char['unreported_crimes'].discard(crime_tuple)
-    
-    # =========================================================================
-    # WHEAT / HUNGER SYSTEM
-    # =========================================================================
-    
-    def should_seek_wheat(self, char):
-        """Determine if NPC should seek wheat based on hunger level"""
-        hunger = char['hunger']
-        
-        if hunger <= HUNGER_CRITICAL:
-            return True
-        elif hunger <= HUNGER_CHANCE_THRESHOLD:
-            chance = (HUNGER_CHANCE_THRESHOLD - hunger) / (HUNGER_CHANCE_THRESHOLD - HUNGER_CRITICAL)
-            return random.random() < chance
-        else:
-            return False
-    
-    def needs_wheat_buffer(self, char):
-        """Check if character's food supply (wheat + bread) is below the buffer target.
-        Since wheat can be converted to bread, we count both together.
-        """
-        total_food = char.get_item('wheat') + char.get_item('bread')
-        return total_food < BREAD_BUFFER_TARGET
-    
-    def handle_wheat_need(self, char):
-        """Handle a character's hunger needs. Returns True if action was taken."""
-        job = char.get('job')
-        name = char.get_display_name()
-        
-        # Option 1: Eat bread from inventory
-        if char.get_item('bread') >= BREAD_PER_BITE:
-            char.remove_item('bread', BREAD_PER_BITE)
-            char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
-            char['wheat_seek_ticks'] = 0
-            self.state.log_action(f"{name} ate bread, hunger now {char['hunger']:.0f}")
-            return True
-        
-        # Option 2: If have wheat but no bread, go cook it
-        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO:
-            # Try to bake if adjacent to cooking spot
-            if self.can_bake_bread(char):
-                amount_to_bake = min(char.get_item('wheat'), BREAD_BUFFER_TARGET)
-                self.bake_bread(char, amount_to_bake)
-                return True
-            
-            # Move toward nearest cooking spot
-            cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
-            if cooking_spot and cooking_pos:
-                # Move toward the cooking spot
-                char['move_target'] = cooking_pos
-                return True
-            
-            # No cooking spot available - need to make a camp
-            if self.can_make_camp_at(char['x'], char['y']):
-                self.make_camp(char)
-                return True
-            else:
-                # Move to find a camp spot
-                camp_spot = self._find_camp_spot(char)
-                if camp_spot:
-                    char['move_target'] = camp_spot
-                    return True
-        
-        # Option 3: Soldiers wait for steward to bring wheat (passive)
-        # The steward will come to them - soldiers just need to register their request
-        if job == 'Soldier':
-            # Register request if not already done
-            if not char.get('requested_wheat'):
-                char['requested_wheat'] = True
-                self.state.log_action(f"{name} is waiting for food from the Steward")
-            # Soldiers don't actively seek wheat - they wait
-            return False
-        
-        # Option 4: Non-soldiers buy wheat from nearest vendor (Farmer, Innkeeper, etc.)
-        # Characters who sell wheat themselves don't buy from others
-        if self.can_afford_goods(char, 'wheat') and not self.is_vendor_of(char, 'wheat'):
-            # Try to buy from adjacent vendor first
-            adjacent_vendor = self.find_adjacent_vendor(char, 'wheat')
-            if adjacent_vendor and self.vendor_willing_to_trade(adjacent_vendor, char, 'wheat'):
-                amount = self.get_max_vendor_trade_amount(adjacent_vendor, char, 'wheat')
-                if amount > 0:
-                    price = self.get_goods_price('wheat', amount)
-                    vendor_name = adjacent_vendor.get_display_name()
-                    
-                    if self.execute_vendor_trade(adjacent_vendor, char, 'wheat', amount):
-                        char['wheat_seek_ticks'] = 0
-                        self.state.log_action(f"{name} bought {amount} wheat for ${price} from {vendor_name}")
-                        return True
-            
-            # Move toward nearest willing vendor
-            willing_vendor = self.find_willing_vendor(char, 'wheat')
-            if willing_vendor:
-                self.move_toward_character(char, willing_vendor)
-                char['wheat_seek_ticks'] += 1
-                return True
-            
-            # No willing vendor - check if allegiance should be dropped
-            if char.get('allegiance') is not None:
-                if not self.any_valid_vendor_exists(char, 'wheat'):
-                    char['wheat_seek_ticks'] += 1
-                    if char['wheat_seek_ticks'] >= ALLEGIANCE_WHEAT_TIMEOUT:
-                        old_allegiance = char['allegiance']
-                        char['allegiance'] = None
-                        char['wheat_seek_ticks'] = 0
-                        self.state.log_action(f"{name} LOST allegiance to {old_allegiance} - no one will sell wheat!")
-                        return True
-        
-        # Option 5: Resort to crime (only if can't legitimately buy wheat)
-        # Characters with money and access to a willing vendor should NEVER steal
-        can_buy_wheat = self.can_afford_goods(char, 'wheat') and self.find_willing_vendor(char, 'wheat') is not None
-        
-        if not can_buy_wheat:
-            crime_action = self.decide_crime_action(char)
-            if crime_action == 'theft':
-                if self.try_farm_theft(char):
-                    return True
-            elif crime_action == 'robbery':
-                if self.try_robbery(char):
-                    return True
-        
-        return False
+                    criminal = crime_memory['subject']
+                    if criminal in self.state.characters:
+                        self.report_crime_to(char, other, crime_memory)
     
     # =========================================================================
     # MOVEMENT SYSTEM
@@ -2462,26 +2199,6 @@ class GameLogic:
     # NPC ACTIONS (non-movement)
     # =========================================================================
     
-    def _try_frozen_trade(self, char):
-        """Frozen character tries to trade with any adjacent wheat vendor.
-        Note: They buy wheat but can't eat it - they need bread to recover.
-        """
-        if self.can_afford_goods(char, 'wheat'):
-            vendor = self.find_adjacent_vendor(char, 'wheat')
-            if vendor and self.vendor_willing_to_trade(vendor, char, 'wheat'):
-                amount = self.get_max_vendor_trade_amount(vendor, char, 'wheat')
-                if amount > 0:
-                    self.execute_vendor_trade(vendor, char, 'wheat', amount)
-                    name = char.get_display_name()
-                    self.state.log_action(f"{name} (frozen) bought {amount} wheat!")
-                    # They have wheat but can't eat it - need bread to recover
-                    if char.get_item('bread') >= BREAD_PER_BITE:
-                        char.remove_item('bread', BREAD_PER_BITE)
-                        char['hunger'] = min(MAX_HUNGER, char['hunger'] + ITEMS["bread"]["hunger_value"])
-                        char['is_starving'] = False
-                        char['is_frozen'] = False
-                        self.state.log_action(f"{name} ate bread and recovered from starvation!")
-    
     def _do_attack(self, attacker, target):
         """Execute an attack. Wrapper around resolve_melee_attack for NPC combat."""
         # Set attack animation direction toward target
@@ -2501,8 +2218,7 @@ class GameLogic:
         
         # Handle post-attack cleanup for NPCs
         if result['killed']:
-            attacker['robbery_target'] = None
-            attacker['is_aggressor'] = False
+            attacker.clear_intent()
 
     # =========================================================================
     # TICK PROCESSING
@@ -2627,9 +2343,8 @@ class GameLogic:
                 if char['health'] <= STARVATION_FREEZE_HEALTH:
                     if not char.get('is_frozen', False):
                         char['is_frozen'] = True
-                        # Clear any combat state when freezing
-                        char['robbery_target'] = None
-                        char['is_aggressor'] = False
+                        # Clear any intent when freezing
+                        char.clear_intent()
                         self.state.log_action(f"{name} is too weak to move! (health: {char['health']})")
                 
                 # Check for morality loss every STARVATION_MORALITY_INTERVAL health lost
@@ -2699,9 +2414,8 @@ class GameLogic:
                             
                             # If player (and not farmer), this is theft!
                             if is_player and not is_farmer:
-                                char['is_thief'] = True
                                 self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
-                                # Trigger witness system for theft
+                                # Trigger witness system for theft (records in memory)
                                 self.witness_theft(char, cell)
                             elif is_player:
                                 self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")

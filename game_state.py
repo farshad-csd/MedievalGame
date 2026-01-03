@@ -83,7 +83,6 @@ class GameState:
         for area in AREAS:
             if area.get("has_farm_cells"):
                 allegiance = area.get("allegiance")  # Farm's allegiance (e.g., "Dunmere" or None)
-                home = area.get("name")  # Farm area name for farmer matching
                 
                 if "farm_cells" in area:
                     for cell in area["farm_cells"]:
@@ -92,8 +91,7 @@ class GameState:
                             self.farm_cells[(x, y)] = {
                                 'state': 'ready',
                                 'timer': 0,
-                                'allegiance': allegiance,
-                                'home': home
+                                'allegiance': allegiance
                             }
     
     def _init_interactables(self):
@@ -129,6 +127,7 @@ class GameState:
             
             if char.is_player:
                 self.player = char
+    
     
     def _assign_job_resources(self, char, job, home_area):
         """Assign bed and barrel ownership based on job."""
