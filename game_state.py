@@ -263,7 +263,7 @@ class GameState:
         return 0 <= x < SIZE and 0 <= y < SIZE
     
     def is_position_blocked(self, x, y, exclude_char=None):
-        """Check if a position would hard-collide with any character.
+        """Check if a position would hard-collide with any character or obstacle.
         Uses a small collision radius to allow characters to squeeze past each other
         like in ALTTP - characters can overlap significantly but can't stand on same spot.
         
@@ -271,6 +271,18 @@ class GameState:
             x, y: Position to check (float)
             exclude_char: Character to exclude from check (for self-collision)
         """
+        # Check tree collisions first (trees are solid obstacles)
+        tree_collision_radius = 0.4  # Trees block most of their cell
+        for tree_pos in self.interactables.trees.keys():
+            tree_x, tree_y = tree_pos
+            tree_center_x = tree_x + 0.5
+            tree_center_y = tree_y + 0.5
+            dx = abs(x - tree_center_x)
+            dy = abs(y - tree_center_y)
+            if dx < tree_collision_radius and dy < tree_collision_radius:
+                return True
+        
+        # Check character collisions
         for char in self.characters:
             if char is exclude_char:
                 continue

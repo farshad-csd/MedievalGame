@@ -1,0 +1,16 @@
+# Core Dependencies
+raylib>=5.0.0
+
+# Platform Notes
+# ==============
+# 
+# Windows/Mac/Linux:
+#   pip install raylib
+#
+# Android (Retroid/Anbernic):
+#   Use buildozer with python-for-android
+#   See README.md for instructions
+#
+# Rust Migration:
+#   raylib-py uses the same API as raylib-rs
+#   The GUI code is designed for easy porting

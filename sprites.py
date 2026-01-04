@@ -1,7 +1,10 @@
-# sprites.py - Sprite loading and animation management
+# sprites.py - Sprite loading and animation management (Raylib)
 """
+Raylib-based sprite management for cross-platform compatibility.
 Handles loading sprite sheets, extracting frames, and providing the correct
 frame for a character's current state and direction.
+
+Designed for compatibility with eventual Rust migration (raylib-rs).
 
 Sprite Directions:
 - U (Up): Used for 'up', 'up-left', 'up-right'
@@ -15,15 +18,15 @@ Animation States:
 - Idle: Uses first frame of Walk
 """
 
-import pygame
+import pyray as rl
 import os
 import time
 
 
 # Animation timing
 WALK_FRAME_DURATION = 0.1  # 100ms per frame = 600ms per cycle
-SPRINT_FRAME_DURATION = 0.07  # 50ms per frame = 300ms per cycle (2x faster)
-ATTACK_FRAME_DURATION = 0.042  # ~42ms per frame = 250ms for full attack (matches ATTACK_ANIMATION_DURATION)
+SPRINT_FRAME_DURATION = 0.07  # 70ms per frame = 420ms per cycle
+ATTACK_FRAME_DURATION = 0.042  # ~42ms per frame = 250ms for full attack
 DEATH_FRAME_DURATION = 0.15  # 150ms per frame = 900ms for death sequence
 
 FRAMES_PER_SHEET = 6
@@ -31,22 +34,29 @@ FRAME_WIDTH = 48
 FRAME_HEIGHT = 48
 
 
+def hex_to_rgb(hex_color):
+    """Convert hex color string to RGB tuple"""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+
 class SpriteManager:
-    """Manages sprite loading and frame selection for all characters."""
+    """Manages sprite loading and frame selection for all characters using Raylib."""
     
     def __init__(self, sprite_dir="."):
-        """Initialize the sprite manager and load all sprites.
+        """Initialize the sprite manager.
         
         Args:
             sprite_dir: Directory containing sprite PNG files
         """
         self.sprite_dir = sprite_dir
-        self.sprites = {}  # {direction: {action: [frames]}}
+        self.textures = {}  # {direction: {action: Texture2D}}
+        self.frames = {}    # {direction: {action: [Rectangle]}} - source rects for each frame
         self.loaded = False
-        self._recolor_cache = {}  # Cache for recolored frames: (frame_id, color_hex) -> surface
+        self._recolor_cache = {}  # Cache for recolored textures: (texture_id, color_hex) -> Texture2D
         
     def load_sprites(self):
-        """Load all sprite sheets and extract frames."""
+        """Load all sprite sheets and extract frame rectangles."""
         if self.loaded:
             return
             
@@ -54,39 +64,50 @@ class SpriteManager:
         actions = ['Walk', 'Attack', 'Death']
         
         for direction in directions:
-            self.sprites[direction] = {}
+            self.textures[direction] = {}
+            self.frames[direction] = {}
+            
             for action in actions:
                 filename = f"sprites/{direction}_{action}.png"
                 filepath = os.path.join(self.sprite_dir, filename)
                 
                 if os.path.exists(filepath):
-                    # Load the image - use convert_alpha only if display is initialized
-                    sheet = pygame.image.load(filepath)
-                    if pygame.display.get_surface() is not None:
-                        sheet = sheet.convert_alpha()
-                    frames = self._extract_frames(sheet)
-                    self.sprites[direction][action] = frames
+                    # Load texture
+                    texture = rl.load_texture(filepath)
+                    self.textures[direction][action] = texture
+                    
+                    # Create frame rectangles
+                    frame_rects = []
+                    for i in range(FRAMES_PER_SHEET):
+                        rect = rl.Rectangle(
+                            i * FRAME_WIDTH, 0,
+                            FRAME_WIDTH, FRAME_HEIGHT
+                        )
+                        frame_rects.append(rect)
+                    self.frames[direction][action] = frame_rects
                 else:
                     print(f"Warning: Sprite sheet not found: {filepath}")
-                    self.sprites[direction][action] = None
+                    self.textures[direction][action] = None
+                    self.frames[direction][action] = None
         
         self.loaded = True
     
-    def _extract_frames(self, sheet):
-        """Extract individual frames from a sprite sheet.
+    def unload_sprites(self):
+        """Unload all loaded textures."""
+        for direction in self.textures.values():
+            for texture in direction.values():
+                if texture:
+                    rl.unload_texture(texture)
         
-        Args:
-            sheet: Pygame surface containing the sprite sheet
-            
-        Returns:
-            List of pygame surfaces, one per frame
-        """
-        frames = []
-        for i in range(FRAMES_PER_SHEET):
-            frame = pygame.Surface((FRAME_WIDTH, FRAME_HEIGHT), pygame.SRCALPHA)
-            frame.blit(sheet, (0, 0), (i * FRAME_WIDTH, 0, FRAME_WIDTH, FRAME_HEIGHT))
-            frames.append(frame)
-        return frames
+        # Unload cached recolored textures
+        for texture in self._recolor_cache.values():
+            if texture:
+                rl.unload_texture(texture)
+        
+        self.textures = {}
+        self.frames = {}
+        self._recolor_cache = {}
+        self.loaded = False
     
     def get_sprite_direction(self, facing):
         """Map 8-direction facing to 3 sprite directions.
@@ -111,15 +132,15 @@ class SpriteManager:
         elif facing == 'down':
             return 'D', False
         elif facing == 'down-left':
-            return 'S', False  # Use side sprite for angled down
+            return 'S', False
         elif facing == 'down-right':
-            return 'S', True   # Use side sprite flipped for angled down-right
+            return 'S', True
         elif facing == 'left':
             return 'S', False
         elif facing == 'right':
-            return 'S', True  # Flip the side sprite
+            return 'S', True
         else:
-            return 'D', False  # Default to down
+            return 'D', False
     
     def get_frame(self, char, current_time=None):
         """Get the appropriate sprite frame for a character.
@@ -129,7 +150,7 @@ class SpriteManager:
             current_time: Current time (defaults to time.time())
             
         Returns:
-            Tuple of (pygame.Surface, should_flip) or (None, False) if no sprite
+            Tuple of (Texture2D, should_flip) or (None, False) if no sprite
         """
         if not self.loaded:
             self.load_sprites()
@@ -143,15 +164,18 @@ class SpriteManager:
         # Determine animation state
         action, frame_idx = self._get_animation_state(char, current_time)
         
-        frames = self.sprites.get(sprite_dir, {}).get(action)
-        if frames is None:
+        texture = self.textures.get(sprite_dir, {}).get(action)
+        frame_rects = self.frames.get(sprite_dir, {}).get(action)
+        
+        if texture is None or frame_rects is None:
             return None, False
         
         # Clamp frame index
-        frame_idx = min(frame_idx, len(frames) - 1)
-        frame = frames[frame_idx]
+        frame_idx = min(frame_idx, len(frame_rects) - 1)
         
-        return frame, should_flip
+        # Return the texture and frame info
+        # We'll return a dict with texture and source rect for drawing
+        return {'texture': texture, 'source': frame_rects[frame_idx]}, should_flip
     
     def _get_animation_state(self, char, current_time):
         """Determine which animation and frame to show.
@@ -169,10 +193,8 @@ class SpriteManager:
             if death_start:
                 elapsed = current_time - death_start
                 frame_idx = int(elapsed / DEATH_FRAME_DURATION)
-                # Death animation holds on last frame
                 frame_idx = min(frame_idx, FRAMES_PER_SHEET - 1)
                 return 'Death', frame_idx
-            # No death start time, show last frame
             return 'Death', FRAMES_PER_SHEET - 1
         
         # Check for attack animation
@@ -182,69 +204,54 @@ class SpriteManager:
             if elapsed < ATTACK_FRAME_DURATION * FRAMES_PER_SHEET:
                 frame_idx = int(elapsed / ATTACK_FRAME_DURATION)
                 return 'Attack', frame_idx
-            # Attack finished, fall through to walk/idle
         
-        # Detect movement by comparing current position to last known position
+        # Detect movement
         current_x = char.get('x', 0)
         current_y = char.get('y', 0)
         last_x = char.get('_last_anim_x', current_x)
         last_y = char.get('_last_anim_y', current_y)
         
-        # Calculate distance moved since last check
         dx = current_x - last_x
         dy = current_y - last_y
         is_moving = abs(dx) > 0.001 or abs(dy) > 0.001
         
-        # Update last position
         char['_last_anim_x'] = current_x
         char['_last_anim_y'] = current_y
         
         if is_moving:
-            # Walk animation - continuous loop based on current time
-            # Use faster animation when sprinting
             is_sprinting = char.get('is_sprinting', False)
             is_backpedaling = char.get('is_backpedaling', False)
             frame_duration = SPRINT_FRAME_DURATION if is_sprinting else WALK_FRAME_DURATION
             elapsed = current_time % (frame_duration * FRAMES_PER_SHEET)
             frame_idx = int(elapsed / frame_duration)
             
-            # Reverse animation for backpedaling
             if is_backpedaling:
                 frame_idx = (FRAMES_PER_SHEET - 1) - frame_idx
             
             return 'Walk', frame_idx
         else:
-            # Idle - use first frame of walk
             return 'Walk', 0
     
-    def scale_frame(self, frame, target_width, target_height):
-        """Scale a frame to target dimensions.
+    def recolor_red_to_color(self, frame_info, target_color, red_threshold=0.3):
+        """Replace red-ish pixels in a frame with a target color.
         
-        Args:
-            frame: Pygame surface to scale
-            target_width: Target width in pixels
-            target_height: Target height in pixels
-            
-        Returns:
-            Scaled pygame surface
-        """
-        return pygame.transform.scale(frame, (int(target_width), int(target_height)))
-    
-    def recolor_red_to_color(self, frame, target_color, red_threshold=0.3):
-        """Replace red-ish pixels in a frame with a target color, preserving shading.
-        
-        This detects pixels where red is the dominant channel and replaces them
-        with the target color while maintaining the original luminosity for shading.
+        This creates a new texture with the recolored pixels.
         Results are cached for performance.
         
         Args:
-            frame: Pygame surface to recolor
+            frame_info: Dict with 'texture' and 'source' Rectangle
             target_color: Target color as (R, G, B) tuple or hex string "#RRGGBB"
             red_threshold: How dominant red must be (0.0-1.0, higher = more selective)
             
         Returns:
-            New pygame surface with red replaced by target color
+            Raylib Texture2D with recolored pixels
         """
+        if frame_info is None:
+            return None
+        
+        texture = frame_info['texture']
+        source_rect = frame_info['source']
+        
         # Convert hex color to RGB if needed
         if isinstance(target_color, str):
             color_hex = target_color.lstrip('#').upper()
@@ -252,29 +259,34 @@ class SpriteManager:
         else:
             color_hex = f"{target_color[0]:02X}{target_color[1]:02X}{target_color[2]:02X}"
         
-        # Check cache using frame's id and color
-        cache_key = (id(frame), color_hex)
+        # Create cache key using texture id, source rect, and color
+        cache_key = (id(texture), int(source_rect.x), int(source_rect.y), color_hex)
+        
         if cache_key in self._recolor_cache:
             return self._recolor_cache[cache_key]
         
-        # Create a copy to modify
-        result = frame.copy()
+        # Load image from texture for pixel manipulation
+        image = rl.load_image_from_texture(texture)
         
-        # Lock surface for pixel access
-        result.lock()
+        # Crop to the frame we want
+        cropped = rl.image_from_image(image, source_rect)
+        rl.unload_image(image)
         
-        width, height = result.get_size()
+        # Get pixel data
+        width = int(source_rect.width)
+        height = int(source_rect.height)
         
+        # Process pixels
         for y in range(height):
             for x in range(width):
-                pixel = result.get_at((x, y))
+                pixel = rl.get_image_color(cropped, x, y)
                 r, g, b, a = pixel.r, pixel.g, pixel.b, pixel.a
                 
-                # Skip fully transparent pixels
+                # Skip transparent pixels
                 if a == 0:
                     continue
                 
-                # Skip very dark pixels (outlines, shadows)
+                # Skip very dark pixels
                 brightness = (r + g + b) / 3
                 if brightness < 30:
                     continue
@@ -283,51 +295,42 @@ class SpriteManager:
                 if brightness > 240 and max(abs(r-g), abs(r-b), abs(g-b)) < 20:
                     continue
                 
-                # Calculate how "red" this pixel is
-                # Red is dominant when R > G and R > B by some margin
+                # Check if red is dominant
                 max_channel = max(r, g, b)
                 if max_channel == 0:
                     continue
                 
-                # Normalize channels
                 r_norm = r / 255.0
                 g_norm = g / 255.0
                 b_norm = b / 255.0
                 
-                # Check if red is the dominant channel
-                # Red dominance = how much more red there is compared to green and blue
                 red_dominance = r_norm - max(g_norm, b_norm)
-                
-                # Also check that it's actually reddish (not just slightly more red)
                 is_reddish = (r > g * 1.2 and r > b * 1.2 and red_dominance > red_threshold)
                 
                 if is_reddish:
-                    # Calculate luminosity of original pixel (for shading)
+                    # Calculate luminosity
                     luminosity = 0.299 * r + 0.587 * g + 0.114 * b
-                    
-                    # Calculate luminosity of target color
                     target_lum = 0.299 * target_color[0] + 0.587 * target_color[1] + 0.114 * target_color[2]
                     
-                    # Scale target color to match original luminosity
                     if target_lum > 0:
                         scale = luminosity / target_lum
-                        # Clamp scale to prevent extreme values
                         scale = min(scale, 2.0)
                         new_r = min(255, int(target_color[0] * scale))
                         new_g = min(255, int(target_color[1] * scale))
                         new_b = min(255, int(target_color[2] * scale))
                     else:
-                        # Target is black, use luminosity directly
                         new_r = new_g = new_b = int(luminosity)
                     
-                    result.set_at((x, y), (new_r, new_g, new_b, a))
+                    rl.image_draw_pixel(cropped, x, y, rl.Color(new_r, new_g, new_b, a))
         
-        result.unlock()
+        # Create texture from modified image
+        result_texture = rl.load_texture_from_image(cropped)
+        rl.unload_image(cropped)
         
-        # Cache the result
-        self._recolor_cache[cache_key] = result
+        # Cache and return
+        self._recolor_cache[cache_key] = result_texture
         
-        return result
+        return result_texture
 
 
 # Global sprite manager instance

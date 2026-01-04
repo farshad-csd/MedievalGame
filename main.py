@@ -1,9 +1,9 @@
 # main.py - Entry point for the village simulation game
 
-# IMPORTANT: Set multiprocessing start method BEFORE any other imports
-# This is required on macOS to avoid pygame/tkinter conflicts
-import multiprocessing
 import sys
+import multiprocessing
+
+# Set multiprocessing start method BEFORE any other imports (for macOS)
 if sys.platform == 'darwin':
     try:
         multiprocessing.set_start_method('spawn')
@@ -20,7 +20,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# git push https://farshad-csd@github.com/farshad-csd/MedievalGame.git main
-# git push https://farshad-csd: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@github.com/farshad-csd/MedievalGame.git main
