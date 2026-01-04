@@ -65,6 +65,47 @@ COLOR_BG_SLOT_ACTIVE = rl.Color(255, 255, 255, 50)
 COLOR_BORDER = rl.Color(255, 255, 255, 60)
 
 
+# =============================================================================
+# OCCLUDER CONFIGURATION - Objects that can hide characters
+# =============================================================================
+# Each occluder type defines:
+# - sort_y_offset: Added to world Y for depth sorting (where the "base" is)
+# - occlusion_height: How far above sort_y the object extends (for occlusion check)
+# - occlusion_width: Half-width for horizontal overlap check
+# - draw_height_mult: Multiplier for cell_size to get draw height
+# - draw_aspect: Width/height ratio for drawing
+# - texture_key: Key in world_textures dict
+# - animated: Whether this occluder uses sprite sheet animation
+# - frame_width: Width of each frame (if animated)
+# - frame_height: Height of each frame (if animated)
+# - frame_duration: Seconds per frame (if animated)
+
+OCCLUDER_CONFIG = {
+    'tree': {
+        'sort_y_offset': 0.5,      # Middle of cell (trunk base)
+        'occlusion_height': 2.0,   # Tree extends ~2 cells above base
+        'occlusion_width': 0.8,    # Horizontal overlap threshold
+        'draw_height_mult': 2.5,   # Draw height = cell_size * 2.5
+        'draw_aspect': 64 / 64,    # Width/height ratio (now 1:1 for 64x64 frames)
+        'texture_key': 'tree',
+        'animated': True,
+        'frame_width': 64,
+        'frame_height': 64,
+        'frame_duration': 0.15,    # ~6.7 FPS for gentle swaying
+    },
+    # Future occluder types can be added here:
+    # 'building': {
+    #     'sort_y_offset': 0.5,
+    #     'occlusion_height': 3.0,
+    #     'occlusion_width': 1.5,
+    #     'draw_height_mult': 3.0,
+    #     'draw_aspect': 1.0,
+    #     'texture_key': 'building',
+    #     'animated': False,
+    # },
+}
+
+
 def hex_to_rgb(hex_color):
     """Convert hex color string to RGB tuple"""
     hex_color = hex_color.lstrip('#')
@@ -270,6 +311,20 @@ class BoardGUI:
                 self.campfire_frames.append(rl.Rectangle(
                     i * frame_width, 0, frame_width, frame_height
                 ))
+        
+        # Extract animated occluder frames
+        self.occluder_frames = {}
+        for occluder_type, config in OCCLUDER_CONFIG.items():
+            if config.get('animated'):
+                tex = self.world_textures.get(config['texture_key'])
+                if tex:
+                    frame_w = config['frame_width']
+                    frame_h = config['frame_height']
+                    num_frames = tex.width // frame_w
+                    frames = []
+                    for i in range(num_frames):
+                        frames.append(rl.Rectangle(i * frame_w, 0, frame_w, frame_h))
+                    self.occluder_frames[occluder_type] = frames
         
         # Load fonts
         self.font_default = rl.get_font_default()
@@ -973,65 +1028,375 @@ class BoardGUI:
                 rl.draw_rectangle(int(screen_x), int(screen_y), int(width), int(height), hex_to_color("#C4813D"))
     
     def _draw_trees_and_characters(self):
-        """Draw trees and characters together, sorted by Y position for proper depth.
+        """Draw all occluders and characters together, sorted by Y position for proper depth.
         Objects with smaller Y (higher on screen) are drawn first, so objects
         with larger Y (lower on screen) appear in front.
         """
         # Collect all drawable entities with their sort key (Y position)
         drawables = []
         
-        # Add trees - use middle of tree cell as sort position
-        # This ensures characters in front of the trunk appear in front
-        for pos, tree in self.state.interactables.trees.items():
-            x, y = pos
-            sort_y = y + 0.5  # Middle of tree cell (where trunk is)
-            drawables.append(('tree', sort_y, tree, pos))
+        # Add all occluders from all sources
+        for occluder_type, config in OCCLUDER_CONFIG.items():
+            occluder_items = self._get_occluder_items(occluder_type)
+            sort_y_offset = config['sort_y_offset']
+            
+            for pos, data in occluder_items.items():
+                x, y = pos
+                sort_y = y + sort_y_offset
+                drawables.append(('occluder', sort_y, occluder_type, pos, data))
         
         # Add characters - use their Y position
         for char in self.state.characters:
             sort_y = char['y']
-            drawables.append(('character', sort_y, char, None))
+            drawables.append(('character', sort_y, char, None, None))
         
         # Sort by Y position (smaller Y drawn first = behind)
         drawables.sort(key=lambda d: d[1])
         
-        # Reset player frame cache (will be set during character drawing)
-        self._player_frame_cache = None
+        # Pre-calculate which characters are perceived and occluded
+        perceived_occluded_chars = set()
+        for char in self.state.characters:
+            is_player = char is self.state.player
+            is_perceived = is_player or self._is_character_perceived(char)
+            is_occluded = len(self._get_occluding_objects(char['x'], char['y'])) > 0
+            if is_perceived and is_occluded:
+                perceived_occluded_chars.add(id(char))
+        
+        # Reset caches
+        self._character_ui_cache = []
+        self._deferred_ui_cache = []  # UI to draw on top of everything
         
         # Draw in sorted order
-        for dtype, sort_y, entity, extra in drawables:
-            if dtype == 'tree':
-                self._draw_single_tree(entity, extra)
+        for dtype, sort_y, entity, pos, data in drawables:
+            if dtype == 'occluder':
+                self._draw_single_occluder(entity, pos, data)
             elif dtype == 'character':
-                self._draw_single_character(entity)
+                self._draw_single_character_sprite(entity)
+                # Get the UI info we just cached
+                ui_info = self._character_ui_cache[-1]
+                
+                # Draw UI immediately unless perceived+occluded (defer those)
+                if id(entity) in perceived_occluded_chars:
+                    self._deferred_ui_cache.append(ui_info)
+                else:
+                    self._draw_character_ui(ui_info)
         
-        # Draw player outline AFTER everything if occluded (so it's on top)
-        if self._is_player_occluded():
-            self._draw_player_outline_shader()
+        # Draw outlines for perceived occluded characters
+        self._draw_perceived_outlines()
+        
+        # Draw deferred UI on top of everything (for perceived+occluded characters)
+        for ui_info in self._deferred_ui_cache:
+            self._draw_character_ui(ui_info)
     
-    def _is_player_occluded(self):
-        """Check if player is behind any tree."""
+    def _is_character_perceived(self, char):
+        """Check if a character is within the player's perception (vision cone or sound radius)."""
         player = self.state.player
-        if not player:
+        if not player or char is player:
             return False
         
-        player_y = player['y']
         player_x = player['x']
+        player_y = player['y']
+        char_x = char['x']
+        char_y = char['y']
         
-        for pos, tree in self.state.interactables.trees.items():
-            tree_x, tree_y = pos
-            tree_center_x = tree_x + 0.5
-            tree_sort_y = tree_y + 0.5
+        dx = char_x - player_x
+        dy = char_y - player_y
+        distance = math.sqrt(dx * dx + dy * dy)
+        
+        # Check sound radius first (simpler)
+        if distance <= SOUND_RADIUS:
+            return True
+        
+        # Check vision cone
+        if distance <= VISION_RANGE:
+            # Get player facing direction
+            facing = player.get('facing', 'down')
+            facing_vectors = {
+                'up': (0, -1),
+                'down': (0, 1),
+                'left': (-1, 0),
+                'right': (1, 0),
+                'up-left': (-0.707, -0.707),
+                'up-right': (0.707, -0.707),
+                'down-left': (-0.707, 0.707),
+                'down-right': (0.707, 0.707),
+            }
+            face_x, face_y = facing_vectors.get(facing, (0, 1))
             
-            # Player is behind tree if player's Y < tree's sort Y
-            # AND player is within the tree's visual height (not way above it)
-            # Tree sprite is ~2.5 cells tall, so check if player is within that range
-            if player_y < tree_sort_y and player_y > tree_y - 2.0:
-                # Check if horizontally overlapping
-                tree_half_width = 0.8
-                if abs(player_x - tree_center_x) < tree_half_width:
+            # Normalize direction to character
+            if distance > 0:
+                dir_x = dx / distance
+                dir_y = dy / distance
+                
+                # Dot product gives cos of angle between facing and direction to char
+                dot = face_x * dir_x + face_y * dir_y
+                
+                # Check if within cone angle
+                half_angle = math.radians(VISION_CONE_ANGLE / 2)
+                if dot >= math.cos(half_angle):
                     return True
+        
         return False
+    
+    def _draw_perceived_outlines(self):
+        """Draw outlines for player and all perceived characters that are occluded."""
+        # Use deferred UI cache - these are the perceived+occluded characters
+        if not self._deferred_ui_cache:
+            return
+        
+        # Collect outline info with occluding objects
+        characters_to_outline = []
+        for ui_info in self._deferred_ui_cache:
+            char = ui_info['char']
+            occluding_objects = self._get_occluding_objects(char['x'], char['y'])
+            if occluding_objects:
+                characters_to_outline.append((ui_info, occluding_objects))
+        
+        if not characters_to_outline:
+            return
+        
+        # Create/get mask render texture (screen-sized)
+        mask_w = self.canvas_width
+        mask_h = self.canvas_height
+        if not hasattr(self, '_occluder_mask_rt') or self._occluder_mask_rt is None:
+            self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
+        elif self._occluder_mask_rt.texture.width != mask_w or self._occluder_mask_rt.texture.height != mask_h:
+            rl.unload_render_texture(self._occluder_mask_rt)
+            self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
+            self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
+        
+        if not hasattr(self, '_outline_rt') or self._outline_rt is None:
+            self._outline_rt = rl.load_render_texture(mask_w, mask_h)
+        elif self._outline_rt.texture.width != mask_w or self._outline_rt.texture.height != mask_h:
+            rl.unload_render_texture(self._outline_rt)
+            self._outline_rt = rl.load_render_texture(mask_w, mask_h)
+        
+        cell_size = self._cam_cell_size
+        
+        # Draw all occluding objects to mask
+        rl.begin_texture_mode(self._occluder_mask_rt)
+        rl.clear_background(rl.Color(0, 0, 0, 0))
+        
+        # Collect all unique occluding objects
+        all_occluders = set()
+        for ui_info, occluding_objects in characters_to_outline:
+            for occluder_type, pos, config in occluding_objects:
+                all_occluders.add((occluder_type, pos))
+        
+        for occluder_type, pos in all_occluders:
+            config = OCCLUDER_CONFIG.get(occluder_type)
+            if not config:
+                continue
+            tex = self.world_textures.get(config['texture_key'])
+            if not tex:
+                continue
+            
+            draw_height = int(cell_size * config['draw_height_mult'])
+            draw_width = int(draw_height * config['draw_aspect'])
+            
+            ox, oy = pos
+            screen_x, screen_y = self._world_to_screen(ox, oy)
+            obj_blit_x = screen_x + cell_size / 2 - draw_width / 2
+            obj_blit_y = screen_y + cell_size - draw_height
+            
+            # Check if animated
+            if config.get('animated') and occluder_type in self.occluder_frames:
+                frames = self.occluder_frames[occluder_type]
+                frame_duration = config.get('frame_duration', 0.1)
+                offset = (ox * 7 + oy * 13) % len(frames)
+                frame_time = time.time() + offset * frame_duration
+                frame_index = int(frame_time / frame_duration) % len(frames)
+                source = frames[frame_index]
+            else:
+                source = rl.Rectangle(0, 0, tex.width, tex.height)
+            
+            dest = rl.Rectangle(obj_blit_x, obj_blit_y, draw_width, draw_height)
+            rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+        
+        rl.end_texture_mode()
+        
+        # Draw all character outlines to outline render texture
+        rl.begin_texture_mode(self._outline_rt)
+        rl.clear_background(rl.Color(0, 0, 0, 0))
+        
+        shader = self._init_outline_shader()
+        
+        for ui_info, occluding_objects in characters_to_outline:
+            char = ui_info['char']
+            pixel_cx = ui_info['pixel_cx']
+            pixel_cy = ui_info['pixel_cy']
+            sprite_width = ui_info['sprite_width']
+            sprite_height = ui_info['sprite_height']
+            frame_info = ui_info.get('frame_info')
+            should_flip = ui_info.get('should_flip', False)
+            
+            if not frame_info:
+                continue
+            
+            char_color = self._get_character_color(char)
+            recolored_texture = self.sprite_manager.recolor_red_to_color(frame_info, char_color)
+            if not recolored_texture:
+                continue
+            
+            blit_x = pixel_cx - sprite_width / 2
+            blit_y = pixel_cy - sprite_height / 2
+            
+            if should_flip:
+                source = rl.Rectangle(recolored_texture.width, 0, 
+                                     -recolored_texture.width, recolored_texture.height)
+            else:
+                source = rl.Rectangle(0, 0, recolored_texture.width, recolored_texture.height)
+            
+            dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
+            
+            texture_size = rl.ffi.new("float[2]", [recolored_texture.width, recolored_texture.height])
+            outline_width = rl.ffi.new("float *", 1.0)
+            rl.set_shader_value(shader, self._outline_texture_size_loc, texture_size, rl.SHADER_UNIFORM_VEC2)
+            rl.set_shader_value(shader, self._outline_width_loc, outline_width, rl.SHADER_UNIFORM_FLOAT)
+            
+            rl.begin_shader_mode(shader)
+            rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            rl.end_shader_mode()
+        
+        rl.end_texture_mode()
+        
+        # Composite: draw outline masked by occluders
+        composite_shader = self._init_composite_shader()
+        rl.set_shader_value_texture(composite_shader, self._composite_mask_loc, self._occluder_mask_rt.texture)
+        
+        rl.begin_shader_mode(composite_shader)
+        outline_source = rl.Rectangle(0, mask_h, mask_w, -mask_h)
+        outline_dest = rl.Rectangle(0, 0, mask_w, mask_h)
+        rl.draw_texture_pro(self._outline_rt.texture, outline_source, outline_dest, rl.Vector2(0, 0), 0, rl.WHITE)
+        rl.end_shader_mode()
+    
+    def _get_occluder_items(self, occluder_type):
+        """Get all items of a specific occluder type.
+        Returns dict of {(x, y): data} for the occluder type.
+        """
+        if occluder_type == 'tree':
+            return self.state.interactables.trees
+        # Add other occluder sources here:
+        # elif occluder_type == 'building':
+        #     return self.state.interactables.buildings
+        # elif occluder_type == 'large_rock':
+        #     return self.state.interactables.large_rocks
+        return {}
+    
+    def _draw_single_occluder(self, occluder_type, pos, data):
+        """Draw a single occluder of any type, with optional animation."""
+        config = OCCLUDER_CONFIG.get(occluder_type)
+        if not config:
+            return
+        
+        texture_key = config['texture_key']
+        tex = self.world_textures.get(texture_key)
+        if not tex:
+            return
+        
+        cell_size = self._cam_cell_size
+        draw_height = int(cell_size * config['draw_height_mult'])
+        draw_width = int(draw_height * config['draw_aspect'])
+        
+        x, y = pos
+        screen_x, screen_y = self._world_to_screen(x, y)
+        
+        # Center horizontally on cell, align bottom to cell bottom
+        blit_x = screen_x + cell_size / 2 - draw_width / 2
+        blit_y = screen_y + cell_size - draw_height
+        
+        # Check if animated
+        if config.get('animated') and occluder_type in self.occluder_frames:
+            frames = self.occluder_frames[occluder_type]
+            frame_duration = config.get('frame_duration', 0.1)
+            
+            # Add position-based offset so trees don't all sync
+            # Use position hash to create variation
+            offset = (x * 7 + y * 13) % len(frames)
+            frame_time = time.time() + offset * frame_duration
+            
+            frame_index = int(frame_time / frame_duration) % len(frames)
+            source = frames[frame_index]
+        else:
+            source = rl.Rectangle(0, 0, tex.width, tex.height)
+        
+        dest = rl.Rectangle(blit_x, blit_y, draw_width, draw_height)
+        rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+    
+    def _get_occluding_objects(self, char_x, char_y):
+        """Get all occluders that hide a character at the given position.
+        Returns list of (occluder_type, pos, config) tuples.
+        """
+        occluding = []
+        
+        for occluder_type, config in OCCLUDER_CONFIG.items():
+            occluder_items = self._get_occluder_items(occluder_type)
+            sort_y_offset = config['sort_y_offset']
+            occlusion_height = config['occlusion_height']
+            occlusion_width = config['occlusion_width']
+            
+            for pos, data in occluder_items.items():
+                obj_x, obj_y = pos
+                obj_center_x = obj_x + 0.5
+                obj_sort_y = obj_y + sort_y_offset
+                
+                # Character is behind object if char_y < object's sort_y
+                # AND character is within the object's visual height
+                if char_y < obj_sort_y and char_y > obj_y - occlusion_height:
+                    # Check horizontal overlap
+                    if abs(char_x - obj_center_x) < occlusion_width:
+                        occluding.append((occluder_type, pos, config))
+        
+        return occluding
+    
+    def _init_composite_shader(self):
+        """Initialize shader that composites outline with tree mask."""
+        if hasattr(self, '_composite_shader'):
+            return self._composite_shader
+        
+        fragment_shader = """
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;  // Outline render texture
+uniform sampler2D texture1;  // Tree mask
+out vec4 finalColor;
+
+void main() {
+    vec4 outline = texture(texture0, fragTexCoord);
+    // Mask texture is also a render texture, so flip Y
+    vec2 maskCoord = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
+    vec4 mask = texture(texture1, maskCoord);
+    
+    // Only show outline where mask (tree) is opaque
+    if (mask.a < 0.1) {
+        discard;
+    }
+    
+    finalColor = outline;
+}
+"""
+        
+        vertex_shader = """
+#version 330
+in vec3 vertexPosition;
+in vec2 vertexTexCoord;
+in vec4 vertexColor;
+uniform mat4 mvp;
+out vec2 fragTexCoord;
+out vec4 fragColor;
+
+void main() {
+    fragTexCoord = vertexTexCoord;
+    fragColor = vertexColor;
+    gl_Position = mvp * vec4(vertexPosition, 1.0);
+}
+"""
+        
+        self._composite_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
+        self._composite_mask_loc = rl.get_shader_location(self._composite_shader, "texture1")
+        
+        return self._composite_shader
     
     def _init_outline_shader(self):
         """Initialize the outline shader if not already done."""
@@ -1102,100 +1467,14 @@ void main() {
         
         return self._outline_shader
     
-    def _draw_player_outline_shader(self):
-        """Draw a white outline of the player sprite using a shader."""
-        # Use cached frame info from character drawing to ensure same animation frame
-        if not hasattr(self, '_player_frame_cache') or self._player_frame_cache is None:
-            return
-        
-        cache = self._player_frame_cache
-        frame_info = cache.get('frame_info')
-        
-        if not frame_info:
-            return
-        
-        # Get recolored texture from the cached frame_info
-        char_color = cache.get('char_color')
-        recolored_texture = self.sprite_manager.recolor_red_to_color(frame_info, char_color)
-        
-        if not recolored_texture:
-            return
-        
-        should_flip = cache['should_flip']
-        pixel_cx = cache['pixel_cx']
-        pixel_cy = cache['pixel_cy']
-        sprite_width = cache['sprite_width']
-        sprite_height = cache['sprite_height']
-        
-        blit_x = pixel_cx - sprite_width / 2
-        blit_y = pixel_cy - sprite_height / 2
-        
-        # Prepare source rectangle (handle flipping)
-        if should_flip:
-            source = rl.Rectangle(recolored_texture.width, 0, 
-                                 -recolored_texture.width, recolored_texture.height)
-        else:
-            source = rl.Rectangle(0, 0, recolored_texture.width, recolored_texture.height)
-        
-        dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
-        
-        # Initialize and use outline shader
-        shader = self._init_outline_shader()
-        
-        # Set shader uniforms
-        texture_size = rl.ffi.new("float[2]", [recolored_texture.width, recolored_texture.height])
-        outline_width = rl.ffi.new("float *", 1.0)
-        
-        rl.set_shader_value(shader, self._outline_texture_size_loc, texture_size, rl.SHADER_UNIFORM_VEC2)
-        rl.set_shader_value(shader, self._outline_width_loc, outline_width, rl.SHADER_UNIFORM_FLOAT)
-        
-        # Draw with shader
-        rl.begin_shader_mode(shader)
-        rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-        rl.end_shader_mode()
-    
     def _draw_single_tree(self, tree, pos):
-        """Draw a single tree"""
-        cell_size = self._cam_cell_size
-        tree_tex = self.world_textures.get('tree')
-        
-        if not tree_tex:
-            return
-        
-        tree_height = int(cell_size * 2.5)
-        tree_width = int(tree_height * 66 / 77)
-        
-        x, y = pos
-        screen_x, screen_y = self._world_to_screen(x, y)
-        
-        blit_x = screen_x + cell_size / 2 - tree_width / 2
-        blit_y = screen_y + cell_size - tree_height
-        
-        source = rl.Rectangle(0, 0, tree_tex.width, tree_tex.height)
-        dest = rl.Rectangle(blit_x, blit_y, tree_width, tree_height)
-        rl.draw_texture_pro(tree_tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+        """Draw a single tree (legacy - now use _draw_single_occluder)"""
+        self._draw_single_occluder('tree', pos, tree)
     
     def _draw_trees(self):
         """Draw all trees (legacy - now handled by _draw_trees_and_characters)"""
-        cell_size = self._cam_cell_size
-        tree_tex = self.world_textures.get('tree')
-        
-        if not tree_tex:
-            return
-        
-        tree_height = int(cell_size * 2.5)
-        tree_width = int(tree_height * 66 / 77)
-        
         for pos, tree in self.state.interactables.trees.items():
-            x, y = pos
-            screen_x, screen_y = self._world_to_screen(x, y)
-            
-            blit_x = screen_x + cell_size / 2 - tree_width / 2
-            blit_y = screen_y + cell_size - tree_height
-            
-            source = rl.Rectangle(0, 0, tree_tex.width, tree_tex.height)
-            dest = rl.Rectangle(blit_x, blit_y, tree_width, tree_height)
-            rl.draw_texture_pro(tree_tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            self._draw_single_occluder('tree', pos, tree)
     
     def _draw_barrels(self):
         """Draw all barrels"""
@@ -1325,8 +1604,8 @@ void main() {
         b = int(139 + t * (230 - 139))
         return f"#{r:02x}{g:02x}{b:02x}"
     
-    def _draw_single_character(self, char):
-        """Draw a single character"""
+    def _draw_single_character_sprite(self, char):
+        """Draw a single character's sprite only (UI drawn separately on top)"""
         cell_size = self._cam_cell_size
         current_time = time.time()
         
@@ -1340,18 +1619,6 @@ void main() {
         
         # Get sprite frame info
         frame_info, should_flip = self.sprite_manager.get_frame(char, current_time)
-        
-        # Cache player frame info for outline drawing
-        if char is self.state.player and frame_info:
-            self._player_frame_cache = {
-                'frame_info': frame_info,
-                'should_flip': should_flip,
-                'pixel_cx': pixel_cx,
-                'pixel_cy': pixel_cy,
-                'sprite_width': sprite_width,
-                'sprite_height': sprite_height,
-                'char_color': self._get_character_color(char)
-            }
         
         if frame_info:
             char_color = self._get_character_color(char)
@@ -1391,6 +1658,27 @@ void main() {
             blit_x = pixel_cx - sprite_width / 2
             blit_y = pixel_cy - sprite_height / 2
             rl.draw_rectangle(int(blit_x), int(blit_y), sprite_width, sprite_height, hex_to_color(char_color))
+        
+        # Cache UI info for drawing on top later
+        if not hasattr(self, '_character_ui_cache'):
+            self._character_ui_cache = []
+        self._character_ui_cache.append({
+            'char': char,
+            'pixel_cx': pixel_cx,
+            'pixel_cy': pixel_cy,
+            'sprite_width': sprite_width,
+            'sprite_height': sprite_height,
+            'frame_info': frame_info,
+            'should_flip': should_flip,
+        })
+    
+    def _draw_character_ui(self, ui_info):
+        """Draw character name and health/stamina bars (on top of everything)"""
+        char = ui_info['char']
+        pixel_cx = ui_info['pixel_cx']
+        pixel_cy = ui_info['pixel_cy']
+        sprite_width = ui_info['sprite_width']
+        sprite_height = ui_info['sprite_height']
         
         # Draw first name below sprite
         first_name = char['name'].split()[0]
@@ -1434,8 +1722,20 @@ void main() {
                 rl.draw_rectangle(bar_x, stamina_bar_y, stamina_fill_width, bar_height, 
                                  rl.Color(COLOR_STAMINA.r, COLOR_STAMINA.g, COLOR_STAMINA.b, 220))
     
+    def _draw_single_character(self, char):
+        """Draw a single character (legacy - calls sprite + UI)"""
+        if not hasattr(self, '_character_ui_cache'):
+            self._character_ui_cache = []
+        self._draw_single_character_sprite(char)
+        # For legacy calls, draw UI immediately
+        if self._character_ui_cache:
+            ui_info = self._character_ui_cache[-1]
+            self._draw_character_ui(ui_info)
+    
     def _draw_characters(self):
         """Draw all characters (legacy - now handled by _draw_trees_and_characters)"""
+        if not hasattr(self, '_character_ui_cache'):
+            self._character_ui_cache = []
         for char in self.state.characters:
             self._draw_single_character(char)
     
