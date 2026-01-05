@@ -2513,6 +2513,10 @@ void main() {
         sprite_height = int(CHARACTER_HEIGHT * cell_size)
         sprite_width = int(CHARACTER_WIDTH * cell_size)
         
+        # Check if character should flash red from being hit
+        hit_flash_until = char.get('hit_flash_until', 0)
+        is_hit_flashing = hit_flash_until > self.state.ticks
+        
         # Get sprite frame info
         frame_info, should_flip = self.sprite_manager.get_frame(char, current_time)
         
@@ -2533,7 +2537,10 @@ void main() {
                     source = rl.Rectangle(0, 0, recolored_texture.width, recolored_texture.height)
                 
                 dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
-                rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+                
+                # Apply red tint if hit flashing, otherwise white (normal)
+                tint = rl.Color(255, 100, 100, 255) if is_hit_flashing else rl.WHITE
+                rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, tint)
             else:
                 # Fallback if recoloring failed - draw original frame
                 texture = frame_info['texture']
@@ -2547,13 +2554,17 @@ void main() {
                     source = source_rect
                 
                 dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
-                rl.draw_texture_pro(texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+                tint = rl.Color(255, 100, 100, 255) if is_hit_flashing else rl.WHITE
+                rl.draw_texture_pro(texture, source, dest, rl.Vector2(0, 0), 0, tint)
         else:
             # Fallback to colored rectangle
             char_color = self._get_character_color(char)
             blit_x = pixel_cx - sprite_width / 2
             blit_y = pixel_cy - sprite_height / 2
-            rl.draw_rectangle(int(blit_x), int(blit_y), sprite_width, sprite_height, hex_to_color(char_color))
+            if is_hit_flashing:
+                rl.draw_rectangle(int(blit_x), int(blit_y), sprite_width, sprite_height, rl.Color(255, 100, 100, 255))
+            else:
+                rl.draw_rectangle(int(blit_x), int(blit_y), sprite_width, sprite_height, hex_to_color(char_color))
         
         # Cache UI info for drawing on top later
         if not hasattr(self, '_character_ui_cache'):

@@ -292,6 +292,18 @@ class GameLogic:
             target.health -= damage
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
+            # Apply knockback - push target away from attacker
+            self._apply_knockback(attacker, target)
+            
+            # Set hit flash for visual feedback
+            target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
+            
+            # Clear face_target and intent - being hit interrupts current behavior
+            # This forces immediate re-evaluation (e.g. bystander -> fight back)
+            target['face_target'] = None
+            if target.intent and target.intent.get('reason') == 'bystander':
+                target.clear_intent()
+            
             # Target remembers being attacked
             self.remember_attack(target, attacker, damage)
             
@@ -379,6 +391,18 @@ class GameLogic:
         target.health -= damage
         self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
         
+        # Apply knockback - push target away from attacker
+        self._apply_knockback(attacker, target)
+        
+        # Set hit flash for visual feedback
+        target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
+        
+        # Clear face_target and intent - being hit interrupts current behavior
+        # This forces immediate re-evaluation (e.g. bystander -> fight back)
+        target['face_target'] = None
+        if target.intent and target.intent.get('reason') == 'bystander':
+            target.clear_intent()
+        
         # Target remembers being attacked
         self.remember_attack(target, attacker, damage)
         
@@ -424,6 +448,59 @@ class GameLogic:
             self.broadcast_violence(attacker, target)
         
         return result
+    
+    def _apply_knockback(self, attacker, target, knockback_dist=0.3):
+        """Apply knockback to target, pushing them away from attacker.
+        
+        Args:
+            attacker: Character doing the attacking
+            target: Character being hit
+            knockback_dist: Distance to push (default 0.3 cells)
+        """
+        # Calculate direction from attacker to target
+        if attacker.zone == target.zone and attacker.zone is not None:
+            # Same interior - use local coords
+            dx = target.prevailing_x - attacker.prevailing_x
+            dy = target.prevailing_y - attacker.prevailing_y
+        else:
+            dx = target.x - attacker.x
+            dy = target.y - attacker.y
+        
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.01:
+            return  # On top of each other, can't determine direction
+        
+        # Normalize direction
+        dx /= dist
+        dy /= dist
+        
+        # Apply knockback in prevailing coords
+        new_x = target.prevailing_x + dx * knockback_dist
+        new_y = target.prevailing_y + dy * knockback_dist
+        
+        # Check bounds based on zone
+        if target.zone:
+            interior = self.state.interiors.get_interior(target.zone)
+            if interior:
+                # Clamp to interior bounds
+                new_x = max(0.3, min(interior.width - 0.3, new_x))
+                new_y = max(0.3, min(interior.height - 0.3, new_y))
+                # Check if blocked by furniture
+                if interior.is_position_blocked(int(new_x), int(new_y)):
+                    return  # Don't apply knockback into furniture
+                # Convert back to world coords and set
+                world_x, world_y = interior.interior_to_world(new_x, new_y)
+                target['x'] = world_x
+                target['y'] = world_y
+        else:
+            # Exterior - clamp to map bounds
+            new_x = max(0.3, min(SIZE - 0.3, new_x))
+            new_y = max(0.3, min(SIZE - 0.3, new_y))
+            # Check if blocked (trees, houses, etc)
+            if self.state.is_position_blocked(new_x, new_y, exclude_char=target, zone=None):
+                return  # Don't knockback into obstacles
+            target['x'] = new_x
+            target['y'] = new_y
     
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
