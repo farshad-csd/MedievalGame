@@ -261,6 +261,17 @@ class BoardGUI:
             self.debug_window = DebugWindow(self.state, self.logic)
         except ImportError:
             pass
+        
+        # Frame-level rendering cache (cleared each frame for performance)
+        self._frame_cache = {}
+        self._visible_min_x = 0
+        self._visible_max_x = SIZE
+        self._visible_min_y = 0
+        self._visible_max_y = SIZE
+        
+        # Spatial hash for trees (built once, massive performance improvement)
+        self._tree_spatial_hash = None
+        self._tree_spatial_chunk_size = 16  # 16x16 cell chunks
     
     def _init_window(self):
         """Initialize Raylib window with appropriate size."""
@@ -376,14 +387,31 @@ class BoardGUI:
     
     def run(self):
         """Main game loop"""
+        # Profiling setup
+        self._profile_times = {'input': 0, 'logic': 0, 'render': 0, 'debug': 0}
+        self._profile_frame_count = 0
+        self._profile_last_report = time.time()
+        
         while self.running and not rl.window_should_close():
             # Update music stream
             if self.music:
                 rl.update_music_stream(self.music)
             
+            # Profile input handling
+            t0 = time.time()
             self._handle_input()
+            t1 = time.time()
+            self._profile_times['input'] += t1 - t0
+            
+            # Profile game logic
             self._game_loop()
+            t2 = time.time()
+            self._profile_times['logic'] += t2 - t1
+            
+            # Profile rendering
             self._render_frame()
+            t3 = time.time()
+            self._profile_times['render'] += t3 - t2
             
             # Update debug window if present
             if self.debug_window and self.debug_window.is_open():
@@ -396,6 +424,24 @@ class BoardGUI:
                     status = f"No player | Zoom:{self.zoom:.1f}x"
                 self.debug_window.set_status(status)
                 self.debug_window.update()
+            t4 = time.time()
+            self._profile_times['debug'] += t4 - t3
+            
+            self._profile_frame_count += 1
+            
+            # Report profiling every 2 seconds
+            if time.time() - self._profile_last_report > 2.0:
+                total = sum(self._profile_times.values())
+                if total > 0 and self._profile_frame_count > 0:
+                    fps = self._profile_frame_count / 2.0
+                    print(f"\n=== PROFILE ({fps:.1f} FPS, {self._profile_frame_count} frames) ===")
+                    print(f"  Input:  {self._profile_times['input']*1000/self._profile_frame_count:.2f}ms/frame ({100*self._profile_times['input']/total:.1f}%)")
+                    print(f"  Logic:  {self._profile_times['logic']*1000/self._profile_frame_count:.2f}ms/frame ({100*self._profile_times['logic']/total:.1f}%)")
+                    print(f"  Render: {self._profile_times['render']*1000/self._profile_frame_count:.2f}ms/frame ({100*self._profile_times['render']/total:.1f}%)")
+                    print(f"  Debug:  {self._profile_times['debug']*1000/self._profile_frame_count:.2f}ms/frame ({100*self._profile_times['debug']/total:.1f}%)")
+                self._profile_times = {'input': 0, 'logic': 0, 'render': 0, 'debug': 0}
+                self._profile_frame_count = 0
+                self._profile_last_report = time.time()
         
         # Cleanup
         self._cleanup()
@@ -1043,21 +1089,46 @@ class BoardGUI:
     
     def _render_frame(self):
         """Render the current game state"""
+        # Detailed render profiling
+        if not hasattr(self, '_render_profile'):
+            self._render_profile = {'grid': 0, 'trees_chars': 0, 'hud': 0, 'other': 0}
+            self._render_profile_count = 0
+        
         rl.begin_drawing()
         rl.clear_background(hex_to_color(BG_COLOR))
         
+        t0 = time.time()
         self._draw_canvas()
+        t1 = time.time()
         
         # Draw HUD overlay or inventory screen
         if self.inventory_open:
             self._draw_inventory_screen()
         else:
             self._draw_hud()
+        t2 = time.time()
         
         rl.end_drawing()
+        
+        self._render_profile['grid'] += t1 - t0
+        self._render_profile['hud'] += t2 - t1
+        self._render_profile_count += 1
+        
+        # Report every 60 frames
+        if self._render_profile_count >= 60:
+            print(f"  [Render breakdown] Canvas: {self._render_profile['grid']*1000/60:.2f}ms, HUD: {self._render_profile['hud']*1000/60:.2f}ms")
+            self._render_profile = {'grid': 0, 'trees_chars': 0, 'hud': 0, 'other': 0}
+            self._render_profile_count = 0
     
     def _draw_canvas(self):
         """Draw the game canvas with camera (zoom and pan)"""
+        # Detailed profiling
+        if not hasattr(self, '_canvas_profile'):
+            self._canvas_profile = {'setup': 0, 'grid': 0, 'trees_chars': 0, 'camps': 0, 'death': 0}
+            self._canvas_profile_count = 0
+        
+        _cp_t0 = time.time()
+        
         canvas_width = self.canvas_width
         canvas_height = self.canvas_height
         canvas_center_x = canvas_width / 2
@@ -1069,6 +1140,9 @@ class BoardGUI:
         self._cam_center_x = canvas_center_x
         self._cam_center_y = canvas_center_y
         self._cam_cell_size = cell_size
+        
+        # Clear frame cache at start of each frame (Fix #2: per-frame caching)
+        self._frame_cache = {}
         
         # Check if player is in an interior (and not looking through window)
         # OR if we're looking into an interior from outside
@@ -1096,11 +1170,24 @@ class BoardGUI:
         min_visible_y = max(0, min_visible_y)
         max_visible_y = min(SIZE, max_visible_y)
         
+        # Store visible bounds for use by other methods (Fix #1: view frustum culling)
+        self._visible_min_x = min_visible_x
+        self._visible_max_x = max_visible_x
+        self._visible_min_y = min_visible_y
+        self._visible_max_y = max_visible_y
+        
+        _cp_t1 = time.time()
+        self._canvas_profile['setup'] += _cp_t1 - _cp_t0
+        
         # Draw grid cells
         self._draw_grid(min_visible_x, max_visible_x, min_visible_y, max_visible_y)
+        _cp_t2 = time.time()
+        self._canvas_profile['grid'] += _cp_t2 - _cp_t1
         
         # Draw camps (these stay on ground level, not occluding)
         self._draw_camps()
+        _cp_t3 = time.time()
+        self._canvas_profile['camps'] += _cp_t3 - _cp_t2
         
         # Draw perception debug if enabled
         if SHOW_PERCEPTION_DEBUG:
@@ -1108,13 +1195,23 @@ class BoardGUI:
         
         # Draw all occluders (trees, houses, barrels, beds, stoves) and characters together, Y-sorted for proper depth
         self._draw_trees_and_characters()
+        _cp_t4 = time.time()
+        self._canvas_profile['trees_chars'] += _cp_t4 - _cp_t3
         
         # Draw death animations
         self._draw_death_animations()
+        _cp_t5 = time.time()
+        self._canvas_profile['death'] += _cp_t5 - _cp_t4
         
         # Draw window viewing indicator
         if self.window_viewing:
             self._draw_window_viewing_indicator()
+        
+        self._canvas_profile_count += 1
+        if self._canvas_profile_count >= 60:
+            print(f"    [Canvas] setup:{self._canvas_profile['setup']*1000/60:.1f}ms grid:{self._canvas_profile['grid']*1000/60:.1f}ms trees+chars:{self._canvas_profile['trees_chars']*1000/60:.1f}ms camps:{self._canvas_profile['camps']*1000/60:.1f}ms")
+            self._canvas_profile = {'setup': 0, 'grid': 0, 'trees_chars': 0, 'camps': 0, 'death': 0}
+            self._canvas_profile_count = 0
     
     def _draw_interior_canvas(self):
         """Draw the interior when player is inside a building or looking in from outside.
@@ -1145,6 +1242,13 @@ class BoardGUI:
         
         if not interior:
             return
+        
+        # Set visible bounds for interior (includes walls around the walkable area)
+        # Interiors are small, so include everything with margin
+        self._visible_min_x = -3
+        self._visible_max_x = interior.width + 3
+        self._visible_min_y = -3
+        self._visible_max_y = interior.height + 3
         
         cell_size = self._cam_cell_size
         tile_size = int(cell_size) + 1
@@ -1358,15 +1462,13 @@ class BoardGUI:
         """Draw all occluders and characters together, sorted by Y position for proper depth.
         Objects with smaller Y (higher on screen) are drawn first, so objects
         with larger Y (lower on screen) appear in front.
+        
+        OPTIMIZED: Uses cached visible-only occluders to avoid iterating all world objects.
         """
         # Collect all drawable entities with their sort key (Y position)
         drawables = []
         
         # Determine what zone we're rendering
-        # If window_viewing into interior: render that interior
-        # If window_viewing out: render exterior
-        # If player in interior: render interior
-        # Otherwise: render exterior
         player = self.state.player
         if self.window_viewing and self.window_viewing_interior is not None:
             rendering_zone = self.window_viewing_interior.name
@@ -1377,23 +1479,19 @@ class BoardGUI:
         else:
             rendering_zone = None  # Default to exterior
         
-        # Add all occluders from all sources
-        for occluder_type, config in OCCLUDER_CONFIG.items():
-            occluder_items = self._get_occluder_items(occluder_type, zone=rendering_zone)
-            sort_y_offset = config['sort_y_offset']
-            
-            for pos, data in occluder_items.items():
-                x, y = pos
-                sort_y = y + sort_y_offset
-                drawables.append(('occluder', sort_y, occluder_type, pos, data))
+        # OPTIMIZATION: Get visible-only occluders (cached per frame)
+        # This avoids iterating through ALL trees/objects in the world
+        visible_occluders = self._get_visible_occluders(rendering_zone)
+        
+        # Add visible occluders to drawables
+        for occluder_type, pos, data, sort_y in visible_occluders:
+            drawables.append(('occluder', sort_y, occluder_type, pos, data))
         
         # Add characters - only those in the same zone we're rendering
         for char in self.state.characters:
-            # Skip characters in different zones
             if char.zone != rendering_zone:
                 continue
             
-            # Use local coords when in interior, world coords otherwise
             if rendering_zone:
                 sort_y = char.prevailing_y
             else:
@@ -1404,25 +1502,25 @@ class BoardGUI:
         drawables.sort(key=lambda d: d[1])
         
         # Pre-calculate which characters are perceived and occluded
+        # OPTIMIZATION: Only check visible occluders for occlusion
         perceived_occluded_chars = set()
         for char in self.state.characters:
-            # Skip characters not in the rendering zone
             if char.zone != rendering_zone:
                 continue
             is_player = char is self.state.player
             is_perceived = is_player or self._is_character_perceived(char)
-            # Use local coords when in interior
-            if rendering_zone:
-                check_x, check_y = char.prevailing_x, char.prevailing_y
-            else:
-                check_x, check_y = char.x, char.y
-            is_occluded = len(self._get_occluding_objects(check_x, check_y, zone=rendering_zone)) > 0
-            if is_perceived and is_occluded:
-                perceived_occluded_chars.add(id(char))
+            if is_perceived:
+                if rendering_zone:
+                    check_x, check_y = char.prevailing_x, char.prevailing_y
+                else:
+                    check_x, check_y = char.x, char.y
+                # Use fast visible-only occlusion check
+                if self._is_occluded_by_visible(check_x, check_y, visible_occluders, rendering_zone):
+                    perceived_occluded_chars.add(id(char))
         
         # Reset caches
         self._character_ui_cache = []
-        self._deferred_ui_cache = []  # UI to draw on top of everything
+        self._deferred_ui_cache = []
         
         # Draw in sorted order
         for dtype, sort_y, entity, pos, data in drawables:
@@ -1430,10 +1528,8 @@ class BoardGUI:
                 self._draw_single_occluder(entity, pos, data)
             elif dtype == 'character':
                 self._draw_single_character_sprite(entity)
-                # Get the UI info we just cached
                 ui_info = self._character_ui_cache[-1]
                 
-                # Draw UI immediately unless perceived+occluded (defer those)
                 if id(entity) in perceived_occluded_chars:
                     self._deferred_ui_cache.append(ui_info)
                 else:
@@ -1442,9 +1538,141 @@ class BoardGUI:
         # Draw outlines for perceived occluded characters
         self._draw_perceived_outlines()
         
-        # Draw deferred UI on top of everything (for perceived+occluded characters)
+        # Draw deferred UI on top of everything
         for ui_info in self._deferred_ui_cache:
             self._draw_character_ui(ui_info)
+    
+    def _get_visible_occluders(self, zone):
+        """Get only occluders within the visible area. Cached per frame.
+        
+        Returns list of (occluder_type, pos, data, sort_y) tuples.
+        
+        Uses spatial hashing for trees to avoid iterating all trees in the world.
+        """
+        cache_key = ('visible_occluders', zone)
+        if cache_key in self._frame_cache:
+            return self._frame_cache[cache_key]
+        
+        result = []
+        
+        # Visible bounds with margin for tall objects
+        cull_margin = 3
+        min_x = self._visible_min_x - cull_margin
+        max_x = self._visible_max_x + cull_margin
+        min_y = self._visible_min_y - cull_margin
+        max_y = self._visible_max_y + cull_margin
+        
+        for occluder_type, config in OCCLUDER_CONFIG.items():
+            sort_y_offset = config['sort_y_offset']
+            
+            # OPTIMIZED: Use spatial hash for trees
+            if occluder_type == 'tree' and zone is None:
+                # Build spatial hash if not exists or if trees changed (game reset)
+                current_trees = self.state.interactables.trees
+                if (self._tree_spatial_hash is None or 
+                    getattr(self, '_tree_spatial_hash_source', None) is not current_trees):
+                    self._build_tree_spatial_hash()
+                
+                # Only query chunks that overlap visible area
+                chunk_size = self._tree_spatial_chunk_size
+                chunk_min_x = int(min_x) // chunk_size
+                chunk_max_x = int(max_x) // chunk_size + 1
+                chunk_min_y = int(min_y) // chunk_size
+                chunk_max_y = int(max_y) // chunk_size + 1
+                
+                for cx in range(chunk_min_x, chunk_max_x + 1):
+                    for cy in range(chunk_min_y, chunk_max_y + 1):
+                        chunk_trees = self._tree_spatial_hash.get((cx, cy), [])
+                        for pos, data in chunk_trees:
+                            x, y = pos
+                            if min_x <= x <= max_x and min_y <= y <= max_y:
+                                result.append((occluder_type, pos, data, y + sort_y_offset))
+                                
+            elif occluder_type == 'house' and zone is None:
+                for house in self.state.interactables.houses.values():
+                    y_start, x_start, y_end, x_end = house.bounds
+                    if x_end >= min_x and x_start <= max_x and y_end >= min_y and y_start <= max_y:
+                        pos = (x_start, y_end - 1)
+                        result.append((occluder_type, pos, house, y_end - 1 + sort_y_offset))
+            elif occluder_type == 'barrel':
+                for key, obj in self.state.interactables.barrels.items():
+                    if obj.zone == zone:
+                        x, y = obj.x, obj.y
+                        if min_x <= x <= max_x and min_y <= y <= max_y:
+                            result.append((occluder_type, (x, y), obj, y + sort_y_offset))
+            elif occluder_type == 'bed':
+                for key, obj in self.state.interactables.beds.items():
+                    if obj.zone == zone:
+                        x, y = obj.x, obj.y
+                        if min_x <= x <= max_x and min_y <= y <= max_y:
+                            result.append((occluder_type, (x, y), obj, y + sort_y_offset))
+            elif occluder_type == 'stove':
+                for key, obj in self.state.interactables.stoves.items():
+                    if obj.zone == zone:
+                        x, y = obj.x, obj.y
+                        if min_x <= x <= max_x and min_y <= y <= max_y:
+                            result.append((occluder_type, (x, y), obj, y + sort_y_offset))
+        
+        self._frame_cache[cache_key] = result
+        return result
+    
+    def _build_tree_spatial_hash(self):
+        """Build spatial hash for trees. Called once, speeds up visible tree queries.
+        
+        Also stores reference to detect if trees dict changes (game reset).
+        """
+        self._tree_spatial_hash = {}
+        self._tree_spatial_hash_source = self.state.interactables.trees  # Track source for invalidation
+        chunk_size = self._tree_spatial_chunk_size
+        
+        for pos, data in self.state.interactables.trees.items():
+            x, y = pos
+            chunk_x = int(x) // chunk_size
+            chunk_y = int(y) // chunk_size
+            chunk_key = (chunk_x, chunk_y)
+            
+            if chunk_key not in self._tree_spatial_hash:
+                self._tree_spatial_hash[chunk_key] = []
+            self._tree_spatial_hash[chunk_key].append((pos, data))
+    
+    def _is_occluded_by_visible(self, char_x, char_y, visible_occluders, zone):
+        """Fast occlusion check using only visible occluders.
+        
+        Returns True if character is occluded by any visible occluder.
+        """
+        for occluder_type, pos, data, sort_y in visible_occluders:
+            config = OCCLUDER_CONFIG.get(occluder_type)
+            if not config:
+                continue
+            
+            # Houses need special handling
+            if occluder_type == 'house':
+                if zone is None:
+                    house = data
+                    y_start, x_start, y_end, x_end = house.bounds
+                    house_center_x = (x_start + x_end) / 2
+                    house_width = x_end - x_start
+                    if char_y < y_end and char_y > y_start:
+                        if abs(char_x - house_center_x) < house_width / 2:
+                            return True
+                continue
+            
+            obj_x, obj_y = pos
+            occlusion_height = config['occlusion_height']
+            occlusion_width = config['occlusion_width']
+            
+            # Quick distance check first
+            if abs(obj_x - char_x) > 2 or abs(obj_y - char_y) > 3:
+                continue
+            
+            obj_center_x = obj_x + 0.5
+            obj_sort_y = obj_y + config['sort_y_offset']
+            
+            if char_y < obj_sort_y and char_y > obj_y - occlusion_height:
+                if abs(char_x - obj_center_x) < occlusion_width:
+                    return True
+        
+        return False
     
     def _is_character_perceived(self, char):
         """Check if a character is within the player's perception (vision cone or sound radius).
@@ -1459,17 +1687,60 @@ class BoardGUI:
         return can_perceive
     
     def _draw_perceived_outlines(self):
-        """Draw outlines for player and all perceived characters that are occluded."""
+        """Draw outlines for player and all perceived characters that are occluded.
+        
+        OPTIMIZED: Uses cached visible occluders instead of re-querying all world objects.
+        """
         # Use deferred UI cache - these are the perceived+occluded characters
         if not self._deferred_ui_cache:
             return
         
-        # Collect outline info with occluding objects
+        # Get the cached visible occluders (already computed this frame)
+        # Determine rendering zone from first character
+        if self._deferred_ui_cache:
+            first_char = self._deferred_ui_cache[0]['char']
+            rendering_zone = first_char.zone if hasattr(first_char, 'zone') else first_char.get('zone')
+        else:
+            rendering_zone = None
+        
+        visible_occluders = self._frame_cache.get(('visible_occluders', rendering_zone), [])
+        
+        # Collect outline info - find which visible occluders are hiding each character
         characters_to_outline = []
         for ui_info in self._deferred_ui_cache:
             char = ui_info['char']
-            char_zone = char.get('zone') if isinstance(char, dict) else getattr(char, 'zone', None)
-            occluding_objects = self._get_occluding_objects(char['x'], char['y'], zone=char_zone)
+            char_x = char['x']
+            char_y = char['y']
+            
+            # Find occluders hiding this character (from visible set only)
+            occluding_objects = []
+            for occluder_type, pos, data, sort_y in visible_occluders:
+                config = OCCLUDER_CONFIG.get(occluder_type)
+                if not config:
+                    continue
+                
+                if occluder_type == 'house':
+                    house = data
+                    y_start, x_start, y_end, x_end = house.bounds
+                    house_center_x = (x_start + x_end) / 2
+                    house_width = x_end - x_start
+                    if char_y < y_end and char_y > y_start:
+                        if abs(char_x - house_center_x) < house_width / 2:
+                            occluding_objects.append((occluder_type, pos, config))
+                else:
+                    obj_x, obj_y = pos
+                    if abs(obj_x - char_x) > 2 or abs(obj_y - char_y) > 3:
+                        continue
+                    
+                    occlusion_height = config['occlusion_height']
+                    occlusion_width = config['occlusion_width']
+                    obj_center_x = obj_x + 0.5
+                    obj_sort_y = obj_y + config['sort_y_offset']
+                    
+                    if char_y < obj_sort_y and char_y > obj_y - occlusion_height:
+                        if abs(char_x - obj_center_x) < occlusion_width:
+                            occluding_objects.append((occluder_type, pos, config))
+            
             if occluding_objects:
                 characters_to_outline.append((ui_info, occluding_objects))
         
@@ -1483,7 +1754,6 @@ class BoardGUI:
             self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
         elif self._occluder_mask_rt.texture.width != mask_w or self._occluder_mask_rt.texture.height != mask_h:
             rl.unload_render_texture(self._occluder_mask_rt)
-            self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
             self._occluder_mask_rt = rl.load_render_texture(mask_w, mask_h)
         
         if not hasattr(self, '_outline_rt') or self._outline_rt is None:
@@ -1695,23 +1965,33 @@ class BoardGUI:
         Args:
             occluder_type: Type of occluder ('tree', 'barrel', 'bed', 'stove', 'house')
             zone: None for exterior world, interior name for inside a building
+        
+        Uses frame-level caching to avoid rebuilding dictionaries multiple times per frame.
         """
+        # Fix #2: Frame-level caching - check cache first
+        cache_key = (occluder_type, zone)
+        if cache_key in self._frame_cache:
+            return self._frame_cache[cache_key]
+        
+        # Build the result
+        result = {}
+        
         if occluder_type == 'tree':
             # Trees are always exterior (zone=None)
             if zone is None:
-                return self.state.interactables.trees
-            return {}
+                result = self.state.interactables.trees
+            # else result stays empty dict
         elif occluder_type == 'barrel':
             # Filter barrels by zone - keys are (x, y, zone)
-            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.barrels.items()
+            result = {(obj.x, obj.y): obj for key, obj in self.state.interactables.barrels.items()
                     if obj.zone == zone}
         elif occluder_type == 'bed':
             # Filter beds by zone - keys are (x, y, zone)
-            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.beds.items()
+            result = {(obj.x, obj.y): obj for key, obj in self.state.interactables.beds.items()
                     if obj.zone == zone}
         elif occluder_type == 'stove':
             # Filter stoves by zone - keys are (x, y, zone)
-            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.stoves.items()
+            result = {(obj.x, obj.y): obj for key, obj in self.state.interactables.stoves.items()
                     if obj.zone == zone}
         elif occluder_type == 'house':
             # Houses are always exterior (zone=None)
@@ -1722,9 +2002,12 @@ class BoardGUI:
                 for house in self.state.interactables.houses.values():
                     y_start, x_start, y_end, x_end = house.bounds
                     houses[(x_start, y_end - 1)] = house
-                return houses
-            return {}
-        return {}
+                result = houses
+            # else result stays empty dict
+        
+        # Cache and return
+        self._frame_cache[cache_key] = result
+        return result
     
     def _draw_single_occluder(self, occluder_type, pos, data):
         """Draw a single occluder of any type, with optional animation."""
@@ -1891,8 +2174,14 @@ class BoardGUI:
             char_x: Character X position
             char_y: Character Y position
             zone: None for exterior, interior name for inside a building
+        
+        Uses position-based filtering to skip distant occluders early.
         """
         occluding = []
+        
+        # Maximum distance an occluder can be and still occlude a character
+        # Based on max occlusion_height (trees ~2.0) + some margin
+        max_occlusion_distance = 4.0
         
         for occluder_type, config in OCCLUDER_CONFIG.items():
             # Special handling for houses (multi-cell) - only in exterior
@@ -1920,6 +2209,14 @@ class BoardGUI:
             
             for pos, data in occluder_items.items():
                 obj_x, obj_y = pos
+                
+                # Fix #2: Early distance check - skip occluders too far away
+                # This is a quick bounding box check before detailed occlusion math
+                if abs(obj_x - char_x) > max_occlusion_distance:
+                    continue
+                if abs(obj_y - char_y) > max_occlusion_distance:
+                    continue
+                
                 obj_center_x = obj_x + 0.5
                 obj_sort_y = obj_y + sort_y_offset
                 

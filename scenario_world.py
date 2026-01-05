@@ -11,6 +11,7 @@ import json
 # =============================================================================
 #WORLD_DATA = generate_areas(60, 10, 2, seed=None, name="Dunmere", trees=0.05)
 WORLD_DATA = generate_areas(30, 0, 2, seed=4, name="Dunmere", trees=0.03)
+#WORLD_DATA = generate_areas(350, 20, 4, seed=4, name="Dunmere", trees=0.08)
 
 # =============================================================================
 # DERIVED CONSTANTS
