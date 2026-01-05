@@ -1174,11 +1174,9 @@ class BoardGUI:
                     rl.Color(180, 175, 160, 100)
                 )
         
-        # Draw characters in interior (only if they're in this interior's zone)
-        # When looking in from outside, player won't be drawn (they're not in this zone)
-        for char in self.state.characters:
-            if char.zone == interior.name:
-                self._draw_single_character_sprite(char)
+        # Draw characters and objects in interior using the unified rendering function
+        # This reuses the same code path as exterior rendering - zone filtering handles the rest
+        self._draw_trees_and_characters()
         
         # Draw perception debug if enabled
         if SHOW_PERCEPTION_DEBUG:
@@ -1319,16 +1317,23 @@ class BoardGUI:
         drawables = []
         
         # Determine what zone we're rendering
-        # If window_viewing, we're rendering exterior (zone = None)
-        # Otherwise, render the zone the player is in
+        # If window_viewing into interior: render that interior
+        # If window_viewing out: render exterior
+        # If player in interior: render interior
+        # Otherwise: render exterior
         player = self.state.player
-        rendering_zone = None  # Default to exterior
-        if player and player.zone is not None and not self.window_viewing:
+        if self.window_viewing and self.window_viewing_interior is not None:
+            rendering_zone = self.window_viewing_interior.name
+        elif self.window_viewing:
+            rendering_zone = None  # Looking out from inside = exterior
+        elif player and player.zone is not None:
             rendering_zone = player.zone
+        else:
+            rendering_zone = None  # Default to exterior
         
         # Add all occluders from all sources
         for occluder_type, config in OCCLUDER_CONFIG.items():
-            occluder_items = self._get_occluder_items(occluder_type)
+            occluder_items = self._get_occluder_items(occluder_type, zone=rendering_zone)
             sort_y_offset = config['sort_y_offset']
             
             for pos, data in occluder_items.items():
@@ -1365,7 +1370,7 @@ class BoardGUI:
                 check_x, check_y = char.prevailing_x, char.prevailing_y
             else:
                 check_x, check_y = char.x, char.y
-            is_occluded = len(self._get_occluding_objects(check_x, check_y)) > 0
+            is_occluded = len(self._get_occluding_objects(check_x, check_y, zone=rendering_zone)) > 0
             if is_perceived and is_occluded:
                 perceived_occluded_chars.add(id(char))
         
@@ -1396,130 +1401,16 @@ class BoardGUI:
             self._draw_character_ui(ui_info)
     
     def _is_character_perceived(self, char):
-        """Check if a character is within the player's perception (vision cone or sound radius)."""
+        """Check if a character is within the player's perception (vision cone or sound radius).
+        
+        Delegates to game_logic.can_perceive_character() for centralized perception logic.
+        """
         player = self.state.player
         if not player or char is player:
             return False
         
-        # Window viewing - check perception through window (vision only, no sound)
-        if self.window_viewing and self.window_viewing_window:
-            window = self.window_viewing_window
-            
-            # Determine which zone we're viewing into
-            if self.window_viewing_interior is not None:
-                # Looking in from outside - char must be in that interior
-                if char.zone != self.window_viewing_interior.name:
-                    return False
-                # Cone originates from window's interior position
-                cone_x = window.interior_x + 0.5
-                cone_y = window.interior_y + 0.5
-                # Char position in interior coords
-                char_x = char.prevailing_x
-                char_y = char.prevailing_y
-            else:
-                # Looking out from inside - char must be in exterior
-                if char.zone is not None:
-                    return False
-                # Cone originates from window's world position (on the wall)
-                cone_x = window.world_x
-                cone_y = window.world_y
-                # Char position in world coords
-                char_x = char.x
-                char_y = char.y
-            
-            # Check vision cone (no sound through windows)
-            dx = char_x - cone_x
-            dy = char_y - cone_y
-            distance = math.sqrt(dx * dx + dy * dy)
-            
-            if distance <= VISION_RANGE and distance > 0:
-                # Use window's facing direction
-                # When looking OUT: use facing directly
-                # When looking IN: invert direction (you're on the outside looking in)
-                window_facing_vectors = {
-                    'north': (0, -1),
-                    'south': (0, 1),
-                    'east': (1, 0),
-                    'west': (-1, 0),
-                }
-                face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
-                
-                # Invert when looking in from outside
-                if self.window_viewing_interior is not None:
-                    face_x = -face_x
-                    face_y = -face_y
-                
-                dir_x = dx / distance
-                dir_y = dy / distance
-                dot = face_x * dir_x + face_y * dir_y
-                
-                half_angle = math.radians(VISION_CONE_ANGLE / 2)
-                if dot >= math.cos(half_angle):
-                    # In cone - check line of sight
-                    target_zone = self.window_viewing_interior.name if self.window_viewing_interior else None
-                    obstacles = self._get_vision_obstacles_for_rendering(target_zone)
-                    if self._check_line_of_sight_gui(cone_x, cone_y, char_x, char_y, obstacles):
-                        return True
-            
-            return False
-        
-        # Different zones = can't perceive (window perception handled above)
-        if player.zone != char.zone:
-            return False
-        
-        # Use prevailing coords when in interior (correct distance scale)
-        if player.zone:
-            player_x = player.prevailing_x
-            player_y = player.prevailing_y
-            char_x = char.prevailing_x
-            char_y = char.prevailing_y
-        else:
-            player_x = player.x
-            player_y = player.y
-            char_x = char.x
-            char_y = char.y
-        
-        dx = char_x - player_x
-        dy = char_y - player_y
-        distance = math.sqrt(dx * dx + dy * dy)
-        
-        # Check sound radius first (simpler)
-        if distance <= SOUND_RADIUS:
-            return True
-        
-        # Check vision cone
-        if distance <= VISION_RANGE:
-            # Get player facing direction
-            facing = player.get('facing', 'down')
-            facing_vectors = {
-                'up': (0, -1),
-                'down': (0, 1),
-                'left': (-1, 0),
-                'right': (1, 0),
-                'up-left': (-0.707, -0.707),
-                'up-right': (0.707, -0.707),
-                'down-left': (-0.707, 0.707),
-                'down-right': (0.707, 0.707),
-            }
-            face_x, face_y = facing_vectors.get(facing, (0, 1))
-            
-            # Normalize direction to character
-            if distance > 0:
-                dir_x = dx / distance
-                dir_y = dy / distance
-                
-                # Dot product gives cos of angle between facing and direction to char
-                dot = face_x * dir_x + face_y * dir_y
-                
-                # Check if within cone angle
-                half_angle = math.radians(VISION_CONE_ANGLE / 2)
-                if dot >= math.cos(half_angle):
-                    # In cone - check line of sight
-                    obstacles = self._get_vision_obstacles_for_rendering(player.zone)
-                    if self._check_line_of_sight_gui(player_x, player_y, char_x, char_y, obstacles):
-                        return True
-        
-        return False
+        can_perceive, method = self.logic.can_perceive_character(player, char)
+        return can_perceive
     
     def _draw_perceived_outlines(self):
         """Draw outlines for player and all perceived characters that are occluded."""
@@ -1531,7 +1422,8 @@ class BoardGUI:
         characters_to_outline = []
         for ui_info in self._deferred_ui_cache:
             char = ui_info['char']
-            occluding_objects = self._get_occluding_objects(char['x'], char['y'])
+            char_zone = char.get('zone') if isinstance(char, dict) else getattr(char, 'zone', None)
+            occluding_objects = self._get_occluding_objects(char['x'], char['y'], zone=char_zone)
             if occluding_objects:
                 characters_to_outline.append((ui_info, occluding_objects))
         
@@ -1726,27 +1618,43 @@ class BoardGUI:
         rl.draw_texture_pro(self._outline_rt.texture, outline_source, outline_dest, rl.Vector2(0, 0), 0, rl.WHITE)
         rl.end_shader_mode()
     
-    def _get_occluder_items(self, occluder_type):
-        """Get all items of a specific occluder type.
+    def _get_occluder_items(self, occluder_type, zone=None):
+        """Get all items of a specific occluder type in the given zone.
         Returns dict of {(x, y): data} for the occluder type.
         For houses, returns {(x, y_end): house} using the bottom edge for sorting.
+        
+        Args:
+            occluder_type: Type of occluder ('tree', 'barrel', 'bed', 'stove', 'house')
+            zone: None for exterior world, interior name for inside a building
         """
         if occluder_type == 'tree':
-            return self.state.interactables.trees
+            # Trees are always exterior (zone=None)
+            if zone is None:
+                return self.state.interactables.trees
+            return {}
         elif occluder_type == 'barrel':
-            return self.state.interactables.barrels
+            # Filter barrels by zone - keys are (x, y, zone)
+            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.barrels.items()
+                    if obj.zone == zone}
         elif occluder_type == 'bed':
-            return self.state.interactables.beds
+            # Filter beds by zone - keys are (x, y, zone)
+            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.beds.items()
+                    if obj.zone == zone}
         elif occluder_type == 'stove':
-            return self.state.interactables.stoves
+            # Filter stoves by zone - keys are (x, y, zone)
+            return {(obj.x, obj.y): obj for key, obj in self.state.interactables.stoves.items()
+                    if obj.zone == zone}
         elif occluder_type == 'house':
-            # For houses, use the bottom-left corner as the key for Y-sorting
-            # Sort at y_end - 1 (front edge of house)
-            houses = {}
-            for house in self.state.interactables.houses.values():
-                y_start, x_start, y_end, x_end = house.bounds
-                houses[(x_start, y_end - 1)] = house
-            return houses
+            # Houses are always exterior (zone=None)
+            if zone is None:
+                # For houses, use the bottom-left corner as the key for Y-sorting
+                # Sort at y_end - 1 (front edge of house)
+                houses = {}
+                for house in self.state.interactables.houses.values():
+                    y_start, x_start, y_end, x_end = house.bounds
+                    houses[(x_start, y_end - 1)] = house
+                return houses
+            return {}
         return {}
     
     def _draw_single_occluder(self, occluder_type, pos, data):
@@ -1877,31 +1785,37 @@ class BoardGUI:
         dest = rl.Rectangle(blit_x, blit_y, draw_width, draw_height)
         rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
     
-    def _get_occluding_objects(self, char_x, char_y):
+    def _get_occluding_objects(self, char_x, char_y, zone=None):
         """Get all occluders that hide a character at the given position.
         Returns list of (occluder_type, pos, config) tuples.
+        
+        Args:
+            char_x: Character X position
+            char_y: Character Y position
+            zone: None for exterior, interior name for inside a building
         """
         occluding = []
         
         for occluder_type, config in OCCLUDER_CONFIG.items():
-            # Special handling for houses (multi-cell)
+            # Special handling for houses (multi-cell) - only in exterior
             if occluder_type == 'house':
-                for house in self.state.interactables.houses.values():
-                    y_start, x_start, y_end, x_end = house.bounds
-                    house_center_x = (x_start + x_end) / 2
-                    house_width = x_end - x_start
-                    
-                    # Character is behind house if char_y < house's bottom edge (y_end)
-                    # AND character is below the walkable "behind" row (y_start)
-                    # Using char_y > y_start means the top row is NOT occluded (can walk behind)
-                    if char_y < y_end and char_y > y_start:
-                        # Check horizontal overlap (using house's full width)
-                        if abs(char_x - house_center_x) < house_width / 2:
-                            # Use bottom-left as pos for consistency
-                            occluding.append((occluder_type, (x_start, y_end - 1), config))
+                if zone is None:  # Houses only occlude in exterior
+                    for house in self.state.interactables.houses.values():
+                        y_start, x_start, y_end, x_end = house.bounds
+                        house_center_x = (x_start + x_end) / 2
+                        house_width = x_end - x_start
+                        
+                        # Character is behind house if char_y < house's bottom edge (y_end)
+                        # AND character is below the walkable "behind" row (y_start)
+                        # Using char_y > y_start means the top row is NOT occluded (can walk behind)
+                        if char_y < y_end and char_y > y_start:
+                            # Check horizontal overlap (using house's full width)
+                            if abs(char_x - house_center_x) < house_width / 2:
+                                # Use bottom-left as pos for consistency
+                                occluding.append((occluder_type, (x_start, y_end - 1), config))
                 continue
             
-            occluder_items = self._get_occluder_items(occluder_type)
+            occluder_items = self._get_occluder_items(occluder_type, zone=zone)
             sort_y_offset = config['sort_y_offset']
             occlusion_height = config['occlusion_height']
             occlusion_width = config['occlusion_width']

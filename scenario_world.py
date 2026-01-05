@@ -139,18 +139,20 @@ HOUSES = _generate_houses()
 # =============================================================================
 # Which area roles get which objects:
 #   barracks/military_housing: 1 barrel, 3 beds (Steward + 2 soldiers), 1 stove
-#   farm: 1 barrel, 1 bed, 1 stove
-#   market, village, encampment: nothing
+#       - Objects in WORLD coordinates (exterior)
+#   house/farmhouse: 1 barrel, 1 bed, 1 stove
+#       - Objects in INTERIOR coordinates with zone set to interior name
+#   market, village, encampment, farm: nothing
 #
-# Positioning within bounds [y_start, x_start, y_end, x_end]:
-#   Barracks: Objects along bottom-left interior
+# Positioning:
+#   Barracks (world coords): Objects along bottom-left interior
 #     - Barrel at (x_start, y_end - 1)
 #     - Beds in row: (x_start + 1, y_end - 1), (x_start + 2, y_end - 1), ...
 #     - Stove at (x_end - 1, y_end - 1)
-#   Farm: Objects in top-left corner
-#     - Barrel at (x_start, y_start)
-#     - Bed at (x_start + 1, y_start)
-#     - Stove at (x_start + 2, y_start)
+#   House/Farmhouse (interior coords): Objects in top row of interior
+#     - Barrel at (0, 0)
+#     - Bed at (1, 0)
+#     - Stove at (2, 0)
 
 def _generate_objects():
     """Generate barrels, beds, and stoves based on area roles and bounds."""
@@ -196,24 +198,34 @@ def _generate_objects():
                 "home": name
             })
             
-        elif role == "farm":
-            # Objects in top-left corner of farm
+        elif role in ("house", "farmhouse"):
+            # Objects inside the house interior (not world coordinates)
+            # Interior is typically 4x4, objects placed in interior coordinate space
+            # Zone is set to the house name (which matches interior name)
+            interior_name = name  # Interior uses same name as house
+            
+            # Barrel at interior position (0, 0) - top-left
             barrels.append({
                 "name": f"{name} Barrel",
-                "position": [x_start, y_start],
-                "home": name
+                "position": [0, 0],  # Interior coordinates
+                "home": name,
+                "zone": interior_name
             })
             
+            # Bed at interior position (1, 0)
             beds.append({
                 "name": f"{name} Bed",
-                "position": [x_start + 1, y_start],
-                "home": name
+                "position": [1, 0],  # Interior coordinates
+                "home": name,
+                "zone": interior_name
             })
             
+            # Stove at interior position (2, 0)
             stoves.append({
                 "name": f"{name} Stove",
-                "position": [x_start + 2, y_start],
-                "home": name
+                "position": [2, 0],  # Interior coordinates
+                "home": name,
+                "zone": interior_name
             })
     
     return barrels, beds, stoves

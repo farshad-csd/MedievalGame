@@ -15,18 +15,20 @@ from constants import ITEMS, ADJACENCY_DISTANCE, INVENTORY_SLOTS
 class Interactable:
     """Base class for all interactable objects."""
     
-    def __init__(self, name, x, y, home=None):
+    def __init__(self, name, x, y, home=None, zone=None):
         """
         Args:
             name: Display name for this object
-            x: X position (cell coordinate)
-            y: Y position (cell coordinate)
+            x: X position (cell coordinate) - interior coords if zone is set
+            y: Y position (cell coordinate) - interior coords if zone is set
             home: Home area name (for access control)
+            zone: Interior name if inside a building, None if in exterior world
         """
         self.name = name
         self.x = x
         self.y = y
         self.home = home
+        self.zone = zone  # None = exterior, "Interior Name" = inside that interior
     
     @property
     def position(self):
@@ -39,12 +41,20 @@ class Interactable:
         return (self.x + 0.5, self.y + 0.5)
     
     def distance_to(self, char):
-        """Calculate distance from character to this object's center."""
+        """Calculate distance from character to this object's center.
+        Only meaningful if character and object are in the same zone.
+        """
         cx, cy = self.center
         return math.sqrt((char.x - cx) ** 2 + (char.y - cy) ** 2)
     
     def is_adjacent(self, char):
-        """Check if character is adjacent to this object."""
+        """Check if character is adjacent to this object.
+        Character must be in the same zone (interior or exterior) as the object.
+        """
+        # Check zone match first
+        char_zone = getattr(char, 'zone', None)
+        if char_zone != self.zone:
+            return False
         return self.distance_to(char) <= ADJACENCY_DISTANCE
     
     def __repr__(self):
@@ -57,8 +67,8 @@ class Barrel(Interactable):
     Can be owned by a character and associated with a home area.
     """
     
-    def __init__(self, name, x, y, home=None, owner=None, slots=INVENTORY_SLOTS):
-        super().__init__(name, x, y, home)
+    def __init__(self, name, x, y, home=None, owner=None, slots=INVENTORY_SLOTS, zone=None):
+        super().__init__(name, x, y, home, zone=zone)
         self.owner = owner
         self.inventory = [None] * slots
     
@@ -162,8 +172,8 @@ class Bed(Interactable):
     Associated with a home area.
     """
     
-    def __init__(self, name, x, y, home=None, owner=None):
-        super().__init__(name, x, y, home)
+    def __init__(self, name, x, y, home=None, owner=None, zone=None):
+        super().__init__(name, x, y, home, zone=zone)
         self.owner = owner
     
     def assign_owner(self, owner_name):
@@ -189,8 +199,8 @@ class Stove(Interactable):
     Characters can only use stoves in their home area.
     """
     
-    def __init__(self, name, x, y, home=None):
-        super().__init__(name, x, y, home)
+    def __init__(self, name, x, y, home=None, zone=None):
+        super().__init__(name, x, y, home, zone=zone)
     
     def can_use(self, char):
         """Check if character can use this stove.
@@ -208,8 +218,8 @@ class Campfire(Interactable):
     Unlike other interactables, campfires are dynamically created.
     """
     
-    def __init__(self, x, y, owner_name=None):
-        super().__init__(f"Campfire", x, y, home=None)
+    def __init__(self, x, y, owner_name=None, zone=None):
+        super().__init__(f"Campfire", x, y, home=None, zone=zone)
         self.owner = owner_name
     
     def can_use(self, char):
@@ -311,36 +321,45 @@ class InteractableManager:
         self.barrels = {}
         for barrel_def in barrel_defs:
             x, y = barrel_def["position"]
+            zone = barrel_def.get("zone")  # None for exterior, interior name for inside
             barrel = Barrel(
                 name=barrel_def["name"],
                 x=x, y=y,
-                home=barrel_def.get("home")
+                home=barrel_def.get("home"),
+                zone=zone
             )
-            self.barrels[(x, y)] = barrel
+            # Key includes zone to allow same coords in different zones
+            self.barrels[(x, y, zone)] = barrel
     
     def init_beds(self, bed_defs):
         """Initialize beds from configuration list."""
         self.beds = {}
         for bed_def in bed_defs:
             x, y = bed_def["position"]
+            zone = bed_def.get("zone")  # None for exterior, interior name for inside
             bed = Bed(
                 name=bed_def["name"],
                 x=x, y=y,
-                home=bed_def.get("home")
+                home=bed_def.get("home"),
+                zone=zone
             )
-            self.beds[(x, y)] = bed
+            # Key includes zone to allow same coords in different zones
+            self.beds[(x, y, zone)] = bed
     
     def init_stoves(self, stove_defs):
         """Initialize stoves from configuration list."""
         self.stoves = {}
         for stove_def in stove_defs:
             x, y = stove_def["position"]
+            zone = stove_def.get("zone")  # None for exterior, interior name for inside
             stove = Stove(
                 name=stove_def["name"],
                 x=x, y=y,
-                home=stove_def.get("home")
+                home=stove_def.get("home"),
+                zone=zone
             )
-            self.stoves[(x, y)] = stove
+            # Key includes zone to allow same coords in different zones
+            self.stoves[(x, y, zone)] = stove
     
     def init_trees(self, tree_positions):
         """Initialize trees from list of (x, y) positions."""
@@ -378,9 +397,9 @@ class InteractableManager:
     # BARREL LOOKUPS
     # =========================================================================
     
-    def get_barrel_at(self, x, y):
-        """Get barrel at position, if any."""
-        return self.barrels.get((x, y))
+    def get_barrel_at(self, x, y, zone=None):
+        """Get barrel at position in the given zone, if any."""
+        return self.barrels.get((x, y, zone))
     
     def get_barrel_by_home(self, home):
         """Get barrel in the given home area."""
@@ -408,9 +427,9 @@ class InteractableManager:
     # BED LOOKUPS
     # =========================================================================
     
-    def get_bed_at(self, x, y):
-        """Get bed at position, if any."""
-        return self.beds.get((x, y))
+    def get_bed_at(self, x, y, zone=None):
+        """Get bed at position in the given zone, if any."""
+        return self.beds.get((x, y, zone))
     
     def get_bed_by_owner(self, owner_name):
         """Get bed owned by the given character name."""
@@ -447,9 +466,9 @@ class InteractableManager:
     # STOVE LOOKUPS
     # =========================================================================
     
-    def get_stove_at(self, x, y):
-        """Get stove at position, if any."""
-        return self.stoves.get((x, y))
+    def get_stove_at(self, x, y, zone=None):
+        """Get stove at position in the given zone, if any."""
+        return self.stoves.get((x, y, zone))
     
     def get_stove_position(self, stove):
         """Get the (x, y) position of a stove."""
@@ -471,28 +490,29 @@ class InteractableManager:
         return stove.can_use(char) if stove else False
     
     def get_stoves_for_char(self, char):
-        """Get all stoves this character can use (home matches)."""
+        """Get all stoves this character can use (home matches and same zone)."""
+        char_zone = getattr(char, 'zone', None)
         return [(stove.position, stove) for stove in self.stoves.values()
-                if stove.can_use(char)]
+                if stove.can_use(char) and stove.zone == char_zone]
     
     # =========================================================================
     # CAMPFIRE METHODS
     # =========================================================================
     
-    def add_campfire(self, x, y, owner_name=None):
-        """Create a new campfire at position."""
-        campfire = Campfire(x, y, owner_name)
-        self.campfires[(x, y)] = campfire
+    def add_campfire(self, x, y, owner_name=None, zone=None):
+        """Create a new campfire at position in the given zone."""
+        campfire = Campfire(x, y, owner_name, zone=zone)
+        self.campfires[(x, y, zone)] = campfire
         return campfire
     
-    def get_campfire_at(self, x, y):
-        """Get campfire at position, if any."""
-        return self.campfires.get((x, y))
+    def get_campfire_at(self, x, y, zone=None):
+        """Get campfire at position in the given zone, if any."""
+        return self.campfires.get((x, y, zone))
     
-    def remove_campfire(self, x, y):
-        """Remove campfire at position."""
-        if (x, y) in self.campfires:
-            del self.campfires[(x, y)]
+    def remove_campfire(self, x, y, zone=None):
+        """Remove campfire at position in the given zone."""
+        if (x, y, zone) in self.campfires:
+            del self.campfires[(x, y, zone)]
     
     def is_adjacent_to_camp(self, char, camp_position):
         """Check if character is adjacent to a camp position.
