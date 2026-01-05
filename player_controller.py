@@ -123,6 +123,11 @@ class PlayerController:
         if not player:
             return
         
+        # Check if player is in an interior
+        if player.zone is not None:
+            self.update_position_interior(dt)
+            return
+        
         vx = player.vx
         vy = player.vy
         
@@ -340,3 +345,144 @@ class PlayerController:
         # Bake through game logic (handles the actual conversion)
         amount_baked = self.logic.bake_bread(player, 1)
         return amount_baked > 0
+    
+    # =========================================================================
+    # DOOR/BUILDING INTERACTION
+    # =========================================================================
+    
+    def handle_door_input(self):
+        """Handle door interaction key press.
+        
+        If at a door, enters or exits the building.
+        
+        Returns:
+            True if successfully entered/exited
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        name = player.get_display_name()
+        
+        # Check if we're at a door
+        house = self.state.get_adjacent_door(player)
+        
+        if not house:
+            return False
+        
+        if player.zone is None:
+            # Currently outside - try to enter
+            return self._enter_building(player, house)
+        else:
+            # Currently inside - try to exit
+            return self._exit_building(player, house)
+    
+    def _enter_building(self, player, house):
+        """Enter a building interior."""
+        interior = house.interior
+        if not interior:
+            self.state.log_action(f"{player.get_display_name()} can't enter {house.name}")
+            return False
+        
+        player.enter_interior(interior)
+        self.state.log_action(f"{player.get_display_name()} entered {house.name}")
+        return True
+    
+    def _exit_building(self, player, house):
+        """Exit a building interior to exterior."""
+        interior = house.interior
+        if not interior:
+            return False
+        
+        player.exit_interior(interior)
+        self.state.log_action(f"{player.get_display_name()} exited {house.name}")
+        return True
+    
+    # =========================================================================
+    # WINDOW "SECURITY CAMERA" VIEW
+    # =========================================================================
+    
+    def handle_window_input(self):
+        """Handle window interaction key press.
+        
+        If at a window, toggles "security camera" view to look outside/inside.
+        
+        Returns:
+            Window object if activating view, None if deactivating or not at window
+        """
+        player = self.player
+        if not player:
+            return None
+        
+        # Only works when inside a building
+        if player.zone is None:
+            return None
+        
+        interior = self.state.interiors.get_interior(player.zone)
+        if not interior:
+            return None
+        
+        # Check if player is near a window
+        for window in interior.windows:
+            if window.is_character_near(player.x, player.y):
+                return window
+        
+        return None
+    
+    def get_window_camera_position(self, window):
+        """
+        Get the world position the camera should move to for window viewing.
+        
+        Args:
+            window: Window object
+            
+        Returns:
+            (world_x, world_y) tuple for camera position
+        """
+        return window.get_exterior_look_position()
+    
+    # =========================================================================
+    # INTERIOR MOVEMENT
+    # =========================================================================
+    
+    def update_position_interior(self, dt):
+        """Update player position when inside an interior.
+        Called every frame by GUI when player is in an interior.
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        player = self.player
+        if not player or player.zone is None:
+            return
+        
+        interior = self.state.interiors.get_interior(player.zone)
+        if not interior:
+            return
+        
+        vx = player.vx
+        vy = player.vy
+        
+        if vx == 0.0 and vy == 0.0:
+            return
+        
+        # Calculate new position using local coords (interior space)
+        new_x = player.prevailing_x + vx * dt
+        new_y = player.prevailing_y + vy * dt
+        
+        # Keep within interior bounds
+        half_width = player.width / 2
+        half_height = player.height / 2
+        new_x = max(half_width, min(interior.width - half_width, new_x))
+        new_y = max(half_height, min(interior.height - half_height, new_y))
+        
+        # Check collision within interior
+        if not interior.is_position_blocked(new_x, new_y):
+            player.prevailing_x = new_x
+            player.prevailing_y = new_y
+        else:
+            # Try sliding along axes
+            if not interior.is_position_blocked(new_x, player.prevailing_y):
+                player.prevailing_x = new_x
+            elif not interior.is_position_blocked(player.prevailing_x, new_y):
+                player.prevailing_y = new_y

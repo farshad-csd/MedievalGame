@@ -19,6 +19,7 @@ from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE, TREES, HOUSES
 from scenario_characters import CHARACTER_TEMPLATES
 from character import Character, create_character
 from static_interactables import InteractableManager
+from interiors import InteriorManager
 
 
 class GameState:
@@ -46,6 +47,9 @@ class GameState:
         # Interactable objects (barrels, beds, stoves, campfires, trees, houses)
         self.interactables = InteractableManager()
         
+        # Interior spaces for buildings
+        self.interiors = InteriorManager()
+        
         # Character data
         self.characters = []  # List of Character instances
         self.player = None    # Reference to player Character
@@ -61,6 +65,7 @@ class GameState:
         self._init_areas()
         self._init_farm_cells()
         self._init_interactables()
+        self._init_interiors()
         self._init_characters()
     
     def _init_areas(self):
@@ -101,6 +106,16 @@ class GameState:
         self.interactables.init_stoves(STOVES)
         self.interactables.init_trees(TREES)
         self.interactables.init_houses(HOUSES)
+    
+    def _init_interiors(self):
+        """Initialize interior spaces for all houses."""
+        for house in self.interactables.get_all_houses():
+            # Create an 8x8 interior for each house
+            # Interior is white/empty cells by default
+            interior = self.interiors.create_interior(house, width=8, height=8)
+            
+            # Link interior to house for easy access
+            house.interior = interior
     
     def _init_characters(self):
         """Initialize characters from templates.
@@ -700,6 +715,91 @@ class GameState:
         return day_tick >= TICKS_PER_DAY * SLEEP_START_FRACTION
     
     # =========================================================================
+    # ZONE/INTERIOR METHODS
+    # =========================================================================
+    
+    def get_world_distance(self, char1, char2):
+        """
+        Euclidean distance between two characters using world coordinates.
+        Handles interior projection - characters in interiors use their projected position.
+        """
+        import math
+        x1, y1 = char1.x, char1.y
+        x2, y2 = char2.x, char2.y
+        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+    
+    def are_in_same_zone(self, char1, char2):
+        """Check if two characters are in the same zone (both exterior or same interior)."""
+        return char1.zone == char2.zone
+    
+    def can_perceive_across_zones(self, observer, target):
+        """
+        Check if observer can perceive target across zone boundaries.
+        
+        This checks window-based perception:
+        - If observer is at a window in an interior, they can see outside
+        - If observer is outside near a window, they can see inside
+        
+        Returns:
+            True if perception is possible, False otherwise
+        """
+        # Same zone = normal perception rules apply
+        if observer.zone == target.zone:
+            return True
+        
+        # Different zones - check for window-based perception
+        observer_interior = self.interiors.get_interior(observer.zone) if observer.zone else None
+        target_interior = self.interiors.get_interior(target.zone) if target.zone else None
+        
+        if observer_interior and target.zone is None:
+            # Observer inside, target outside
+            # Check if observer is near a window
+            for window in observer_interior.windows:
+                if window.is_character_near(observer.x, observer.y):
+                    return True
+        
+        if target_interior and observer.zone is None:
+            # Observer outside, target inside
+            # Check if target is near enough to a window to be visible
+            for window in target_interior.windows:
+                if window.is_character_near(target.x, target.y):
+                    return True
+        
+        return False
+    
+    def get_interior_for_character(self, char):
+        """Get the interior a character is in, or None if exterior."""
+        if char.zone is None:
+            return None
+        return self.interiors.get_interior(char.zone)
+    
+    def get_adjacent_door(self, char):
+        """
+        Get a house door adjacent to the character, if any.
+        Used for entering buildings.
+        
+        Returns:
+            House object if character is at a door, None otherwise
+        """
+        if char.zone is not None:
+            # Character is inside - check for interior door to exit
+            interior = self.interiors.get_interior(char.zone)
+            if interior and interior.is_at_door(char.x, char.y):
+                return interior.house
+            return None
+        
+        # Character is outside - check for nearby house doors
+        for house in self.interactables.get_all_houses():
+            interior = house.interior
+            if interior:
+                # Check if character is near the exterior door position
+                dx = abs(char.x - interior.exterior_door_x)
+                dy = abs(char.y - interior.exterior_door_y)
+                if dx < 1.0 and dy < 1.0:
+                    return house
+        return None
+    
+    # =========================================================================
     # MODIFICATION METHODS (simple state changes)
     # =========================================================================
     
@@ -758,4 +858,5 @@ class GameState:
         self._init_areas()
         self._init_farm_cells()
         self._init_interactables()
+        self._init_interiors()
         self._init_characters()

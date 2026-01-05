@@ -119,7 +119,11 @@ class GameLogic:
             if char.get('health', 100) <= 0:
                 continue
             
-            # Calculate relative position
+            # Can only attack characters in the same zone (both exterior or same interior)
+            if char.zone != attacker.zone:
+                continue
+            
+            # Calculate relative position using world coordinates
             rel_x = char.x - attacker.x
             rel_y = char.y - attacker.y
             

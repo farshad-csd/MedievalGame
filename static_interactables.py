@@ -256,6 +256,9 @@ class House(Interactable):
         self.allegiance = allegiance
         self.width = x_end - x_start
         self.height = y_end - y_start
+        
+        # Interior space (set by GameState._init_interiors)
+        self.interior = None
     
     @property
     def center(self):

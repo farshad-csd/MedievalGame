@@ -161,6 +161,8 @@ class InputState:
         self.bake = False
         self.make_camp = False
         self.recenter = False
+        self.door_interact = False  # Enter/exit buildings
+        self.window_look = False    # Toggle window "security camera" view
         
         # Camera
         self.pan_x = 0.0
@@ -221,8 +223,8 @@ class BoardGUI:
         
         # Camera state
         if self.state.player:
-            self.camera_x = self.state.player['x']
-            self.camera_y = self.state.player['y']
+            self.camera_x = self.state.player.x
+            self.camera_y = self.state.player.y
         else:
             self.camera_x = SIZE / 2
             self.camera_y = SIZE / 2
@@ -245,6 +247,10 @@ class BoardGUI:
         # UI state
         self.inventory_open = False
         self.inventory_tab = 0  # 0=world, 1=status, 2=map
+        
+        # Window "security camera" viewing state
+        self.window_viewing = False
+        self.window_viewing_window = None  # The Window object being looked through
         
         # Debug window (optional - can be disabled for mobile)
         self.debug_window = None
@@ -418,6 +424,8 @@ class BoardGUI:
         self.input.zoom_out = False
         self.input.mouse_left_click = False
         self.input.mouse_right_click = False
+        self.input.door_interact = False
+        self.input.window_look = False
         
         # Handle resize
         if rl.is_window_resized():
@@ -493,6 +501,10 @@ class BoardGUI:
             self.input.recenter = True
         if rl.is_key_pressed(rl.KEY_ESCAPE):
             self.input.pause = True
+        if rl.is_key_pressed(rl.KEY_F):
+            self.input.door_interact = True  # F to enter/exit buildings
+        if rl.is_key_pressed(rl.KEY_V):
+            self.input.window_look = True    # V to look through windows
         
         # Inventory toggle (I or Tab)
         if rl.is_key_pressed(rl.KEY_I) or rl.is_key_pressed(rl.KEY_TAB):
@@ -667,15 +679,85 @@ class BoardGUI:
         
         if self.input.make_camp:
             self._handle_make_camp()
+        
+        if self.input.door_interact:
+            self._handle_door_interact()
+        
+        if self.input.window_look:
+            self._handle_window_look()
+    
+    def _handle_door_interact(self):
+        """Handle door interaction - enter/exit buildings."""
+        if self.player_controller.handle_door_input():
+            # Successfully entered/exited - update camera
+            player = self.state.player
+            if player:
+                self.camera_x = player.x
+                self.camera_y = player.y
+    
+    def _handle_window_look(self):
+        """Handle window look toggle - security camera view."""
+        player = self.state.player
+        
+        if self.window_viewing:
+            # Currently viewing - stop viewing and recenter on player
+            self.window_viewing = False
+            self.window_viewing_window = None
+            self.camera_following_player = True
+            if player:
+                # Use local coords when inside (for interior rendering)
+                if player.zone:
+                    self.camera_x = player.prevailing_x
+                    self.camera_y = player.prevailing_y
+                else:
+                    self.camera_x = player.x
+                    self.camera_y = player.y
+            return
+        
+        # Try to start viewing
+        window = self.player_controller.handle_window_input()
+        if window:
+            # Move camera to look outside
+            look_x, look_y = window.get_exterior_look_position()
+            self.camera_x = look_x
+            self.camera_y = look_y
+            
+            self.window_viewing = True
+            self.window_viewing_window = window
+            self.camera_following_player = False
     
     def _apply_camera_input(self):
         """Apply camera control input"""
+        player = self.state.player
+        
+        # Don't allow camera changes while window viewing (except to exit)
+        if self.window_viewing:
+            # Only allow recenter to exit window viewing
+            if self.input.recenter:
+                self.window_viewing = False
+                self.window_viewing_window = None
+                self.camera_following_player = True
+                if player:
+                    # Use local coords when inside (for interior rendering)
+                    if player.zone:
+                        self.camera_x = player.prevailing_x
+                        self.camera_y = player.prevailing_y
+                    else:
+                        self.camera_x = player.x
+                        self.camera_y = player.y
+            return
+        
         # Recenter on player
         if self.input.recenter:
             self.camera_following_player = True
-            if self.state.player:
-                self.camera_x = self.state.player['x']
-                self.camera_y = self.state.player['y']
+            if player:
+                # Use local coords when inside (for interior rendering)
+                if player.zone:
+                    self.camera_x = player.prevailing_x
+                    self.camera_y = player.prevailing_y
+                else:
+                    self.camera_x = player.x
+                    self.camera_y = player.y
         
         # Manual panning
         if self.input.pan_x != 0 or self.input.pan_y != 0:
@@ -692,8 +774,15 @@ class BoardGUI:
         
         # Maintain centering on player if following
         if self.camera_following_player and self.state.player:
-            self.camera_x = self.state.player['x']
-            self.camera_y = self.state.player['y']
+            player = self.state.player
+            # Use local coords when inside (so interior renders correctly)
+            # Use world coords when outside or window viewing
+            if player.zone and not self.window_viewing:
+                self.camera_x = player.prevailing_x
+                self.camera_y = player.prevailing_y
+            else:
+                self.camera_x = player.x
+                self.camera_y = player.y
     
     def _apply_ui_input(self):
         """Apply UI input (pause, inventory)"""
@@ -893,8 +982,14 @@ class BoardGUI:
         
         # Center camera on player if following
         if self.camera_following_player and self.state.player:
-            self.camera_x = self.state.player.x
-            self.camera_y = self.state.player.y
+            player = self.state.player
+            # Use local coords when inside (so interior renders correctly)
+            if player.zone and not self.window_viewing:
+                self.camera_x = player.prevailing_x
+                self.camera_y = player.prevailing_y
+            else:
+                self.camera_x = player.x
+                self.camera_y = player.y
     
     # =========================================================================
     # RENDERING
@@ -924,6 +1019,20 @@ class BoardGUI:
         
         cell_size = CELL_SIZE * self.zoom
         
+        # Store camera transform info
+        self._cam_center_x = canvas_center_x
+        self._cam_center_y = canvas_center_y
+        self._cam_cell_size = cell_size
+        
+        # Check if player is in an interior (and not looking through window)
+        player = self.state.player
+        in_interior = player and player.zone is not None and not self.window_viewing
+        
+        if in_interior:
+            # Render interior instead of exterior
+            self._draw_interior_canvas()
+            return
+        
         # Calculate visible world bounds
         half_view_width = canvas_width / 2 / cell_size
         half_view_height = canvas_height / 2 / cell_size
@@ -938,11 +1047,6 @@ class BoardGUI:
         max_visible_x = min(SIZE, max_visible_x)
         min_visible_y = max(0, min_visible_y)
         max_visible_y = min(SIZE, max_visible_y)
-        
-        # Store camera transform info
-        self._cam_center_x = canvas_center_x
-        self._cam_center_y = canvas_center_y
-        self._cam_cell_size = cell_size
         
         # Draw grid cells
         self._draw_grid(min_visible_x, max_visible_x, min_visible_y, max_visible_y)
@@ -959,6 +1063,106 @@ class BoardGUI:
         
         # Draw death animations
         self._draw_death_animations()
+        
+        # Draw window viewing indicator
+        if self.window_viewing:
+            self._draw_window_viewing_indicator()
+    
+    def _draw_interior_canvas(self):
+        """Draw the interior when player is inside a building."""
+        player = self.state.player
+        if not player or not player.zone:
+            return
+        
+        interior = self.state.interiors.get_interior(player.zone)
+        if not interior:
+            return
+        
+        cell_size = self._cam_cell_size
+        
+        # Interior floor color (white-ish)
+        floor_color = rl.Color(240, 235, 220, 255)
+        wall_color = rl.Color(120, 100, 80, 255)
+        window_color = rl.Color(150, 200, 255, 180)
+        door_color = rl.Color(139, 90, 43, 255)
+        
+        # Draw interior cells
+        for y in range(interior.height):
+            for x in range(interior.width):
+                screen_x, screen_y = self._world_to_screen(x, y)
+                
+                tile_size = int(cell_size) + 1
+                
+                # Check if this is a wall edge
+                is_wall_top = (y == 0)
+                is_wall_bottom = (y == interior.height - 1)
+                is_wall_left = (x == 0)
+                is_wall_right = (x == interior.width - 1)
+                is_wall = is_wall_top or is_wall_bottom or is_wall_left or is_wall_right
+                
+                # Check if this is the door
+                is_door = (x == interior.door_x and y == interior.door_y)
+                
+                # Check if this is a window
+                is_window = any(w.interior_x == x and w.interior_y == y 
+                               for w in interior.windows)
+                
+                # Choose color
+                if is_door:
+                    color = door_color
+                elif is_window:
+                    color = window_color
+                elif is_wall:
+                    color = wall_color
+                else:
+                    color = floor_color
+                
+                rl.draw_rectangle(
+                    int(screen_x), int(screen_y),
+                    tile_size, tile_size,
+                    color
+                )
+                
+                # Draw grid lines
+                rl.draw_rectangle_lines(
+                    int(screen_x), int(screen_y),
+                    tile_size, tile_size,
+                    rl.Color(180, 175, 160, 100)
+                )
+        
+        # Draw player character in interior
+        self._draw_single_character_sprite(player)
+        
+        # Draw interior name at top
+        name_text = f"Inside: {interior.name}"
+        text_width = rl.measure_text(name_text, 16)
+        rl.draw_text(name_text, 
+                    int(self.canvas_width / 2 - text_width / 2), 
+                    20, 16, COLOR_TEXT_BRIGHT)
+        
+        # Draw controls hint
+        hint_text = "F - Exit | V - Look through window"
+        hint_width = rl.measure_text(hint_text, 12)
+        rl.draw_text(hint_text,
+                    int(self.canvas_width / 2 - hint_width / 2),
+                    45, 12, COLOR_TEXT_DIM)
+    
+    def _draw_window_viewing_indicator(self):
+        """Draw an indicator that player is viewing through a window."""
+        # Draw vignette effect at edges to indicate "viewing through"
+        vignette_color = rl.Color(0, 0, 0, 100)
+        
+        # Top bar
+        rl.draw_rectangle(0, 0, self.canvas_width, 40, vignette_color)
+        # Bottom bar
+        rl.draw_rectangle(0, self.canvas_height - 40, self.canvas_width, 40, vignette_color)
+        
+        # Window viewing label
+        label = "Looking through window (V to return, R to exit)"
+        label_width = rl.measure_text(label, 14)
+        rl.draw_text(label,
+                    int(self.canvas_width / 2 - label_width / 2),
+                    10, 14, COLOR_TEXT_BRIGHT)
     
     def _world_to_screen(self, world_x, world_y):
         """Convert world coordinates to screen coordinates"""
@@ -1058,6 +1262,14 @@ class BoardGUI:
         # Collect all drawable entities with their sort key (Y position)
         drawables = []
         
+        # Determine what zone we're rendering
+        # If window_viewing, we're rendering exterior (zone = None)
+        # Otherwise, render the zone the player is in
+        player = self.state.player
+        rendering_zone = None  # Default to exterior
+        if player and player.zone is not None and not self.window_viewing:
+            rendering_zone = player.zone
+        
         # Add all occluders from all sources
         for occluder_type, config in OCCLUDER_CONFIG.items():
             occluder_items = self._get_occluder_items(occluder_type)
@@ -1068,9 +1280,17 @@ class BoardGUI:
                 sort_y = y + sort_y_offset
                 drawables.append(('occluder', sort_y, occluder_type, pos, data))
         
-        # Add characters - use their Y position
+        # Add characters - only those in the same zone we're rendering
         for char in self.state.characters:
-            sort_y = char['y']
+            # Skip characters in different zones
+            if char.zone != rendering_zone:
+                continue
+            
+            # Use local coords when in interior, world coords otherwise
+            if rendering_zone:
+                sort_y = char.prevailing_y
+            else:
+                sort_y = char.y
             drawables.append(('character', sort_y, char, None, None))
         
         # Sort by Y position (smaller Y drawn first = behind)
@@ -1079,9 +1299,17 @@ class BoardGUI:
         # Pre-calculate which characters are perceived and occluded
         perceived_occluded_chars = set()
         for char in self.state.characters:
+            # Skip characters not in the rendering zone
+            if char.zone != rendering_zone:
+                continue
             is_player = char is self.state.player
             is_perceived = is_player or self._is_character_perceived(char)
-            is_occluded = len(self._get_occluding_objects(char['x'], char['y'])) > 0
+            # Use local coords when in interior
+            if rendering_zone:
+                check_x, check_y = char.prevailing_x, char.prevailing_y
+            else:
+                check_x, check_y = char.x, char.y
+            is_occluded = len(self._get_occluding_objects(check_x, check_y)) > 0
             if is_perceived and is_occluded:
                 perceived_occluded_chars.add(id(char))
         
@@ -1820,8 +2048,14 @@ void main() {
         cell_size = self._cam_cell_size
         current_time = time.time()
         
-        vis_x = char['x']
-        vis_y = char['y']
+        # Use local coords when character is in interior (camera is in interior space)
+        # Use world coords otherwise
+        if char.zone and not self.window_viewing:
+            vis_x = char.prevailing_x
+            vis_y = char.prevailing_y
+        else:
+            vis_x = char.x
+            vis_y = char.y
         
         pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
         
@@ -2007,12 +2241,39 @@ void main() {
     def _draw_perception_debug(self):
         """Draw perception debug visualization"""
         cell_size = self._cam_cell_size
+        player = self.state.player
+        
+        # Determine what zone we're rendering
+        # If window_viewing: render exterior (world coords)
+        # If player in interior: render interior (local coords)
+        # Otherwise: render exterior (world coords)
+        if self.window_viewing:
+            rendering_zone = None  # Exterior
+            use_local_coords = False
+        elif player and player.zone:
+            rendering_zone = player.zone  # Same interior as player
+            use_local_coords = True
+        else:
+            rendering_zone = None  # Exterior
+            use_local_coords = False
         
         for char in self.state.characters:
             if char.get('health', 100) <= 0:
                 continue
             
-            screen_x, screen_y = self._world_to_screen(char.x, char.y)
+            # Only draw characters in the rendering zone
+            if char.zone != rendering_zone:
+                continue
+            
+            # Use local coords when rendering interior, world coords otherwise
+            if use_local_coords:
+                vis_x = char.prevailing_x
+                vis_y = char.prevailing_y
+            else:
+                vis_x = char.x
+                vis_y = char.y
+            
+            screen_x, screen_y = self._world_to_screen(vis_x, vis_y)
             
             # Sound radius (circle)
             sound_radius_pixels = int(SOUND_RADIUS * cell_size)
@@ -2367,6 +2628,36 @@ void main() {
                         'name': bed.name,
                         'actions': []  # Sleep not implemented yet
                     }
+        
+        # Check for door (entering/exiting buildings)
+        house = self.state.get_adjacent_door(player)
+        if house:
+            if player.zone is None:
+                # Outside - can enter
+                return {
+                    'type': 'Door',
+                    'name': house.name,
+                    'actions': [{'key': 'F', 'label': 'Enter'}]
+                }
+            else:
+                # Inside - can exit
+                return {
+                    'type': 'Door',
+                    'name': 'Exit',
+                    'actions': [{'key': 'F', 'label': 'Exit Building'}]
+                }
+        
+        # Check for window (if inside)
+        if player.zone is not None:
+            interior = self.state.interiors.get_interior(player.zone)
+            if interior:
+                for window in interior.windows:
+                    if window.is_character_near(player.x, player.y):
+                        return {
+                            'type': 'Window',
+                            'name': f'Window ({window.facing})',
+                            'actions': [{'key': 'V', 'label': 'Look Outside'}]
+                        }
         
         return None
     

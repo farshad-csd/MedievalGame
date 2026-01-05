@@ -59,9 +59,10 @@ class Character:
         self._is_player = template.get('is_player', False)
 
         # Position (float-based for smooth movement)
+        # _prevailing_x/_prevailing_y store actual position (interior coords when inside, world coords when outside)
         # Characters spawn at CENTER of their starting cell
-        self.x = float(x) + 0.5
-        self.y = float(y) + 0.5
+        self._prevailing_x = float(x) + 0.5
+        self._prevailing_y = float(y) + 0.5
         # Velocity for continuous movement (cells per second)
         self.vx = 0.0
         self.vy = 0.0
@@ -71,9 +72,20 @@ class Character:
         # Visual state
         self.facing = 'down'
         self.is_sprinting = False
+        
+        # Zone system for interiors
+        # None = exterior world, "house_name" = inside that building's interior
+        self.zone = None
+        
+        # Interior projection parameters (set when entering interior)
+        # These allow computing world coordinates without needing InteriorManager reference
+        self._interior_proj_x = 0      # exterior_x of building
+        self._interior_proj_y = 0      # exterior_y of building
+        self._interior_scale_x = 1.0   # exterior_width / interior_width
+        self._interior_scale_y = 1.0   # exterior_height / interior_height
         # Animation tracking
-        self._last_anim_x = self.x
-        self._last_anim_y = self.y
+        self._last_anim_x = self._prevailing_x
+        self._last_anim_y = self._prevailing_y
         # Attack animation state
         self.attack_animation_start = None
         self.attack_direction = None
@@ -202,6 +214,105 @@ class Character:
     def get_display_name(self):
         """Get short display name (first name only)."""
         return self.name.split()[0]
+    
+    # =========================================================================
+    # POSITION PROPERTIES
+    # x and y always return world coordinates (projected when in interior)
+    # prevailing_x and prevailing_y return actual stored position (interior coords when inside)
+    # =========================================================================
+    
+    @property
+    def x(self):
+        """Get world X coordinate.
+        
+        When in exterior: returns local position directly
+        When in interior: returns projected world position
+        """
+        if self.zone is None:
+            return self._prevailing_x
+        return self._interior_proj_x + (self._prevailing_x * self._interior_scale_x)
+    
+    @x.setter
+    def x(self, value):
+        """Set local X position."""
+        self._prevailing_x = value
+    
+    @property
+    def y(self):
+        """Get world Y coordinate.
+        
+        When in exterior: returns local position directly
+        When in interior: returns projected world position
+        """
+        if self.zone is None:
+            return self._prevailing_y
+        return self._interior_proj_y + (self._prevailing_y * self._interior_scale_y)
+    
+    @y.setter
+    def y(self, value):
+        """Set local Y position."""
+        self._prevailing_y = value
+    
+    @property
+    def prevailing_x(self):
+        """Get actual stored X position (interior coords when inside, world coords when outside)."""
+        return self._prevailing_x
+    
+    @prevailing_x.setter
+    def prevailing_x(self, value):
+        """Set local X position."""
+        self._prevailing_x = value
+    
+    @property
+    def prevailing_y(self):
+        """Get actual stored Y position (interior coords when inside, world coords when outside)."""
+        return self._prevailing_y
+    
+    @prevailing_y.setter
+    def prevailing_y(self, value):
+        """Set local Y position."""
+        self._prevailing_y = value
+    
+    def enter_interior(self, interior):
+        """
+        Move character into a building interior.
+        
+        Args:
+            interior: Interior object to enter
+        """
+        self.zone = interior.name
+        
+        # Store projection parameters for on-demand world coordinate calculation
+        self._interior_proj_x = interior.exterior_x
+        self._interior_proj_y = interior.exterior_y
+        self._interior_scale_x = interior.scale_x
+        self._interior_scale_y = interior.scale_y
+        
+        # Move to entry position (door) - sets local position
+        entry_x, entry_y = interior.get_entry_position()
+        self._prevailing_x = entry_x
+        self._prevailing_y = entry_y
+    
+    def exit_interior(self, interior):
+        """
+        Move character out of a building interior to exterior.
+        
+        Args:
+            interior: Interior object to exit from
+        """
+        # Get exit position in world coordinates
+        exit_x, exit_y = interior.get_exit_position()
+        
+        # Clear zone and projection params FIRST
+        self.zone = None
+        self._interior_proj_x = 0
+        self._interior_proj_y = 0
+        self._interior_scale_x = 1.0
+        self._interior_scale_y = 1.0
+        
+        # Move to exit position (now zone is None, so this sets world position directly)
+        self._prevailing_x = exit_x
+        self._prevailing_y = exit_y
     
     def get_trait(self, trait_name):
         """Get a trait value. Morality is mutable, others are static."""

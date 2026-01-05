@@ -102,8 +102,11 @@ class DebugWindowProcess:
             
             char_data = {
                 'name': char['name'],
-                'x': char['x'],
-                'y': char['y'],
+                'x': char.x,  # World coordinates (projected when in interior)
+                'y': char.y,
+                'prevailing_x': char.prevailing_x,  # Actual stored position
+                'prevailing_y': char.prevailing_y,
+                'zone': char.zone,  # None = exterior, house_name = interior
                 'age': char['age'],
                 'health': char['health'],
                 'hunger': char['hunger'],
@@ -152,7 +155,11 @@ class DebugWindowProcess:
             p = self.state.player
             player_food = p.get_item('wheat')
             player_money = p.get_item('money')
-            player_status = f"Pos:({p.x:.1f},{p.y:.1f}) Wheat:{player_food} ${player_money} HP:{p.health}"
+            if p.zone:
+                # Show both local (interior) and world coords when inside
+                player_status = f"Local:({p.prevailing_x:.1f},{p.prevailing_y:.1f}) World:({p.x:.1f},{p.y:.1f}) Zone:{p.zone} Wheat:{player_food} ${player_money} HP:{p.health}"
+            else:
+                player_status = f"Pos:({p.x:.1f},{p.y:.1f}) Wheat:{player_food} ${player_money} HP:{p.health}"
         
         return {
             'ticks': self.state.ticks,
@@ -534,13 +541,24 @@ class _DebugWindowInternal:
         scroll_pos = self.debug_text.yview()
         
         lines = []
-        header = f"{'Name':<18}{'Pos':<12}{'Age':<5}{'HP':<6}{'Hunger':<7}{'Fatig':<7}{'Stam':<7}{'Inventory':<28}{'Home':<10}{'Job':<10}{'Alleg':<8}{'Traits':<12}{'Status/Intent':<16}"
+        header = f"{'Name':<18}{'Pos':<14}{'Zone':<12}{'Age':<5}{'HP':<6}{'Hunger':<7}{'Inventory':<28}{'Home':<10}{'Job':<10}{'Status/Intent':<16}"
         lines.append(header)
-        lines.append("=" * 158)
+        lines.append("=" * 150)
         
         for char in self.snapshot['characters']:
             name = char['name']
-            pos = f"({char['x']:.1f},{char['y']:.1f})"
+            zone = char.get('zone')
+            
+            # Show position based on zone
+            if zone:
+                # In interior - show local (interior) coords
+                pos = f"L({char['prevailing_x']:.1f},{char['prevailing_y']:.1f})"
+                zone_display = zone[:10] if len(zone) > 10 else zone
+            else:
+                # Exterior - show world position
+                pos = f"({char['x']:.1f},{char['y']:.1f})"
+                zone_display = "exterior"
+            
             home = char.get('home', '-') or '-'
             job = char.get('job', '-') or '-'
             
@@ -554,14 +572,6 @@ class _DebugWindowInternal:
                 else:
                     inv_parts.append(f"{slot['type'][:3]}{slot['amount']}")
             inv_display = '|'.join(inv_parts)
-            
-            # Get traits
-            template = CHARACTER_TEMPLATES.get(name, {})
-            attr = template.get('attractiveness', 0)
-            conf = template.get('confidence', 0)
-            cunn = template.get('cunning', 0)
-            moral = char.get('morality', 5)
-            traits_str = f"{attr}/{conf}/{cunn}/{moral}"
             
             # Status display - use pre-computed values from snapshot
             status = ""
@@ -590,11 +600,8 @@ class _DebugWindowInternal:
                 status = "-"
             
             hunger_display = f"{char['hunger']:.0f}"
-            fatigue_display = f"{char['fatigue']:.0f}"
-            stamina_display = f"{char['stamina']:.0f}"
-            allegiance = char.get('allegiance', '-') or '-'
             
-            line = f"{name:<18}{pos:<12}{char['age']:<5}{char['health']:<6}{hunger_display:<7}{fatigue_display:<7}{stamina_display:<7}{inv_display:<28}{home:<10}{job:<10}{allegiance:<8}{traits_str:<12}{status:<16}"
+            line = f"{name:<18}{pos:<14}{zone_display:<12}{char['age']:<5}{char['health']:<6}{hunger_display:<7}{inv_display:<28}{home:<10}{job:<10}{status:<16}"
             lines.append(line)
         
         # Barrels section
