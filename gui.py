@@ -254,6 +254,9 @@ class BoardGUI:
         self.window_viewing_window = None  # The Window object being looked through
         self.window_viewing_interior = None  # Interior being viewed (when looking in from outside)
         
+        # Track last known player zone for death rendering
+        self._last_player_zone = None
+        
         # Debug window (optional - can be disabled for mobile)
         self.debug_window = None
         try:
@@ -1147,10 +1150,19 @@ class BoardGUI:
         # Check if player is in an interior (and not looking through window)
         # OR if we're looking into an interior from outside
         player = self.state.player
+        
+        # Track last known player zone for death rendering
+        if player and player.zone is not None:
+            self._last_player_zone = player.zone
+        
         in_interior = player and player.zone is not None and not self.window_viewing
         looking_into_interior = self.window_viewing and self.window_viewing_interior is not None
         
-        if in_interior or looking_into_interior:
+        # If player is dead but was in interior, stay in interior view
+        player_dead_in_interior = (not player and self._last_player_zone is not None 
+                                   and not self.window_viewing)
+        
+        if in_interior or looking_into_interior or player_dead_in_interior:
             # Render interior instead of exterior
             self._draw_interior_canvas()
             return
@@ -1237,6 +1249,9 @@ class BoardGUI:
         elif player and player.zone:
             # Player is inside an interior
             interior = self.state.interiors.get_interior(player.zone)
+        elif self._last_player_zone:
+            # Player died in interior - use last known zone
+            interior = self.state.interiors.get_interior(self._last_player_zone)
         else:
             return
         
@@ -1324,6 +1339,9 @@ class BoardGUI:
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
         self._draw_trees_and_characters()
+        
+        # Draw death animations
+        self._draw_death_animations()
         
         # Draw perception debug if enabled
         if SHOW_PERCEPTION_DEBUG:
@@ -1476,6 +1494,9 @@ class BoardGUI:
             rendering_zone = None  # Looking out from inside = exterior
         elif player and player.zone is not None:
             rendering_zone = player.zone
+        elif self._last_player_zone is not None:
+            # Player dead - use last known zone to keep interior view
+            rendering_zone = self._last_player_zone
         else:
             rendering_zone = None  # Default to exterior
         
@@ -2658,7 +2679,26 @@ void main() {
             if current_time - anim['start_time'] < DEATH_ANIMATION_DURATION
         ]
         
+        # Determine current rendering zone
+        player = self.state.player
+        if self.window_viewing and self.window_viewing_interior is not None:
+            rendering_zone = self.window_viewing_interior.name
+        elif self.window_viewing:
+            rendering_zone = None
+        elif player and player.zone is not None:
+            rendering_zone = player.zone
+        elif self._last_player_zone is not None:
+            rendering_zone = self._last_player_zone
+        else:
+            rendering_zone = None
+        
         for anim in self.state.death_animations:
+            # Only draw death animations in the current rendering zone
+            anim_zone = anim.get('zone')
+            if anim_zone != rendering_zone:
+                continue
+            
+            # Coords are already in correct space (local for interior, world for exterior)
             pixel_cx, pixel_cy = self._world_to_screen(anim['x'], anim['y'])
             
             sprite_height = int(CHARACTER_HEIGHT * cell_size)
@@ -2850,6 +2890,10 @@ void main() {
             use_local_coords = False
         elif player and player.zone:
             rendering_zone = player.zone  # Same interior as player
+            use_local_coords = True
+        elif self._last_player_zone is not None:
+            # Player dead - use last known zone
+            rendering_zone = self._last_player_zone
             use_local_coords = True
         else:
             rendering_zone = None  # Exterior

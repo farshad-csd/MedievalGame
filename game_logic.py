@@ -457,14 +457,10 @@ class GameLogic:
             target: Character being hit
             knockback_dist: Distance to push (default 0.3 cells)
         """
-        # Calculate direction from attacker to target
-        if attacker.zone == target.zone and attacker.zone is not None:
-            # Same interior - use local coords
-            dx = target.prevailing_x - attacker.prevailing_x
-            dy = target.prevailing_y - attacker.prevailing_y
-        else:
-            dx = target.x - attacker.x
-            dy = target.y - attacker.y
+        # Calculate direction from attacker to target using prevailing coords
+        # (works correctly for both interior and exterior)
+        dx = target.prevailing_x - attacker.prevailing_x
+        dy = target.prevailing_y - attacker.prevailing_y
         
         dist = math.sqrt(dx * dx + dy * dy)
         if dist < 0.01:
@@ -474,28 +470,34 @@ class GameLogic:
         dx /= dist
         dy /= dist
         
-        # Apply knockback in prevailing coords
-        new_x = target.prevailing_x + dx * knockback_dist
-        new_y = target.prevailing_y + dy * knockback_dist
-        
         # Check bounds based on zone
         if target.zone:
             interior = self.state.interiors.get_interior(target.zone)
             if interior:
+                # Apply knockback in local coords
+                new_x = target.prevailing_x + dx * knockback_dist
+                new_y = target.prevailing_y + dy * knockback_dist
+                
                 # Clamp to interior bounds
                 new_x = max(0.3, min(interior.width - 0.3, new_x))
                 new_y = max(0.3, min(interior.height - 0.3, new_y))
+                
                 # Check if blocked by furniture
                 if interior.is_position_blocked(int(new_x), int(new_y)):
                     return  # Don't apply knockback into furniture
-                # Convert back to world coords and set
-                world_x, world_y = interior.interior_to_world(new_x, new_y)
-                target['x'] = world_x
-                target['y'] = world_y
+                
+                # Set local coords directly (x/y setters store to _prevailing which is local)
+                target['x'] = new_x
+                target['y'] = new_y
         else:
-            # Exterior - clamp to map bounds
+            # Exterior - apply knockback in world coords
+            new_x = target.x + dx * knockback_dist
+            new_y = target.y + dy * knockback_dist
+            
+            # Clamp to map bounds
             new_x = max(0.3, min(SIZE - 0.3, new_x))
             new_y = max(0.3, min(SIZE - 0.3, new_y))
+            
             # Check if blocked (trees, houses, etc)
             if self.state.is_position_blocked(new_x, new_y, exclude_char=target, zone=None):
                 return  # Don't knockback into obstacles
@@ -3216,14 +3218,24 @@ class GameLogic:
                     self.state.log_action(f"{dead_name} DIED!")
             
             # Store visual info for death animation (GUI concern only)
+            # For interior deaths, store local coords for proper rendering
+            if char.zone:
+                anim_x = char.prevailing_x  # Local coords
+                anim_y = char.prevailing_y
+            else:
+                anim_x = char['x']  # World coords
+                anim_y = char['y']
+            
             self.state.death_animations.append({
-                'x': char['x'],
-                'y': char['y'],
+                'x': anim_x,
+                'y': anim_y,
+                'zone': char.zone,  # Store zone so interior view persists after death
                 'name': char['name'],
                 'start_time': current_time,
                 'facing': char.get('facing', 'down'),
                 'job': char.get('job'),
-                'morality': char.get('morality', 5)
+                'morality': char.get('morality', 5),
+                'is_player': char.is_player
             })
             
             # Immediately remove from game - no more processing
