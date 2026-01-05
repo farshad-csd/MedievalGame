@@ -604,6 +604,7 @@ class GameState:
         - Center of area
         - Corners of area
         - Midpoints of edges
+        - Windows (for interiors)
         Avoids farm cells and blocked positions.
         
         Also handles interiors - if area_name matches an interior, returns
@@ -630,6 +631,15 @@ class GameState:
                 (interior.width - 0.5, interior.height - 0.5),
             ]
             for lx, ly in corners:
+                if not interior.is_position_blocked(int(lx), int(ly)):
+                    world_x, world_y = interior.interior_to_world(lx, ly)
+                    points.append((world_x, world_y))
+            
+            # Windows - positions near each window
+            for window in interior.windows:
+                # Position just inside the window (1 cell away from wall)
+                lx = window.interior_x + 0.5
+                ly = window.interior_y + 0.5
                 if not interior.is_position_blocked(int(lx), int(ly)):
                     world_x, world_y = interior.interior_to_world(lx, ly)
                     points.append((world_x, world_y))
@@ -850,8 +860,15 @@ class GameState:
         return CHARACTER_TEMPLATES.get(name)
     
     def get_distance(self, char1, char2):
-        """Euclidean distance between two characters (float-based)."""
+        """Euclidean distance between two characters (float-based).
+        Uses prevailing coords when both in same zone for correct interior distances.
+        """
         import math
+        # Use prevailing coords if same zone (correct for interior distances)
+        if char1.zone == char2.zone and char1.zone is not None:
+            return math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                           (char1.prevailing_y - char2.prevailing_y) ** 2)
+        # Different zones or exterior - use world coords
         return math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
     
     def get_steward(self):

@@ -146,7 +146,7 @@ class Job:
             if target and target in state.characters and target.health > 0:
                 # Bystanders stop caring once out of perception
                 if reason == 'bystander':
-                    can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                    can_perceive, _ = logic.can_perceive_character(char, target)
                     if not can_perceive:
                         char.clear_intent()
                         return False
@@ -169,7 +169,7 @@ class Job:
                 attacker = memory.get('subject')
                 if attacker and attacker in state.characters and attacker.health > 0:
                     # Is this attacker nearby (within perception)?
-                    can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+                    can_perceive, _ = logic.can_perceive_character(char, attacker)
                     if can_perceive:
                         # Resume fleeing from this attacker
                         char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
@@ -189,7 +189,7 @@ class Job:
                 # Stop watching if we can't perceive them anymore
                 # For victims: _check_flee will resume via memory if attacker returns
                 # For bystanders: they just forget
-                can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                can_perceive, _ = logic.can_perceive_character(char, target)
                 if not can_perceive:
                     char.clear_intent()
                     return False
@@ -210,7 +210,7 @@ class Job:
             attacker = memory.get('subject')
             if attacker and attacker in state.characters and attacker.health > 0:
                 # Is this attacker nearby (within perception)?
-                can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+                can_perceive, _ = logic.can_perceive_character(char, attacker)
                 if can_perceive:
                     return True
         
@@ -264,7 +264,7 @@ class Job:
                 if target and target in state.characters:
                     # Still fleeing and we can perceive them?
                     if target.intent and target.intent.get('action') == 'flee':
-                        can_perceive, _ = logic.can_perceive_event(char, target.x, target.y)
+                        can_perceive, _ = logic.can_perceive_character(char, target)
                         if can_perceive:
                             return True
                 # Target no longer fleeing or out of range - clear and check for new
@@ -283,7 +283,7 @@ class Job:
             # Check if they're fleeing
             if other.intent and other.intent.get('action') == 'flee':
                 # Can we perceive them?
-                can_perceive, _ = logic.can_perceive_event(char, other.x, other.y)
+                can_perceive, _ = logic.can_perceive_character(char, other)
                 if can_perceive:
                     return other
         return None
@@ -355,7 +355,7 @@ class Job:
         # BYSTANDER: Simple behavior - flee to safe distance, then watch (no cross-zone)
         if flee_reason == 'bystander':
             # Perception check already done in _check_flee, but double-check
-            can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
+            can_perceive, _ = logic.can_perceive_character(char, attacker)
             if not can_perceive:
                 char.clear_intent()
                 return False
@@ -408,8 +408,13 @@ class Job:
             char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
         
         # Calculate distance and direction to attacker
-        dx_to_attacker = attacker.x - char.x
-        dy_to_attacker = attacker.y - char.y
+        # Use prevailing coords if same zone (correct for interiors)
+        if char.zone == attacker.zone and char.zone is not None:
+            dx_to_attacker = attacker.prevailing_x - char.prevailing_x
+            dy_to_attacker = attacker.prevailing_y - char.prevailing_y
+        else:
+            dx_to_attacker = attacker.x - char.x
+            dy_to_attacker = attacker.y - char.y
         dist_to_attacker = math.sqrt(dx_to_attacker**2 + dy_to_attacker**2)
         
         # Normalize direction to attacker
@@ -443,8 +448,13 @@ class Job:
         defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=attacker)
         
         if defender:
-            dx_to_defender = defender.x - char.x
-            dy_to_defender = defender.y - char.y
+            # Use prevailing coords if same zone
+            if char.zone == defender.zone and char.zone is not None:
+                dx_to_defender = defender.prevailing_x - char.prevailing_x
+                dy_to_defender = defender.prevailing_y - char.prevailing_y
+            else:
+                dx_to_defender = defender.x - char.x
+                dy_to_defender = defender.y - char.y
             dist_to_defender = math.sqrt(dx_to_defender**2 + dy_to_defender**2)
             
             # Check if going to defender would move us toward attacker
@@ -623,7 +633,7 @@ class Job:
             for memory in char.get_memories(memory_type='attacked_by'):
                 potential = memory.get('subject')
                 if potential and potential in state.characters and potential.health > 0:
-                    can_perceive, _ = logic.can_perceive_event(char, potential.x, potential.y)
+                    can_perceive, _ = logic.can_perceive_character(char, potential)
                     if can_perceive:
                         attacker = potential
                         break
@@ -701,8 +711,13 @@ class Job:
                 return False
         
         # Calculate distance and direction to criminal
-        dx_to_criminal = flee_target.x - char.x
-        dy_to_criminal = flee_target.y - char.y
+        # Use prevailing coords if same zone (correct for interiors)
+        if char.zone == flee_target.zone and char.zone is not None:
+            dx_to_criminal = flee_target.prevailing_x - char.prevailing_x
+            dy_to_criminal = flee_target.prevailing_y - char.prevailing_y
+        else:
+            dx_to_criminal = flee_target.x - char.x
+            dy_to_criminal = flee_target.y - char.y
         dist_to_criminal = math.sqrt(dx_to_criminal**2 + dy_to_criminal**2)
         
         # Normalize direction to criminal
@@ -729,8 +744,13 @@ class Job:
         defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=flee_target)
         
         if defender:
-            dx_to_defender = defender.x - char.x
-            dy_to_defender = defender.y - char.y
+            # Use prevailing coords if same zone
+            if char.zone == defender.zone and char.zone is not None:
+                dx_to_defender = defender.prevailing_x - char.prevailing_x
+                dy_to_defender = defender.prevailing_y - char.prevailing_y
+            else:
+                dx_to_defender = defender.x - char.x
+                dy_to_defender = defender.y - char.y
             dist_to_defender = math.sqrt(dx_to_defender**2 + dy_to_defender**2)
             
             # Check if going to defender would move us toward criminal
@@ -778,8 +798,11 @@ class Job:
         return False
     
     def _is_safe_direction(self, char, threat, target_x, target_y):
-        """Check if target position is in a safe direction (>60° from threat)."""
-        # Direction to threat
+        """Check if target position is in a safe direction (>60° from threat).
+        target_x, target_y are world coords (typically exterior door position).
+        Uses world coords for consistency since target is always exterior.
+        """
+        # Direction to threat (world coords)
         dx_threat = threat.x - char.x
         dy_threat = threat.y - char.y
         dist_threat = math.sqrt(dx_threat**2 + dy_threat**2)
@@ -789,7 +812,7 @@ class Job:
         dir_threat_x = dx_threat / dist_threat
         dir_threat_y = dy_threat / dist_threat
         
-        # Direction to target
+        # Direction to target (world coords)
         dx_target = target_x - char.x
         dy_target = target_y - char.y
         dist_target = math.sqrt(dx_target**2 + dy_target**2)
@@ -870,7 +893,7 @@ class Job:
             return False
         
         # Can we still perceive them?
-        can_perceive, _ = logic.can_perceive_event(char, fleeing_person.x, fleeing_person.y)
+        can_perceive, _ = logic.can_perceive_character(char, fleeing_person)
         if not can_perceive:
             char.clear_intent()
             return False
@@ -1023,8 +1046,13 @@ class Job:
     
     def _face_target(self, char, target):
         """Make character face toward a target."""
-        dx = target.x - char.x
-        dy = target.y - char.y
+        # Use prevailing coords if same zone (correct for interior facing)
+        if char.zone == target.zone and char.zone is not None:
+            dx = target.prevailing_x - char.prevailing_x
+            dy = target.prevailing_y - char.prevailing_y
+        else:
+            dx = target.x - char.x
+            dy = target.y - char.y
         if abs(dx) > abs(dy):
             char.facing = 'right' if dx > 0 else 'left'
         else:

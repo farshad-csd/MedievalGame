@@ -218,29 +218,6 @@ class GameLogic:
                 return interior.name
         return None
     
-    def _get_accessible_flee_goal(self, char, threat):
-        """Get a flee position that doesn't hit obstacles. Returns (x, y) or None."""
-        # Try multiple angles radiating away from threat
-        dx = char.x - threat.x
-        dy = char.y - threat.y
-        dist = math.sqrt(dx * dx + dy * dy)
-        
-        if dist > 0.01:
-            base_angle = math.atan2(dy, dx)
-        else:
-            base_angle = random.random() * 2 * math.pi
-        
-        # Try base direction, then ±30°, ±60°, ±90°
-        for angle_offset in [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5]:
-            angle = base_angle + angle_offset
-            test_x = char.x + math.cos(angle) * 5.0
-            test_y = char.y + math.sin(angle) * 5.0
-            
-            if self.is_position_accessible_same_zone(test_x, test_y, char.zone):
-                return (test_x, test_y)
-        
-        return None
-    
     def can_attack(self, char):
         """Check if character can attack (not on cooldown).
         Returns True if enough time has passed since last attack.
@@ -284,9 +261,10 @@ class GameLogic:
             if char.zone != attacker.zone:
                 continue
             
-            # Calculate relative position using world coordinates
-            rel_x = char.x - attacker.x
-            rel_y = char.y - attacker.y
+            # Calculate relative position using prevailing coords (local when in interior)
+            # This gives correct distance in interior space
+            rel_x = char.prevailing_x - attacker.prevailing_x
+            rel_y = char.prevailing_y - attacker.prevailing_y
             
             # Project onto attack direction
             if dx != 0 or dy != 0:
@@ -978,7 +956,7 @@ class GameLogic:
         # Get correct coordinates based on zone
         target_x, target_y = self._get_perception_coords(target)
         
-        return self.can_perceive_event(observer, target_x, target_y)
+        return self.can_perceive_event(observer, target_x, target_y, event_zone=target.zone)
     
     def _get_vision_obstacles(self, zone):
         """Get obstacles that block vision for a given zone.
@@ -1131,6 +1109,73 @@ class GameLogic:
         # In cone - check line of sight
         return self._check_line_of_sight(obs_x, obs_y, target_x, target_y, observer.zone)
     
+    def _does_vision_cone_overlap_circle_coords(self, obs_x, obs_y, facing, circle_x, circle_y, circle_radius):
+        """Check if vision cone overlaps with a circle using explicit coordinates.
+        
+        Args:
+            obs_x, obs_y: Observer position
+            facing: Observer facing direction
+            circle_x, circle_y: Center of the circle
+            circle_radius: Radius of the circle
+            
+        Returns:
+            True if vision cone overlaps the circle
+        """
+        # Distance from observer to circle center
+        dx = circle_x - obs_x
+        dy = circle_y - obs_y
+        dist_to_center = math.sqrt(dx * dx + dy * dy)
+        
+        # If observer is inside the circle, they can see it
+        if dist_to_center <= circle_radius:
+            return True
+        
+        # Check if center is in vision cone
+        if self._is_point_in_vision_cone_coords(obs_x, obs_y, facing, circle_x, circle_y):
+            return True
+        
+        # Check closest point on circle to observer
+        if dist_to_center > 0:
+            to_obs_x = -dx / dist_to_center
+            to_obs_y = -dy / dist_to_center
+            closest_x = circle_x + to_obs_x * circle_radius
+            closest_y = circle_y + to_obs_y * circle_radius
+            if self._is_point_in_vision_cone_coords(obs_x, obs_y, facing, closest_x, closest_y):
+                return True
+        
+        return False
+    
+    def _is_point_in_vision_cone_coords(self, obs_x, obs_y, facing, target_x, target_y, zone=None):
+        """Check if point is in vision cone using explicit coordinates."""
+        dx = target_x - obs_x
+        dy = target_y - obs_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > VISION_RANGE:
+            return False
+        if dist < 1.0:
+            return True
+        
+        dx /= dist
+        dy /= dist
+        
+        # Get facing vector
+        face_vectors = {
+            'up': (0, -1), 'down': (0, 1), 'left': (-1, 0), 'right': (1, 0),
+            'up-left': (-0.707, -0.707), 'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707), 'down-right': (0.707, 0.707)
+        }
+        face_x, face_y = face_vectors.get(facing, (0, 1))
+        
+        dot = dx * face_x + dy * face_y
+        half_angle_rad = math.radians(VISION_CONE_ANGLE / 2)
+        cos_threshold = math.cos(half_angle_rad)
+        
+        if dot < cos_threshold:
+            return False
+        
+        return self._check_line_of_sight(obs_x, obs_y, target_x, target_y, zone)
+    
     def does_vision_cone_overlap_circle(self, observer, circle_x, circle_y, circle_radius):
         """Check if observer's vision cone overlaps with a circle (sound radius).
         
@@ -1183,7 +1228,7 @@ class GameLogic:
         dist = math.sqrt(dx * dx + dy * dy)
         return dist <= (r1 + r2)
     
-    def can_perceive_event(self, witness, event_x, event_y, sound_radius=None):
+    def can_perceive_event(self, witness, event_x, event_y, sound_radius=None, event_zone=None):
         """Check if witness can perceive an event at a location.
         
         A witness perceives an event if:
@@ -1192,8 +1237,9 @@ class GameLogic:
         
         Args:
             witness: Character who might perceive
-            event_x, event_y: Position of the event (should be in same coord space as witness)
+            event_x, event_y: Position of the event (world coords or prevailing if same zone)
             sound_radius: Radius of sound emitted by event (default SOUND_RADIUS)
+            event_zone: Zone the event is in (for coord conversion)
             
         Returns:
             Tuple of (can_perceive: bool, method: str or None)
@@ -1202,16 +1248,29 @@ class GameLogic:
         if sound_radius is None:
             sound_radius = SOUND_RADIUS
         
-        # Check if witness's vision cone overlaps attacker's sound radius
-        if self.does_vision_cone_overlap_circle(witness, event_x, event_y, sound_radius):
-            return (True, 'vision')
-        
-        # Get witness position in correct coordinate space
+        # Get coords in correct space - if same zone, use prevailing-style coords
         wit_x, wit_y = self._get_perception_coords(witness)
         
-        # Check if witness's hearing radius overlaps attacker's sound radius
+        # If event is in same zone as witness, coords should already be in local space
+        # If different zones, use world coords for both
+        if event_zone is not None and witness.zone == event_zone:
+            # Same interior - event coords should be prevailing (local)
+            evt_x, evt_y = event_x, event_y
+        elif witness.zone is None and event_zone is None:
+            # Both exterior - use world coords
+            evt_x, evt_y = event_x, event_y
+        else:
+            # Different zones - can't perceive across zones
+            return (False, None)
+        
+        # Check if witness's vision cone overlaps event's sound radius
+        if self._does_vision_cone_overlap_circle_coords(wit_x, wit_y, witness.get('facing', 'down'), 
+                                                         evt_x, evt_y, sound_radius):
+            return (True, 'vision')
+        
+        # Check if witness's hearing radius overlaps event's sound radius
         if self.do_circles_overlap(wit_x, wit_y, SOUND_RADIUS, 
-                                   event_x, event_y, sound_radius):
+                                   evt_x, evt_y, sound_radius):
             return (True, 'sound')
         
         return (False, None)
@@ -1864,6 +1923,7 @@ class GameLogic:
         """If character has unreported crimes and is adjacent to a soldier, report to them.
         
         Only reports to soldiers of same allegiance as the crime.
+        Only reports to soldiers in the same zone.
         """
         unreported = char.get_unreported_crimes()
         
@@ -1877,9 +1937,17 @@ class GameLogic:
                 continue
             if other.get('job') != 'Soldier':
                 continue
+            # Must be in same zone to report
+            if other.zone != char.zone:
+                continue
             
-            dx = char.x - other.x
-            dy = char.y - other.y
+            # Use prevailing coords if same zone (correct for interiors)
+            if char.zone is not None:
+                dx = char.prevailing_x - other.prevailing_x
+                dy = char.prevailing_y - other.prevailing_y
+            else:
+                dx = char.x - other.x
+                dy = char.y - other.y
             dist = math.sqrt(dx * dx + dy * dy)
             if dist > SOUND_RADIUS:  # Must be within sound range
                 continue
@@ -2631,12 +2699,31 @@ class GameLogic:
                 char['idle_state'] = 'choosing'
                 return None
             
-            # Check if we've arrived at destination (use world coords)
-            dx = destination[0] - char.x
-            dy = destination[1] - char.y
+            # Check if we've arrived at destination
+            # Destination is in world coords; convert to local if in interior
+            if char.zone:
+                interior = self.state.interiors.get_interior(char.zone)
+                if interior:
+                    dest_local_x, dest_local_y = interior.world_to_interior(destination[0], destination[1])
+                    dx = dest_local_x - char.prevailing_x
+                    dy = dest_local_y - char.prevailing_y
+                else:
+                    dx = destination[0] - char.x
+                    dy = destination[1] - char.y
+            else:
+                dx = destination[0] - char.x
+                dy = destination[1] - char.y
             dist = math.sqrt(dx * dx + dy * dy)
             
             if dist < 0.4:  # Arrived at destination
+                # Check if arrived at a window - if so, face outward
+                if char.zone and interior:
+                    window_facing = self._get_window_facing_at(interior, char.prevailing_x, char.prevailing_y)
+                    if window_facing:
+                        # Convert window facing (north/south/east/west) to character facing (up/down/left/right)
+                        facing_map = {'north': 'up', 'south': 'down', 'east': 'right', 'west': 'left'}
+                        char['facing'] = facing_map.get(window_facing, 'down')
+                
                 # Start waiting
                 char['idle_state'] = 'waiting'
                 char['idle_wait_ticks'] = random.randint(IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS)
@@ -2682,11 +2769,22 @@ class GameLogic:
         if not accessible_pois and not accessible_positions:
             return None
         
+        # Get current position in appropriate coord space
+        # POIs/positions are in world coords; need to compare in same space
+        if char.zone:
+            # In interior - use prevailing (local) coords for distance, but POIs are world
+            # Convert char position to world for consistent comparison
+            current_pos = (char.x, char.y)  # world coords (compressed but consistent with POIs)
+            # For interiors, world distances are compressed, so use a smaller threshold
+            far_threshold = 0.3  # Compressed world space
+        else:
+            current_pos = (char.x, char.y)
+            far_threshold = 2.0
+        
         # 70% chance to go to a point of interest if available
         if accessible_pois and (not accessible_positions or random.random() < 0.7):
             # Pick a POI that's not too close to current position
-            current_pos = (char.x, char.y)
-            far_pois = [p for p in accessible_pois if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
+            far_pois = [p for p in accessible_pois if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > far_threshold]
             if far_pois:
                 return random.choice(far_pois)
             elif accessible_pois:
@@ -2694,14 +2792,38 @@ class GameLogic:
         
         # Pick a random valid position
         if accessible_positions:
-            # Prefer positions that are at least 2 units away
-            current_pos = (char.x, char.y)
+            # Prefer positions that are at least threshold away
             far_positions = [p for p in accessible_positions 
-                           if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
+                           if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > far_threshold]
             if far_positions:
                 return random.choice(far_positions)
             else:
                 return random.choice(accessible_positions)
+        
+        return None
+    
+    def _get_window_facing_at(self, interior, local_x, local_y, threshold=1.0):
+        """Check if position is near a window and return its facing direction.
+        
+        Args:
+            interior: The interior to check
+            local_x, local_y: Position in interior local coords
+            threshold: How close to window to count as "at" it
+            
+        Returns:
+            Window facing direction ('north', 'south', 'east', 'west') or None
+        """
+        if not interior:
+            return None
+        
+        for window in interior.windows:
+            # Distance from character to window position
+            dx = local_x - (window.interior_x + 0.5)
+            dy = local_y - (window.interior_y + 0.5)
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < threshold:
+                return window.facing
         
         return None
     
@@ -2712,31 +2834,6 @@ class GameLogic:
         char['idle_wait_ticks'] = 0
         char['idle_is_idle'] = False
         char['is_patrolling'] = False
-
-    def _get_random_neighbor(self, char):
-        """Get a random valid position nearby. Returns float position.
-        Avoids farm cells.
-        """
-        # Try several times to find a non-farm cell
-        for _ in range(10):
-            # Pick a random direction and distance
-            angle = random.random() * 2 * math.pi
-            distance = random.uniform(1.0, 3.0)
-            
-            nx = char['x'] + math.cos(angle) * distance
-            ny = char['y'] + math.sin(angle) * distance
-            
-            # Clamp to bounds (allow touching edges)
-            nx = max(0, min(SIZE, nx))
-            ny = max(0, min(SIZE, ny))
-            
-            # Check if this is a farm cell
-            cell_x, cell_y = int(nx), int(ny)
-            if (cell_x, cell_y) not in self.state.farm_cells:
-                return (nx, ny)
-        
-        # Fallback to any position if no non-farm cell found
-        return (nx, ny)
     
     def _nearest_in_area(self, char, area, is_village=False):
         """Find the nearest unoccupied cell in an area. Returns float position (cell center).
