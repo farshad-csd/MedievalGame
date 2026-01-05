@@ -6,15 +6,25 @@ frame for a character's current state and direction.
 
 Designed for compatibility with eventual Rust migration (raylib-rs).
 
-Sprite Directions:
-- U (Up): Used for 'up', 'up-left', 'up-right'
-- S (Side): Used for 'left', 'right' (flipped horizontally for right)
-- D (Down): Used for 'down', 'down-left', 'down-right'
+Sprite Sheet Layout:
+- Civilian1_Move.png: 4 frames × 8 directions (208x416, walking animation)
+- Civilian1_Attack.png: 4 frames × 8 directions (208x416, attack animation)
+- Civilian1_Faint.png: 1 frame (52x52, death pose)
+
+Direction Row Mapping (rows 0-7, clockwise from down):
+- Row 0: Down (front view)
+- Row 1: Down-Right
+- Row 2: Right
+- Row 3: Up-Right
+- Row 4: Up (back view)
+- Row 5: Up-Left
+- Row 6: Left
+- Row 7: Down-Left
 
 Animation States:
-- Walk: 6 frames, loops continuously while moving
-- Attack: 6 frames, plays once when attacking
-- Death: 6 frames, plays once when dying, holds last frame
+- Walk: 4 frames, loops continuously while moving
+- Attack: 4 frames, plays once when attacking
+- Death: 1 frame, shown when dead
 - Idle: Uses first frame of Walk
 """
 
@@ -24,14 +34,28 @@ import time
 
 
 # Animation timing
-WALK_FRAME_DURATION = 0.1  # 100ms per frame = 600ms per cycle
-SPRINT_FRAME_DURATION = 0.07  # 70ms per frame = 420ms per cycle
-ATTACK_FRAME_DURATION = 0.042  # ~42ms per frame = 250ms for full attack
-DEATH_FRAME_DURATION = 0.15  # 150ms per frame = 900ms for death sequence
+WALK_FRAME_DURATION = 0.12  # 120ms per frame = 480ms per cycle (4 frames)
+SPRINT_FRAME_DURATION = 0.08  # 80ms per frame = 320ms per cycle
+ATTACK_FRAME_DURATION = 0.06  # 60ms per frame = 240ms for full attack (4 frames)
+DEATH_FRAME_DURATION = 0.15  # Not used much with 1 frame
 
-FRAMES_PER_SHEET = 6
-FRAME_WIDTH = 48
-FRAME_HEIGHT = 48
+# Sprite sheet configuration
+FRAMES_PER_ROW = 4  # 4 frames per animation
+DIRECTIONS_PER_SHEET = 8  # 8 directions
+FRAME_WIDTH = 52  # Width of each frame
+FRAME_HEIGHT = 52  # Height of each frame
+
+# Direction name to row index mapping
+DIRECTION_TO_ROW = {
+    'down': 0,
+    'down-right': 1,
+    'right': 2,
+    'up-right': 3,
+    'up': 4,
+    'up-left': 5,
+    'left': 6,
+    'down-left': 7,
+}
 
 
 def hex_to_rgb(hex_color):
@@ -50,54 +74,39 @@ class SpriteManager:
             sprite_dir: Directory containing sprite PNG files
         """
         self.sprite_dir = sprite_dir
-        self.textures = {}  # {direction: {action: Texture2D}}
-        self.frames = {}    # {direction: {action: [Rectangle]}} - source rects for each frame
+        self.textures = {}  # {action: Texture2D}
         self.loaded = False
-        self._recolor_cache = {}  # Cache for recolored textures: (texture_id, color_hex) -> Texture2D
+        self._recolor_cache = {}  # Cache for recolored textures
         
     def load_sprites(self):
-        """Load all sprite sheets and extract frame rectangles."""
+        """Load all sprite sheets."""
         if self.loaded:
             return
-            
-        directions = ['U', 'S', 'D']
-        actions = ['Walk', 'Attack', 'Death']
         
-        for direction in directions:
-            self.textures[direction] = {}
-            self.frames[direction] = {}
+        # Map action names to filenames
+        sprite_files = {
+            'Walk': 'sprites/Civilian1_Move.png',
+            'Attack': 'sprites/Civilian1_Attack.png',
+            'Death': 'sprites/Civilian1_Faint.png',
+        }
+        
+        for action, filename in sprite_files.items():
+            filepath = os.path.join(self.sprite_dir, filename)
             
-            for action in actions:
-                filename = f"sprites/{direction}_{action}.png"
-                filepath = os.path.join(self.sprite_dir, filename)
-                
-                if os.path.exists(filepath):
-                    # Load texture
-                    texture = rl.load_texture(filepath)
-                    self.textures[direction][action] = texture
-                    
-                    # Create frame rectangles
-                    frame_rects = []
-                    for i in range(FRAMES_PER_SHEET):
-                        rect = rl.Rectangle(
-                            i * FRAME_WIDTH, 0,
-                            FRAME_WIDTH, FRAME_HEIGHT
-                        )
-                        frame_rects.append(rect)
-                    self.frames[direction][action] = frame_rects
-                else:
-                    print(f"Warning: Sprite sheet not found: {filepath}")
-                    self.textures[direction][action] = None
-                    self.frames[direction][action] = None
+            if os.path.exists(filepath):
+                texture = rl.load_texture(filepath)
+                self.textures[action] = texture
+            else:
+                print(f"Warning: Sprite sheet not found: {filepath}")
+                self.textures[action] = None
         
         self.loaded = True
     
     def unload_sprites(self):
         """Unload all loaded textures."""
-        for direction in self.textures.values():
-            for texture in direction.values():
-                if texture:
-                    rl.unload_texture(texture)
+        for texture in self.textures.values():
+            if texture:
+                rl.unload_texture(texture)
         
         # Unload cached recolored textures
         for texture in self._recolor_cache.values():
@@ -105,42 +114,41 @@ class SpriteManager:
                 rl.unload_texture(texture)
         
         self.textures = {}
-        self.frames = {}
         self._recolor_cache = {}
         self.loaded = False
     
-    def get_sprite_direction(self, facing):
-        """Map 8-direction facing to 3 sprite directions.
+    def get_direction_row(self, facing):
+        """Map facing direction to sprite sheet row.
         
         Args:
             facing: One of 'up', 'down', 'left', 'right', 'up-left', 'up-right', 
                    'down-left', 'down-right'
                    
         Returns:
-            Tuple of (sprite_direction, should_flip)
-            - sprite_direction: 'U', 'S', or 'D'
-            - should_flip: True if sprite should be horizontally flipped
+            Row index (0-7)
         """
         facing = facing.lower() if facing else 'down'
+        return DIRECTION_TO_ROW.get(facing, 0)  # Default to 'down' (row 0)
+    
+    def get_frame_rect(self, action, direction_row, frame_idx):
+        """Get the source rectangle for a specific frame.
         
-        if facing == 'up':
-            return 'U', False
-        elif facing == 'up-left':
-            return 'U', False
-        elif facing == 'up-right':
-            return 'U', False
-        elif facing == 'down':
-            return 'D', False
-        elif facing == 'down-left':
-            return 'S', False
-        elif facing == 'down-right':
-            return 'S', True
-        elif facing == 'left':
-            return 'S', False
-        elif facing == 'right':
-            return 'S', True
-        else:
-            return 'D', False
+        Args:
+            action: 'Walk', 'Attack', or 'Death'
+            direction_row: Row index (0-7) for direction
+            frame_idx: Frame index (0-3) for animation
+            
+        Returns:
+            Rectangle for the frame source
+        """
+        if action == 'Death':
+            # Death sprite is a single frame, no direction rows
+            return rl.Rectangle(0, 0, FRAME_WIDTH, FRAME_HEIGHT)
+        
+        # For Walk and Attack: 4 columns × 8 rows
+        x = frame_idx * FRAME_WIDTH
+        y = direction_row * FRAME_HEIGHT
+        return rl.Rectangle(x, y, FRAME_WIDTH, FRAME_HEIGHT)
     
     def get_frame(self, char, current_time=None):
         """Get the appropriate sprite frame for a character.
@@ -150,7 +158,8 @@ class SpriteManager:
             current_time: Current time (defaults to time.time())
             
         Returns:
-            Tuple of (Texture2D, should_flip) or (None, False) if no sprite
+            Tuple of (frame_info_dict, should_flip) or (None, False) if no sprite
+            frame_info_dict contains 'texture' and 'source' Rectangle
         """
         if not self.loaded:
             self.load_sprites()
@@ -159,23 +168,20 @@ class SpriteManager:
             current_time = time.time()
         
         facing = char.get('facing', 'down')
-        sprite_dir, should_flip = self.get_sprite_direction(facing)
+        direction_row = self.get_direction_row(facing)
         
         # Determine animation state
         action, frame_idx = self._get_animation_state(char, current_time)
         
-        texture = self.textures.get(sprite_dir, {}).get(action)
-        frame_rects = self.frames.get(sprite_dir, {}).get(action)
-        
-        if texture is None or frame_rects is None:
+        texture = self.textures.get(action)
+        if texture is None:
             return None, False
         
-        # Clamp frame index
-        frame_idx = min(frame_idx, len(frame_rects) - 1)
+        # Get source rectangle
+        source_rect = self.get_frame_rect(action, direction_row, frame_idx)
         
-        # Return the texture and frame info
-        # We'll return a dict with texture and source rect for drawing
-        return {'texture': texture, 'source': frame_rects[frame_idx]}, should_flip
+        # No flipping needed - we have all 8 directions
+        return {'texture': texture, 'source': source_rect}, False
     
     def _get_animation_state(self, char, current_time):
         """Determine which animation and frame to show.
@@ -189,20 +195,16 @@ class SpriteManager:
         """
         # Check for death animation
         if char.get('is_dying') or char.get('health', 100) <= 0:
-            death_start = char.get('death_animation_start')
-            if death_start:
-                elapsed = current_time - death_start
-                frame_idx = int(elapsed / DEATH_FRAME_DURATION)
-                frame_idx = min(frame_idx, FRAMES_PER_SHEET - 1)
-                return 'Death', frame_idx
-            return 'Death', FRAMES_PER_SHEET - 1
+            # Death is now just 1 frame
+            return 'Death', 0
         
         # Check for attack animation
         attack_start = char.get('attack_animation_start')
         if attack_start:
             elapsed = current_time - attack_start
-            if elapsed < ATTACK_FRAME_DURATION * FRAMES_PER_SHEET:
+            if elapsed < ATTACK_FRAME_DURATION * FRAMES_PER_ROW:
                 frame_idx = int(elapsed / ATTACK_FRAME_DURATION)
+                frame_idx = min(frame_idx, FRAMES_PER_ROW - 1)
                 return 'Attack', frame_idx
         
         # Detect movement
@@ -222,14 +224,16 @@ class SpriteManager:
             is_sprinting = char.get('is_sprinting', False)
             is_backpedaling = char.get('is_backpedaling', False)
             frame_duration = SPRINT_FRAME_DURATION if is_sprinting else WALK_FRAME_DURATION
-            elapsed = current_time % (frame_duration * FRAMES_PER_SHEET)
+            elapsed = current_time % (frame_duration * FRAMES_PER_ROW)
             frame_idx = int(elapsed / frame_duration)
             
+            # Backpedaling reverses the animation frames
             if is_backpedaling:
-                frame_idx = (FRAMES_PER_SHEET - 1) - frame_idx
+                frame_idx = (FRAMES_PER_ROW - 1) - frame_idx
             
             return 'Walk', frame_idx
         else:
+            # Idle - first frame of walk
             return 'Walk', 0
     
     def recolor_red_to_color(self, frame_info, target_color, red_threshold=0.3):

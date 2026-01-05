@@ -52,7 +52,7 @@ TICKS_PER_YEAR = BASE_TICKS_PER_YEAR * TICK_MULTIPLIER  # 45000 ticks
 # 2:1       | 2          | Pokemon Emerald (trainers), Pokemon Ranger: SoA, Suikoden 2
 # 2.4:1     | 2.25       | Chrono Trigger
 SPRITE_HW_RATIO = 1      # Height-to-width ratio (taller = bigger number)
-SPRITE_TILES_TALL = 2.0   # How many tiles tall the sprite is
+SPRITE_TILES_TALL = 2.5   # How many tiles tall the sprite is
 
 # Calculated dimensions (don't edit these directly)
 CHARACTER_HEIGHT = SPRITE_TILES_TALL
@@ -90,7 +90,7 @@ ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 # PERCEPTION SETTINGS (Vision and Hearing)
 # =============================================================================
 # Sound radius - how far sound travels (attacks, screams, etc.)
-SOUND_RADIUS = 4.0  # cells - characters hear events within this range
+SOUND_RADIUS = 3.0  # cells - characters hear events within this range
 
 # Vision settings
 VISION_RANGE = 8.0  # cells - how far characters can see

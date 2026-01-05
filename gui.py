@@ -1152,8 +1152,12 @@ class BoardGUI:
         player = self.state.player
         
         # Track last known player zone for death rendering
-        if player and player.zone is not None:
-            self._last_player_zone = player.zone
+        if player:
+            if player.zone is not None:
+                self._last_player_zone = player.zone
+            else:
+                # Player is alive and in exterior - clear the tracking
+                self._last_player_zone = None
         
         in_interior = player and player.zone is not None and not self.window_viewing
         looking_into_interior = self.window_viewing and self.window_viewing_interior is not None
@@ -1272,7 +1276,7 @@ class BoardGUI:
         floor_color = rl.Color(240, 235, 220, 255)
         wall_color = rl.Color(120, 100, 80, 255)
         window_color = rl.Color(150, 200, 255, 180)
-        door_color = rl.Color(139, 90, 43, 255)
+        door_color = rl.Color(0, 0, 0, 255)
         
         # Get textures
         floor_tex = self.world_textures.get('interior_floor')
