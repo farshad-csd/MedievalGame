@@ -251,6 +251,7 @@ class BoardGUI:
         # Window "security camera" viewing state
         self.window_viewing = False
         self.window_viewing_window = None  # The Window object being looked through
+        self.window_viewing_interior = None  # Interior being viewed (when looking in from outside)
         
         # Debug window (optional - can be disabled for mobile)
         self.debug_window = None
@@ -628,6 +629,13 @@ class BoardGUI:
                 self.player_moving = False
             return
         
+        # Block movement while viewing through window
+        if self.window_viewing:
+            if self.player_moving:
+                self.player_controller.stop_movement()
+                self.player_moving = False
+            return
+        
         # Update player facing based on mouse (when using keyboard/mouse)
         if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
             self._update_player_facing_to_mouse()
@@ -703,8 +711,12 @@ class BoardGUI:
             # Currently viewing - stop viewing and recenter on player
             self.window_viewing = False
             self.window_viewing_window = None
+            self.window_viewing_interior = None
             self.camera_following_player = True
             if player:
+                # Clear player's window viewing state (for game logic)
+                player.viewing_through_window = None
+                player.viewing_into_interior = None
                 # Use local coords when inside (for interior rendering)
                 if player.zone:
                     self.camera_x = player.prevailing_x
@@ -717,10 +729,24 @@ class BoardGUI:
         # Try to start viewing
         window = self.player_controller.handle_window_input()
         if window:
-            # Move camera to look outside
-            look_x, look_y = window.get_exterior_look_position()
-            self.camera_x = look_x
-            self.camera_y = look_y
+            if player.zone is not None:
+                # Inside looking out - camera goes to exterior position
+                look_x, look_y = window.get_exterior_look_position()
+                self.camera_x = look_x
+                self.camera_y = look_y
+                self.window_viewing_interior = None
+                # Store on player for game logic
+                player.viewing_through_window = window
+                player.viewing_into_interior = None
+            else:
+                # Outside looking in - camera goes to interior center
+                interior = window.interior
+                self.camera_x = interior.width / 2
+                self.camera_y = interior.height / 2
+                self.window_viewing_interior = interior
+                # Store on player for game logic
+                player.viewing_through_window = window
+                player.viewing_into_interior = interior
             
             self.window_viewing = True
             self.window_viewing_window = window
@@ -736,8 +762,12 @@ class BoardGUI:
             if self.input.recenter:
                 self.window_viewing = False
                 self.window_viewing_window = None
+                self.window_viewing_interior = None
                 self.camera_following_player = True
                 if player:
+                    # Clear player's window viewing state (for game logic)
+                    player.viewing_through_window = None
+                    player.viewing_into_interior = None
                     # Use local coords when inside (for interior rendering)
                     if player.zone:
                         self.camera_x = player.prevailing_x
@@ -821,8 +851,13 @@ class BoardGUI:
         world_x, world_y = self._screen_to_world(self.input.mouse_x, self.input.mouse_y)
         
         # Calculate direction from player to mouse
-        dx = world_x - player.x
-        dy = world_y - player.y
+        # Use prevailing coords when in interior (camera space matches interior)
+        if player.zone:
+            dx = world_x - player.prevailing_x
+            dy = world_y - player.prevailing_y
+        else:
+            dx = world_x - player.x
+            dy = world_y - player.y
         
         # Determine 8-direction facing
         angle = math.atan2(dy, dx)
@@ -1025,10 +1060,12 @@ class BoardGUI:
         self._cam_cell_size = cell_size
         
         # Check if player is in an interior (and not looking through window)
+        # OR if we're looking into an interior from outside
         player = self.state.player
         in_interior = player and player.zone is not None and not self.window_viewing
+        looking_into_interior = self.window_viewing and self.window_viewing_interior is not None
         
-        if in_interior:
+        if in_interior or looking_into_interior:
             # Render interior instead of exterior
             self._draw_interior_canvas()
             return
@@ -1069,12 +1106,19 @@ class BoardGUI:
             self._draw_window_viewing_indicator()
     
     def _draw_interior_canvas(self):
-        """Draw the interior when player is inside a building."""
+        """Draw the interior when player is inside a building or looking in from outside."""
         player = self.state.player
-        if not player or not player.zone:
+        
+        # Determine which interior to render
+        if self.window_viewing_interior is not None:
+            # Looking into an interior from outside
+            interior = self.window_viewing_interior
+        elif player and player.zone:
+            # Player is inside an interior
+            interior = self.state.interiors.get_interior(player.zone)
+        else:
             return
         
-        interior = self.state.interiors.get_interior(player.zone)
         if not interior:
             return
         
@@ -1130,18 +1174,30 @@ class BoardGUI:
                     rl.Color(180, 175, 160, 100)
                 )
         
-        # Draw player character in interior
-        self._draw_single_character_sprite(player)
+        # Draw characters in interior (only if they're in this interior's zone)
+        # When looking in from outside, player won't be drawn (they're not in this zone)
+        for char in self.state.characters:
+            if char.zone == interior.name:
+                self._draw_single_character_sprite(char)
+        
+        # Draw perception debug if enabled
+        if SHOW_PERCEPTION_DEBUG:
+            self._draw_perception_debug()
         
         # Draw interior name at top
-        name_text = f"Inside: {interior.name}"
+        if self.window_viewing_interior is not None:
+            name_text = f"Viewing: {interior.name}"
+            hint_text = "V or R - Stop viewing"
+        else:
+            name_text = f"Inside: {interior.name}"
+            hint_text = "F - Exit | V - Look through window"
+        
         text_width = rl.measure_text(name_text, 16)
         rl.draw_text(name_text, 
                     int(self.canvas_width / 2 - text_width / 2), 
                     20, 16, COLOR_TEXT_BRIGHT)
         
         # Draw controls hint
-        hint_text = "F - Exit | V - Look through window"
         hint_width = rl.measure_text(hint_text, 12)
         rl.draw_text(hint_text,
                     int(self.canvas_width / 2 - hint_width / 2),
@@ -1345,10 +1401,83 @@ class BoardGUI:
         if not player or char is player:
             return False
         
-        player_x = player['x']
-        player_y = player['y']
-        char_x = char['x']
-        char_y = char['y']
+        # Window viewing - check perception through window (vision only, no sound)
+        if self.window_viewing and self.window_viewing_window:
+            window = self.window_viewing_window
+            
+            # Determine which zone we're viewing into
+            if self.window_viewing_interior is not None:
+                # Looking in from outside - char must be in that interior
+                if char.zone != self.window_viewing_interior.name:
+                    return False
+                # Cone originates from window's interior position
+                cone_x = window.interior_x + 0.5
+                cone_y = window.interior_y + 0.5
+                # Char position in interior coords
+                char_x = char.prevailing_x
+                char_y = char.prevailing_y
+            else:
+                # Looking out from inside - char must be in exterior
+                if char.zone is not None:
+                    return False
+                # Cone originates from window's world position (on the wall)
+                cone_x = window.world_x
+                cone_y = window.world_y
+                # Char position in world coords
+                char_x = char.x
+                char_y = char.y
+            
+            # Check vision cone (no sound through windows)
+            dx = char_x - cone_x
+            dy = char_y - cone_y
+            distance = math.sqrt(dx * dx + dy * dy)
+            
+            if distance <= VISION_RANGE and distance > 0:
+                # Use window's facing direction
+                # When looking OUT: use facing directly
+                # When looking IN: invert direction (you're on the outside looking in)
+                window_facing_vectors = {
+                    'north': (0, -1),
+                    'south': (0, 1),
+                    'east': (1, 0),
+                    'west': (-1, 0),
+                }
+                face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+                
+                # Invert when looking in from outside
+                if self.window_viewing_interior is not None:
+                    face_x = -face_x
+                    face_y = -face_y
+                
+                dir_x = dx / distance
+                dir_y = dy / distance
+                dot = face_x * dir_x + face_y * dir_y
+                
+                half_angle = math.radians(VISION_CONE_ANGLE / 2)
+                if dot >= math.cos(half_angle):
+                    # In cone - check line of sight
+                    target_zone = self.window_viewing_interior.name if self.window_viewing_interior else None
+                    obstacles = self._get_vision_obstacles_for_rendering(target_zone)
+                    if self._check_line_of_sight_gui(cone_x, cone_y, char_x, char_y, obstacles):
+                        return True
+            
+            return False
+        
+        # Different zones = can't perceive (window perception handled above)
+        if player.zone != char.zone:
+            return False
+        
+        # Use prevailing coords when in interior (correct distance scale)
+        if player.zone:
+            player_x = player.prevailing_x
+            player_y = player.prevailing_y
+            char_x = char.prevailing_x
+            char_y = char.prevailing_y
+        else:
+            player_x = player.x
+            player_y = player.y
+            char_x = char.x
+            char_y = char.y
         
         dx = char_x - player_x
         dy = char_y - player_y
@@ -1385,7 +1514,10 @@ class BoardGUI:
                 # Check if within cone angle
                 half_angle = math.radians(VISION_CONE_ANGLE / 2)
                 if dot >= math.cos(half_angle):
-                    return True
+                    # In cone - check line of sight
+                    obstacles = self._get_vision_obstacles_for_rendering(player.zone)
+                    if self._check_line_of_sight_gui(player_x, player_y, char_x, char_y, obstacles):
+                        return True
         
         return False
     
@@ -2238,16 +2370,154 @@ void main() {
                     dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
                     rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
     
+    def _get_vision_obstacles_for_rendering(self, zone):
+        """Get obstacles that block vision for visualization.
+        
+        Args:
+            zone: Interior name or None for exterior
+            
+        Returns:
+            List of (x, y, radius) tuples for obstacles
+        """
+        obstacles = []
+        
+        if zone is None:
+            # Exterior - trees block vision
+            for pos in self.state.interactables.trees:
+                x, y = pos
+                obstacles.append((x + 0.5, y + 0.5, 0.4))
+            
+            # House walls
+            for house in self.state.interactables.houses.values():
+                y_start, x_start, y_end, x_end = house.bounds
+                for hx in range(x_start, x_end):
+                    obstacles.append((hx + 0.5, y_start + 0.5, 0.5))
+                    obstacles.append((hx + 0.5, y_end - 0.5, 0.5))
+                for hy in range(y_start, y_end):
+                    obstacles.append((x_start + 0.5, hy + 0.5, 0.5))
+                    obstacles.append((x_end - 0.5, hy + 0.5, 0.5))
+        else:
+            # Interior - stoves block vision
+            interior = self.state.interiors.get_interior(zone)
+            if interior:
+                for pos, stove in self.state.interactables.stoves.items():
+                    sx, sy = pos
+                    house = interior.house
+                    y_start, x_start, y_end, x_end = house.bounds
+                    if x_start <= sx < x_end and y_start <= sy < y_end:
+                        int_x, int_y = interior.world_to_interior(sx + 0.5, sy + 0.5)
+                        obstacles.append((int_x, int_y, 0.4))
+        
+        return obstacles
+    
+    def _get_shadow_distance(self, from_x, from_y, angle, max_range, obstacles):
+        """Get distance to first obstacle along a ray.
+        
+        Args:
+            from_x, from_y: Ray origin
+            angle: Ray angle in radians
+            max_range: Maximum ray distance
+            obstacles: List of (x, y, radius) tuples
+            
+        Returns:
+            Distance to first obstacle, or max_range if no hit
+        """
+        # Ray direction
+        ray_dx = math.cos(angle)
+        ray_dy = -math.sin(angle)  # Negative because screen Y is inverted
+        
+        # Ray end point
+        to_x = from_x + ray_dx * max_range
+        to_y = from_y + ray_dy * max_range
+        
+        min_dist = max_range
+        
+        for ox, oy, radius in obstacles:
+            # Skip if obstacle is at origin
+            if abs(ox - from_x) < 0.3 and abs(oy - from_y) < 0.3:
+                continue
+            
+            # Line-circle intersection
+            dx = to_x - from_x
+            dy = to_y - from_y
+            fx = from_x - ox
+            fy = from_y - oy
+            
+            a = dx * dx + dy * dy
+            if a < 0.0001:
+                continue
+            b = 2 * (fx * dx + fy * dy)
+            c = fx * fx + fy * fy - radius * radius
+            
+            discriminant = b * b - 4 * a * c
+            
+            if discriminant >= 0:
+                discriminant = math.sqrt(discriminant)
+                t1 = (-b - discriminant) / (2 * a)
+                
+                if 0 < t1 < 1:
+                    hit_dist = t1 * max_range
+                    if hit_dist < min_dist:
+                        min_dist = hit_dist
+        
+        return min_dist
+    
+    def _check_line_of_sight_gui(self, from_x, from_y, to_x, to_y, obstacles):
+        """Check if there's clear line of sight between two points.
+        
+        Args:
+            from_x, from_y: Observer position
+            to_x, to_y: Target position
+            obstacles: List of (x, y, radius) obstacle tuples
+            
+        Returns:
+            True if line of sight is clear, False if blocked
+        """
+        for ox, oy, radius in obstacles:
+            # Skip if obstacle is at observer or target position
+            if abs(ox - from_x) < 0.3 and abs(oy - from_y) < 0.3:
+                continue
+            if abs(ox - to_x) < 0.3 and abs(oy - to_y) < 0.3:
+                continue
+            
+            # Line-circle intersection check
+            dx = to_x - from_x
+            dy = to_y - from_y
+            fx = from_x - ox
+            fy = from_y - oy
+            
+            a = dx * dx + dy * dy
+            if a < 0.0001:
+                continue
+            b = 2 * (fx * dx + fy * dy)
+            c = fx * fx + fy * fy - radius * radius
+            
+            discriminant = b * b - 4 * a * c
+            
+            if discriminant >= 0:
+                discriminant = math.sqrt(discriminant)
+                t1 = (-b - discriminant) / (2 * a)
+                t2 = (-b + discriminant) / (2 * a)
+                
+                if 0 < t1 < 1 or 0 < t2 < 1:
+                    return False  # Blocked
+        
+        return True  # Clear line of sight
+
     def _draw_perception_debug(self):
         """Draw perception debug visualization"""
         cell_size = self._cam_cell_size
         player = self.state.player
         
         # Determine what zone we're rendering
-        # If window_viewing: render exterior (world coords)
+        # If window_viewing into interior: render that interior (local coords)
+        # If window_viewing out: render exterior (world coords)
         # If player in interior: render interior (local coords)
         # Otherwise: render exterior (world coords)
-        if self.window_viewing:
+        if self.window_viewing and self.window_viewing_interior is not None:
+            rendering_zone = self.window_viewing_interior.name
+            use_local_coords = True
+        elif self.window_viewing:
             rendering_zone = None  # Exterior
             use_local_coords = False
         elif player and player.zone:
@@ -2302,7 +2572,10 @@ void main() {
             angle1 = facing_angle - half_angle
             angle2 = facing_angle + half_angle
             
-            # Draw vision cone as a series of triangles
+            # Get obstacles for shadow casting
+            obstacles = self._get_vision_obstacles_for_rendering(rendering_zone)
+            
+            # Draw vision cone as a series of triangles with shadow casting
             num_segments = 20
             for i in range(num_segments):
                 t1 = i / num_segments
@@ -2310,10 +2583,17 @@ void main() {
                 a1 = angle1 + t1 * (angle2 - angle1)
                 a2 = angle1 + t2 * (angle2 - angle1)
                 
-                p1_x = screen_x + math.cos(a1) * vision_radius_pixels
-                p1_y = screen_y - math.sin(a1) * vision_radius_pixels
-                p2_x = screen_x + math.cos(a2) * vision_radius_pixels
-                p2_y = screen_y - math.sin(a2) * vision_radius_pixels
+                # Get shadow distances for each edge
+                dist1 = self._get_shadow_distance(vis_x, vis_y, a1, VISION_RANGE, obstacles)
+                dist2 = self._get_shadow_distance(vis_x, vis_y, a2, VISION_RANGE, obstacles)
+                
+                r1_pixels = int(dist1 * cell_size)
+                r2_pixels = int(dist2 * cell_size)
+                
+                p1_x = screen_x + math.cos(a1) * r1_pixels
+                p1_y = screen_y - math.sin(a1) * r1_pixels
+                p2_x = screen_x + math.cos(a2) * r2_pixels
+                p2_y = screen_y - math.sin(a2) * r2_pixels
                 
                 rl.draw_triangle(
                     rl.Vector2(screen_x, screen_y),
@@ -2321,6 +2601,218 @@ void main() {
                     rl.Vector2(p2_x, p2_y),
                     rl.Color(255, 100, 100, 30)
                 )
+        
+        # Draw player's vision cone through window when window viewing
+        if self.window_viewing and self.window_viewing_window and player:
+            window = self.window_viewing_window
+            
+            # Determine cone origin based on viewing direction
+            if self.window_viewing_interior is not None:
+                # Looking in from outside - cone from window's interior position
+                cone_x = window.interior_x + 0.5
+                cone_y = window.interior_y + 0.5
+            else:
+                # Looking out from inside - cone from window's world position (on the wall)
+                cone_x = window.world_x
+                cone_y = window.world_y
+            
+            screen_x, screen_y = self._world_to_screen(cone_x, cone_y)
+            
+            # Vision cone only (no sound through windows)
+            vision_radius_pixels = int(VISION_RANGE * cell_size)
+            
+            # Use window's facing direction
+            # When looking OUT: use facing directly
+            # When looking IN: invert direction (you're on the outside looking in)
+            window_facing_vectors = {
+                'north': (0, -1),
+                'south': (0, 1),
+                'east': (1, 0),
+                'west': (-1, 0),
+            }
+            face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+            
+            # Invert when looking in from outside
+            if self.window_viewing_interior is not None:
+                face_x = -face_x
+                face_y = -face_y
+            
+            facing_angle = math.atan2(-face_y, face_x)
+            half_angle = math.radians(VISION_CONE_ANGLE / 2)
+            
+            angle1 = facing_angle - half_angle
+            angle2 = facing_angle + half_angle
+            
+            # Get obstacles for shadow casting (in the zone we're viewing into)
+            target_zone = self.window_viewing_interior.name if self.window_viewing_interior else None
+            window_obstacles = self._get_vision_obstacles_for_rendering(target_zone)
+            
+            # Draw vision cone as a series of triangles (different color for window view)
+            num_segments = 20
+            for i in range(num_segments):
+                t1 = i / num_segments
+                t2 = (i + 1) / num_segments
+                a1 = angle1 + t1 * (angle2 - angle1)
+                a2 = angle1 + t2 * (angle2 - angle1)
+                
+                # Get shadow distances
+                dist1 = self._get_shadow_distance(cone_x, cone_y, a1, VISION_RANGE, window_obstacles)
+                dist2 = self._get_shadow_distance(cone_x, cone_y, a2, VISION_RANGE, window_obstacles)
+                
+                r1_pixels = int(dist1 * cell_size)
+                r2_pixels = int(dist2 * cell_size)
+                
+                p1_x = screen_x + math.cos(a1) * r1_pixels
+                p1_y = screen_y - math.sin(a1) * r1_pixels
+                p2_x = screen_x + math.cos(a2) * r2_pixels
+                p2_y = screen_y - math.sin(a2) * r2_pixels
+                
+                rl.draw_triangle(
+                    rl.Vector2(screen_x, screen_y),
+                    rl.Vector2(p1_x, p1_y),
+                    rl.Vector2(p2_x, p2_y),
+                    rl.Color(100, 100, 255, 30)  # Blue tint for window vision
+                )
+        
+        # Draw NPC cross-zone window vision cones
+        self._draw_cross_zone_window_cones(rendering_zone, use_local_coords, cell_size)
+
+    def _draw_cross_zone_window_cones(self, rendering_zone, use_local_coords, cell_size):
+        """Draw vision cones for NPCs looking through windows from the other zone."""
+        vision_radius_pixels = int(VISION_RANGE * cell_size)
+        
+        # Helper to check if character is facing a direction
+        def is_facing_direction(char, direction):
+            facing = char.get('facing', 'down')
+            direction_facings = {
+                'north': ('up', 'up-left', 'up-right'),
+                'south': ('down', 'down-left', 'down-right'),
+                'east': ('right', 'up-right', 'down-right'),
+                'west': ('left', 'up-left', 'down-left'),
+            }
+            return facing in direction_facings.get(direction, ())
+        
+        opposite_dir = {'north': 'south', 'south': 'north', 'east': 'west', 'west': 'east'}
+        window_facing_vectors = {
+            'north': (0, -1),
+            'south': (0, 1),
+            'east': (1, 0),
+            'west': (-1, 0),
+        }
+        
+        if rendering_zone is not None:
+            # Rendering an interior - draw cones for exterior NPCs looking in
+            interior = self.state.interiors.get_interior(rendering_zone)
+            if interior:
+                for char in self.state.characters:
+                    if char.get('health', 100) <= 0:
+                        continue
+                    if char.zone is not None:  # Only exterior characters
+                        continue
+                    
+                    # Check each window
+                    for window in interior.windows:
+                        if window.is_character_near_exterior(char.x, char.y):
+                            # Must be facing into the building
+                            inward_dir = opposite_dir.get(window.facing)
+                            if is_facing_direction(char, inward_dir):
+                                # Draw cone from window's interior position
+                                cone_x = window.interior_x + 0.5
+                                cone_y = window.interior_y + 0.5
+                                screen_x, screen_y = self._world_to_screen(cone_x, cone_y)
+                                
+                                # Direction is inverted (looking into building)
+                                face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+                                face_x, face_y = -face_x, -face_y
+                                
+                                # Get interior obstacles for shadow casting
+                                interior_obstacles = self._get_vision_obstacles_for_rendering(rendering_zone)
+                                
+                                self._draw_vision_cone_triangles(
+                                    screen_x, screen_y, face_x, face_y,
+                                    vision_radius_pixels, rl.Color(100, 255, 100, 30),
+                                    world_x=cone_x, world_y=cone_y, obstacles=interior_obstacles, cell_size=cell_size
+                                )
+        else:
+            # Rendering exterior - draw cones for interior NPCs looking out
+            for house in self.state.interactables.get_all_houses():
+                interior = house.interior
+                if not interior:
+                    continue
+                
+                for char in self.state.characters:
+                    if char.get('health', 100) <= 0:
+                        continue
+                    if char.zone != interior.name:  # Only characters in this interior
+                        continue
+                    
+                    # Check each window
+                    for window in interior.windows:
+                        if window.is_character_near(char.prevailing_x, char.prevailing_y):
+                            # Must be facing outward (same as window direction)
+                            if is_facing_direction(char, window.facing):
+                                # Draw cone from window's world position
+                                cone_x = window.world_x
+                                cone_y = window.world_y
+                                screen_x, screen_y = self._world_to_screen(cone_x, cone_y)
+                                
+                                face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+                                
+                                # Get exterior obstacles for shadow casting
+                                exterior_obstacles = self._get_vision_obstacles_for_rendering(None)
+                                
+                                self._draw_vision_cone_triangles(
+                                    screen_x, screen_y, face_x, face_y,
+                                    vision_radius_pixels, rl.Color(100, 255, 100, 30),
+                                    world_x=cone_x, world_y=cone_y, obstacles=exterior_obstacles, cell_size=cell_size
+                                )
+    
+    def _draw_vision_cone_triangles(self, screen_x, screen_y, face_x, face_y, radius_pixels, color, world_x=None, world_y=None, obstacles=None, cell_size=None):
+        """Helper to draw a vision cone as triangles with optional shadow casting.
+        
+        Args:
+            screen_x, screen_y: Screen position of cone origin
+            face_x, face_y: Facing direction vector
+            radius_pixels: Max cone radius in pixels
+            color: Fill color
+            world_x, world_y: World position for shadow casting (optional)
+            obstacles: List of obstacles for shadow casting (optional)
+            cell_size: Cell size for converting shadow distances to pixels (optional)
+        """
+        facing_angle = math.atan2(-face_y, face_x)
+        half_angle = math.radians(VISION_CONE_ANGLE / 2)
+        
+        angle1 = facing_angle - half_angle
+        angle2 = facing_angle + half_angle
+        
+        num_segments = 20
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            a1 = angle1 + t1 * (angle2 - angle1)
+            a2 = angle1 + t2 * (angle2 - angle1)
+            
+            # Use shadow distances if provided
+            if obstacles is not None and world_x is not None and cell_size is not None:
+                dist1 = self._get_shadow_distance(world_x, world_y, a1, VISION_RANGE, obstacles)
+                dist2 = self._get_shadow_distance(world_x, world_y, a2, VISION_RANGE, obstacles)
+                r1_pixels = int(dist1 * cell_size)
+                r2_pixels = int(dist2 * cell_size)
+            else:
+                r1_pixels = radius_pixels
+                r2_pixels = radius_pixels
+            
+            p1_x = screen_x + math.cos(a1) * r1_pixels
+            p1_y = screen_y - math.sin(a1) * r1_pixels
+            p2_x = screen_x + math.cos(a2) * r2_pixels
+            p2_y = screen_y - math.sin(a2) * r2_pixels
+            
+            rl.draw_triangle(
+                rl.Vector2(screen_x, screen_y),
+                rl.Vector2(p1_x, p1_y),
+                rl.Vector2(p2_x, p2_y),
+                color
+            )
 
     # =========================================================================
     # HUD RENDERING
@@ -2560,14 +3052,21 @@ void main() {
     
     def _get_player_context(self, player):
         """Determine what the player can interact with"""
-        # Check for adjacent characters (NPCs)
+        # Check for adjacent characters (NPCs) - must be in same zone
         for char in self.state.characters:
             if char == player:
                 continue
             if char.get('health', 100) <= 0:
                 continue
+            # Must be in same zone to interact
+            if char.zone != player.zone:
+                continue
             
-            dist = math.sqrt((player.x - char.x)**2 + (player.y - char.y)**2)
+            # Use prevailing coords when in interior
+            if player.zone:
+                dist = math.sqrt((player.prevailing_x - char.prevailing_x)**2 + (player.prevailing_y - char.prevailing_y)**2)
+            else:
+                dist = math.sqrt((player.x - char.x)**2 + (player.y - char.y)**2)
             if dist <= ADJACENCY_DISTANCE:
                 actions = []
                 
@@ -2647,19 +3146,46 @@ void main() {
                     'actions': [{'key': 'F', 'label': 'Exit Building'}]
                 }
         
-        # Check for window (if inside)
+        # Check for window (inside looking out, or outside looking in)
         if player.zone is not None:
+            # Inside - check if near interior window
             interior = self.state.interiors.get_interior(player.zone)
             if interior:
                 for window in interior.windows:
-                    if window.is_character_near(player.x, player.y):
+                    if window.is_character_near(player.prevailing_x, player.prevailing_y):
                         return {
                             'type': 'Window',
                             'name': f'Window ({window.facing})',
                             'actions': [{'key': 'V', 'label': 'Look Outside'}]
                         }
+        else:
+            # Outside - check if near exterior window AND facing it
+            for house in self.state.interactables.get_all_houses():
+                interior = house.interior
+                if not interior:
+                    continue
+                for window in interior.windows:
+                    if window.is_character_near_exterior(player.x, player.y):
+                        # Must be facing toward the window
+                        if self._is_player_facing_window(player, window):
+                            return {
+                                'type': 'Window',
+                                'name': f'{house.name} Window',
+                                'actions': [{'key': 'V', 'label': 'Look Inside'}]
+                            }
         
         return None
+    
+    def _is_player_facing_window(self, player, window):
+        """Check if player is facing toward a window from outside."""
+        facing = player.get('facing', 'down')
+        required_facings = {
+            'north': ('down', 'down-left', 'down-right'),
+            'south': ('up', 'up-left', 'up-right'),
+            'east': ('left', 'up-left', 'down-left'),
+            'west': ('right', 'up-right', 'down-right'),
+        }
+        return facing in required_facings.get(window.facing, ())
     
     def _draw_debug_info(self):
         """Draw minimal debug info below stat bars"""

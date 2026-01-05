@@ -70,6 +70,9 @@ class GameLogic:
         """Check if two characters are adjacent (close enough to interact).
         Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
         """
+        # Must be in same zone to be adjacent
+        if char1.zone != char2.zone:
+            return False
         dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
         return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
     
@@ -77,6 +80,9 @@ class GameLogic:
         """Check if two characters are close enough to attack each other.
         Uses COMBAT_RANGE which is tighter than ADJACENCY_DISTANCE.
         """
+        # Must be in same zone to fight
+        if char1.zone != char2.zone:
+            return False
         dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
         return dist <= COMBAT_RANGE
     
@@ -590,19 +596,354 @@ class GameLogic:
         }
         return vectors.get(facing, (0, 1))
     
+    def _get_perception_coords(self, char):
+        """Get the coordinates to use for perception calculations.
+        
+        Returns prevailing coords when in interior (correct distance scale),
+        world coords when in exterior.
+        
+        Returns:
+            (x, y) tuple
+        """
+        if char.zone:
+            return (char.prevailing_x, char.prevailing_y)
+        return (char.x, char.y)
+    
+    def _is_facing_direction(self, char, direction):
+        """Check if character is facing a cardinal direction.
+        
+        Args:
+            char: Character to check
+            direction: 'north', 'south', 'east', or 'west'
+            
+        Returns:
+            True if character's facing aligns with direction
+        """
+        facing = char.get('facing', 'down')
+        # Map directions to valid facings
+        direction_facings = {
+            'north': ('up', 'up-left', 'up-right'),
+            'south': ('down', 'down-left', 'down-right'),
+            'east': ('right', 'up-right', 'down-right'),
+            'west': ('left', 'up-left', 'down-left'),
+        }
+        return facing in direction_facings.get(direction, ())
+    
+    def _get_opposite_direction(self, direction):
+        """Get the opposite cardinal direction."""
+        opposites = {
+            'north': 'south',
+            'south': 'north',
+            'east': 'west',
+            'west': 'east',
+        }
+        return opposites.get(direction, 'south')
+    
+    def get_window_for_cross_zone_vision(self, observer, target):
+        """Check if observer can see target through a window.
+        
+        Args:
+            observer: Character doing the looking
+            target: Character being looked at
+            
+        Returns:
+            (window, looking_in) tuple, or (None, None) if no valid window
+            looking_in: True if observer is outside looking in, False if inside looking out
+        """
+        # Must be in different zones
+        if observer.zone == target.zone:
+            return (None, None)
+        
+        observer_interior = self.state.interiors.get_interior(observer.zone) if observer.zone else None
+        target_interior = self.state.interiors.get_interior(target.zone) if target.zone else None
+        
+        if observer_interior and target.zone is None:
+            # Observer inside, target outside
+            # Check if observer is near a window and facing outward
+            for window in observer_interior.windows:
+                if window.is_character_near(observer.prevailing_x, observer.prevailing_y):
+                    # Must be facing the window's direction (outward)
+                    if self._is_facing_direction(observer, window.facing):
+                        return (window, False)  # looking out
+        
+        if target_interior and observer.zone is None:
+            # Observer outside, target inside
+            # Check if observer is near window's exterior AND facing toward building
+            for window in target_interior.windows:
+                if window.is_character_near_exterior(observer.x, observer.y):
+                    # Must be facing opposite of window direction (into building)
+                    inward_dir = self._get_opposite_direction(window.facing)
+                    if self._is_facing_direction(observer, inward_dir):
+                        return (window, True)  # looking in
+        
+        return (None, None)
+    
+    def can_perceive_character(self, observer, target):
+        """Check if observer can perceive target character.
+        
+        Handles zone checks, window viewing, and coordinate selection.
+        
+        Args:
+            observer: Character doing the perceiving
+            target: Character being perceived
+            
+        Returns:
+            Tuple of (can_perceive: bool, method: str or None)
+            method is 'vision', 'sound', or None
+        """
+        # Check if observer is viewing through a window (player only)
+        window = getattr(observer, 'viewing_through_window', None)
+        if window:
+            viewing_interior = getattr(observer, 'viewing_into_interior', None)
+            
+            if viewing_interior is not None:
+                # Looking in from outside - target must be in that interior
+                if target.zone != viewing_interior.name:
+                    return (False, None)
+                # Cone originates from window's interior position
+                cone_x = window.interior_x + 0.5
+                cone_y = window.interior_y + 0.5
+                # Target position in interior coords
+                target_x = target.prevailing_x
+                target_y = target.prevailing_y
+                # Direction is inverted (looking into building)
+                invert = True
+            else:
+                # Looking out from inside - target must be in exterior
+                if target.zone is not None:
+                    return (False, None)
+                # Cone originates from window's world position (on the wall)
+                cone_x = window.world_x
+                cone_y = window.world_y
+                # Target position in world coords
+                target_x = target.x
+                target_y = target.y
+                # Direction is window facing
+                invert = False
+            
+            # Check vision cone only (no sound through windows)
+            dx = target_x - cone_x
+            dy = target_y - cone_y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist > VISION_RANGE:
+                return (False, None)
+            if dist < 1.0:
+                return (True, 'vision')
+            
+            # Get window facing direction
+            window_facing_vectors = {
+                'north': (0, -1),
+                'south': (0, 1),
+                'east': (1, 0),
+                'west': (-1, 0),
+            }
+            face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+            
+            if invert:
+                face_x = -face_x
+                face_y = -face_y
+            
+            # Normalize direction to target
+            dir_x = dx / dist
+            dir_y = dy / dist
+            dot = face_x * dir_x + face_y * dir_y
+            
+            half_angle = math.radians(VISION_CONE_ANGLE / 2)
+            if dot >= math.cos(half_angle):
+                # In cone - check line of sight in the target's zone
+                target_zone = viewing_interior.name if viewing_interior else None
+                if self._check_line_of_sight(cone_x, cone_y, target_x, target_y, target_zone):
+                    return (True, 'vision')
+            
+            return (False, None)
+        
+        # Check for NPC window-based vision (different zones)
+        if observer.zone != target.zone:
+            window, looking_in = self.get_window_for_cross_zone_vision(observer, target)
+            if window:
+                # Set up cone check based on direction
+                if looking_in:
+                    # Observer outside looking in
+                    cone_x = window.interior_x + 0.5
+                    cone_y = window.interior_y + 0.5
+                    target_x = target.prevailing_x
+                    target_y = target.prevailing_y
+                    invert = True
+                else:
+                    # Observer inside looking out
+                    cone_x = window.world_x
+                    cone_y = window.world_y
+                    target_x = target.x
+                    target_y = target.y
+                    invert = False
+                
+                # Check vision cone (no sound through windows)
+                dx = target_x - cone_x
+                dy = target_y - cone_y
+                dist = math.sqrt(dx * dx + dy * dy)
+                
+                if dist > VISION_RANGE:
+                    return (False, None)
+                if dist < 1.0:
+                    return (True, 'vision')
+                
+                # Get window facing direction
+                window_facing_vectors = {
+                    'north': (0, -1),
+                    'south': (0, 1),
+                    'east': (1, 0),
+                    'west': (-1, 0),
+                }
+                face_x, face_y = window_facing_vectors.get(window.facing, (0, 1))
+                
+                if invert:
+                    face_x = -face_x
+                    face_y = -face_y
+                
+                dir_x = dx / dist
+                dir_y = dy / dist
+                dot = face_x * dir_x + face_y * dir_y
+                
+                half_angle = math.radians(VISION_CONE_ANGLE / 2)
+                if dot >= math.cos(half_angle):
+                    # In cone - check line of sight in the target's zone
+                    if self._check_line_of_sight(cone_x, cone_y, target_x, target_y, target.zone):
+                        return (True, 'vision')
+            
+            # No valid window = can't perceive across zones
+            return (False, None)
+        
+        # Get correct coordinates based on zone
+        target_x, target_y = self._get_perception_coords(target)
+        
+        return self.can_perceive_event(observer, target_x, target_y)
+    
+    def _get_vision_obstacles(self, zone):
+        """Get obstacles that block vision for a given zone.
+        
+        Args:
+            zone: Interior name or None for exterior
+            
+        Returns:
+            List of (x, y, half_width) tuples for obstacles
+        """
+        obstacles = []
+        
+        if zone is None:
+            # Exterior - trees block vision
+            for pos in self.state.interactables.trees:
+                x, y = pos
+                obstacles.append((x + 0.5, y + 0.5, 0.4))  # Tree center, radius ~0.4
+            
+            # House walls block vision (use bounds)
+            for house in self.state.interactables.houses.values():
+                y_start, x_start, y_end, x_end = house.bounds
+                # Add wall segments as obstacles
+                # For simplicity, treat each cell of the house perimeter as an obstacle
+                for hx in range(x_start, x_end):
+                    obstacles.append((hx + 0.5, y_start + 0.5, 0.5))  # North wall
+                    obstacles.append((hx + 0.5, y_end - 0.5, 0.5))    # South wall
+                for hy in range(y_start, y_end):
+                    obstacles.append((x_start + 0.5, hy + 0.5, 0.5))  # West wall
+                    obstacles.append((x_end - 0.5, hy + 0.5, 0.5))    # East wall
+        else:
+            # Interior - stoves block vision, beds don't (too low)
+            interior = self.state.interiors.get_interior(zone)
+            if interior:
+                # Check stoves in this interior
+                for pos, stove in self.state.interactables.stoves.items():
+                    # Need to check if stove is in this interior
+                    # Stoves are in world coords, convert to check
+                    sx, sy = pos
+                    # Check if stove position projects into this interior
+                    house = interior.house
+                    y_start, x_start, y_end, x_end = house.bounds
+                    if x_start <= sx < x_end and y_start <= sy < y_end:
+                        # Convert to interior coords
+                        int_x, int_y = interior.world_to_interior(sx + 0.5, sy + 0.5)
+                        obstacles.append((int_x, int_y, 0.4))
+        
+        return obstacles
+    
+    def _line_intersects_circle(self, x1, y1, x2, y2, cx, cy, radius):
+        """Check if line segment from (x1,y1) to (x2,y2) intersects circle at (cx,cy).
+        
+        Returns:
+            Distance to intersection point, or None if no intersection
+        """
+        # Vector from p1 to p2
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        # Vector from p1 to circle center
+        fx = x1 - cx
+        fy = y1 - cy
+        
+        a = dx * dx + dy * dy
+        b = 2 * (fx * dx + fy * dy)
+        c = fx * fx + fy * fy - radius * radius
+        
+        discriminant = b * b - 4 * a * c
+        
+        if discriminant < 0:
+            return None  # No intersection
+        
+        discriminant = math.sqrt(discriminant)
+        
+        # Two possible intersection points
+        t1 = (-b - discriminant) / (2 * a)
+        t2 = (-b + discriminant) / (2 * a)
+        
+        # Check if intersection is within line segment (t in [0, 1])
+        if 0 <= t1 <= 1:
+            return t1 * math.sqrt(a)  # Return distance
+        if 0 <= t2 <= 1:
+            return t2 * math.sqrt(a)
+        
+        return None
+    
+    def _check_line_of_sight(self, from_x, from_y, to_x, to_y, zone):
+        """Check if there's clear line of sight between two points.
+        
+        Args:
+            from_x, from_y: Observer position
+            to_x, to_y: Target position
+            zone: Interior name or None for exterior
+            
+        Returns:
+            True if line of sight is clear, False if blocked
+        """
+        obstacles = self._get_vision_obstacles(zone)
+        
+        for ox, oy, radius in obstacles:
+            # Skip if obstacle is at observer or target position
+            if abs(ox - from_x) < 0.3 and abs(oy - from_y) < 0.3:
+                continue
+            if abs(ox - to_x) < 0.3 and abs(oy - to_y) < 0.3:
+                continue
+            
+            if self._line_intersects_circle(from_x, from_y, to_x, to_y, ox, oy, radius):
+                return False  # Blocked
+        
+        return True  # Clear line of sight
+    
     def is_point_in_vision_cone(self, observer, target_x, target_y):
         """Check if a specific point is within observer's vision cone.
         
         Args:
             observer: Character doing the looking
-            target_x, target_y: Point to check
+            target_x, target_y: Point to check (should be in same coord space as observer)
             
         Returns:
-            True if point is within vision cone
+            True if point is within vision cone AND line of sight is clear
         """
+        # Get observer position in correct coordinate space
+        obs_x, obs_y = self._get_perception_coords(observer)
+        
         # Get vector from observer to target
-        dx = target_x - observer.x
-        dy = target_y - observer.y
+        dx = target_x - obs_x
+        dy = target_y - obs_y
         dist = math.sqrt(dx * dx + dy * dy)
         
         # Too far to see
@@ -629,7 +970,11 @@ class GameLogic:
         half_angle_rad = math.radians(VISION_CONE_ANGLE / 2)
         cos_threshold = math.cos(half_angle_rad)
         
-        return dot >= cos_threshold
+        if dot < cos_threshold:
+            return False  # Not in cone angle
+        
+        # In cone - check line of sight
+        return self._check_line_of_sight(obs_x, obs_y, target_x, target_y, observer.zone)
     
     def does_vision_cone_overlap_circle(self, observer, circle_x, circle_y, circle_radius):
         """Check if observer's vision cone overlaps with a circle (sound radius).
@@ -640,15 +985,18 @@ class GameLogic:
         
         Args:
             observer: Character with vision cone
-            circle_x, circle_y: Center of the circle
+            circle_x, circle_y: Center of the circle (should be in same coord space as observer)
             circle_radius: Radius of the circle
             
         Returns:
             True if vision cone overlaps the circle
         """
+        # Get observer position in correct coordinate space
+        obs_x, obs_y = self._get_perception_coords(observer)
+        
         # Distance from observer to circle center
-        dx = circle_x - observer.x
-        dy = circle_y - observer.y
+        dx = circle_x - obs_x
+        dy = circle_y - obs_y
         dist_to_center = math.sqrt(dx * dx + dy * dy)
         
         # If observer is inside the circle, they can see it
@@ -689,7 +1037,7 @@ class GameLogic:
         
         Args:
             witness: Character who might perceive
-            event_x, event_y: Position of the event (attacker position)
+            event_x, event_y: Position of the event (should be in same coord space as witness)
             sound_radius: Radius of sound emitted by event (default SOUND_RADIUS)
             
         Returns:
@@ -703,8 +1051,11 @@ class GameLogic:
         if self.does_vision_cone_overlap_circle(witness, event_x, event_y, sound_radius):
             return (True, 'vision')
         
+        # Get witness position in correct coordinate space
+        wit_x, wit_y = self._get_perception_coords(witness)
+        
         # Check if witness's hearing radius overlaps attacker's sound radius
-        if self.do_circles_overlap(witness.x, witness.y, SOUND_RADIUS, 
+        if self.do_circles_overlap(wit_x, wit_y, SOUND_RADIUS, 
                                    event_x, event_y, sound_radius):
             return (True, 'sound')
         
@@ -861,7 +1212,7 @@ class GameLogic:
             crime_allegiance = m['details'].get('victim_allegiance')
             
             # Must be able to perceive the criminal to react to them
-            can_perceive, method = self.can_perceive_event(char, criminal.x, criminal.y)
+            can_perceive, method = self.can_perceive_character(char, criminal)
             if can_perceive:
                 if self.will_care_about_crime(char, crime_allegiance, intensity):
                     return (criminal, intensity)
@@ -1104,8 +1455,8 @@ class GameLogic:
         cx, cy = cell
         intensity = CRIME_INTENSITY_THEFT
         
-        # Sound emanates from the thief
-        event_x, event_y = thief.x, thief.y
+        # Sound emanates from the thief - use correct coords for zone
+        event_x, event_y = self._get_perception_coords(thief)
         
         # Get the farm's allegiance (this is the crime allegiance)
         crime_allegiance = self.state.get_farm_cell_allegiance(cx, cy)
@@ -1122,8 +1473,8 @@ class GameLogic:
             if char is thief:
                 continue
             
-            # Check if this character can perceive the theft
-            can_perceive, method = self.can_perceive_event(char, event_x, event_y)
+            # Check if can perceive - this handles window viewing and zone checks
+            can_perceive, method = self.can_perceive_character(char, thief)
             
             if can_perceive:
                 witness_name = char.get_display_name()
@@ -1241,16 +1592,15 @@ class GameLogic:
         
         crime_allegiance = victim.get('allegiance')
         
-        # Sound emanates from the criminal (attacker)
-        event_x, event_y = criminal.x, criminal.y
+        # Sound emanates from the criminal (attacker) - use correct coords for zone
+        event_x, event_y = self._get_perception_coords(criminal)
         
         for char in self.state.characters:
             if char is criminal or char is victim:
                 continue
             
-            # Check if this character can perceive the event
-            # Their vision cone or sound radius must overlap criminal's sound radius
-            can_perceive, method = self.can_perceive_event(char, event_x, event_y)
+            # Check if can perceive - this handles window viewing and zone checks
+            can_perceive, method = self.can_perceive_character(char, criminal)
             
             if can_perceive:
                 witness_name = char.get_display_name()
@@ -1312,7 +1662,7 @@ class GameLogic:
                 continue
             
             # Can perceive the violence?
-            can_perceive, method = self.can_perceive_event(char, attacker.x, attacker.y)
+            can_perceive, method = self.can_perceive_character(char, attacker)
             if not can_perceive:
                 continue
             

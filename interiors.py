@@ -300,6 +300,22 @@ class Window:
         dy = abs(char_y - (self.interior_y + 0.5))
         return (dx * dx + dy * dy) < (threshold * threshold)
     
+    def is_character_near_exterior(self, world_x, world_y, threshold=1.5):
+        """
+        Check if a character (in world coordinates) is near this window from outside.
+        
+        Args:
+            world_x: Character X in world coordinates
+            world_y: Character Y in world coordinates
+            threshold: Distance threshold
+            
+        Returns:
+            True if character is near window from exterior
+        """
+        dx = abs(world_x - self.exterior_look_x)
+        dy = abs(world_y - self.exterior_look_y)
+        return (dx * dx + dy * dy) < (threshold * threshold)
+    
     def get_exterior_look_position(self):
         """
         Get the world position this window looks out onto.

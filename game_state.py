@@ -755,14 +755,14 @@ class GameState:
             # Observer inside, target outside
             # Check if observer is near a window
             for window in observer_interior.windows:
-                if window.is_character_near(observer.x, observer.y):
+                if window.is_character_near(observer.prevailing_x, observer.prevailing_y):
                     return True
         
         if target_interior and observer.zone is None:
             # Observer outside, target inside
             # Check if target is near enough to a window to be visible
             for window in target_interior.windows:
-                if window.is_character_near(target.x, target.y):
+                if window.is_character_near(target.prevailing_x, target.prevailing_y):
                     return True
         
         return False
@@ -784,7 +784,7 @@ class GameState:
         if char.zone is not None:
             # Character is inside - check for interior door to exit
             interior = self.interiors.get_interior(char.zone)
-            if interior and interior.is_at_door(char.x, char.y):
+            if interior and interior.is_at_door(char.prevailing_x, char.prevailing_y):
                 return interior.house
             return None
         

@@ -406,6 +406,7 @@ class PlayerController:
         """Handle window interaction key press.
         
         If at a window, toggles "security camera" view to look outside/inside.
+        Works from both inside (looking out) and outside (looking in).
         
         Returns:
             Window object if activating view, None if deactivating or not at window
@@ -414,20 +415,48 @@ class PlayerController:
         if not player:
             return None
         
-        # Only works when inside a building
-        if player.zone is None:
-            return None
-        
-        interior = self.state.interiors.get_interior(player.zone)
-        if not interior:
-            return None
-        
-        # Check if player is near a window
-        for window in interior.windows:
-            if window.is_character_near(player.x, player.y):
-                return window
+        if player.zone is not None:
+            # Player is inside - check interior windows to look out
+            interior = self.state.interiors.get_interior(player.zone)
+            if not interior:
+                return None
+            
+            for window in interior.windows:
+                if window.is_character_near(player.prevailing_x, player.prevailing_y):
+                    return window
+        else:
+            # Player is outside - check all house windows to look in
+            # Must be near window AND facing toward it
+            for house in self.state.interactables.get_all_houses():
+                interior = house.interior
+                if not interior:
+                    continue
+                
+                for window in interior.windows:
+                    if window.is_character_near_exterior(player.x, player.y):
+                        # Must be facing toward the window (opposite of window's facing)
+                        if self._is_facing_toward_window(player, window):
+                            return window
         
         return None
+    
+    def _is_facing_toward_window(self, player, window):
+        """Check if player is facing toward a window from outside.
+        
+        The player must face the opposite direction of the window's facing.
+        e.g., a north-facing window requires facing south to look in.
+        """
+        facing = player.get('facing', 'down')
+        
+        # Map window facing to required player facings
+        required_facings = {
+            'north': ('down', 'down-left', 'down-right'),
+            'south': ('up', 'up-left', 'up-right'),
+            'east': ('left', 'up-left', 'down-left'),
+            'west': ('right', 'up-right', 'down-right'),
+        }
+        
+        return facing in required_facings.get(window.facing, ())
     
     def get_window_camera_position(self, window):
         """
