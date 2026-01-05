@@ -271,7 +271,7 @@ class GameState:
             x, y: Position to check (float)
             exclude_char: Character to exclude from check (for self-collision)
         """
-        # Check tree collisions first (trees are solid obstacles)
+        # Check tree collisions (trees are solid obstacles)
         tree_collision_radius = 0.4  # Trees block most of their cell
         for tree_pos in self.interactables.trees.keys():
             tree_x, tree_y = tree_pos
@@ -280,6 +280,50 @@ class GameState:
             dx = abs(x - tree_center_x)
             dy = abs(y - tree_center_y)
             if dx < tree_collision_radius and dy < tree_collision_radius:
+                return True
+        
+        # Check house collisions (houses block their footprint minus 1 cell from top, plus a buffer)
+        house_collision_buffer = 0.35  # Buffer around house edges
+        for house in self.interactables.houses.values():
+            y_start, x_start, y_end, x_end = house.bounds
+            # Use y_start + 1 to make houses 1 cell shorter from top (allows walking behind)
+            effective_y_start = y_start + 1
+            # Expand bounds by buffer for collision
+            if (x_start - house_collision_buffer <= x < x_end + house_collision_buffer and
+                effective_y_start - house_collision_buffer <= y < y_end + house_collision_buffer):
+                return True
+        
+        # Check barrel collisions (barrels block most of their cell)
+        barrel_collision_radius = 0.35
+        for barrel_pos in self.interactables.barrels.keys():
+            barrel_x, barrel_y = barrel_pos
+            barrel_center_x = barrel_x + 0.5
+            barrel_center_y = barrel_y + 0.5
+            dx = abs(x - barrel_center_x)
+            dy = abs(y - barrel_center_y)
+            if dx < barrel_collision_radius and dy < barrel_collision_radius:
+                return True
+        
+        # Check bed collisions (beds block most of their cell)
+        bed_collision_radius = 0.35
+        for bed_pos in self.interactables.beds.keys():
+            bed_x, bed_y = bed_pos
+            bed_center_x = bed_x + 0.5
+            bed_center_y = bed_y + 0.5
+            dx = abs(x - bed_center_x)
+            dy = abs(y - bed_center_y)
+            if dx < bed_collision_radius and dy < bed_collision_radius:
+                return True
+        
+        # Check stove collisions (stoves block most of their cell)
+        stove_collision_radius = 0.35
+        for stove_pos in self.interactables.stoves.keys():
+            stove_x, stove_y = stove_pos
+            stove_center_x = stove_x + 0.5
+            stove_center_y = stove_y + 0.5
+            dx = abs(x - stove_center_x)
+            dy = abs(y - stove_center_y)
+            if dx < stove_collision_radius and dy < stove_collision_radius:
                 return True
         
         # Check character collisions

@@ -92,44 +92,46 @@ OCCLUDER_CONFIG = {
         'frame_width': 64,
         'frame_height': 64,
         'frame_duration': 0.15,    # ~6.7 FPS for gentle swaying
+        'shadow_scale': 1.0,       # Shadow size multiplier
     },
-    'barrel': {
-        'sort_y_offset': 0.5,      # Middle of cell
-        'occlusion_height': 0.8,   # Barrel extends slightly above its base
-        'occlusion_width': 0.5,    # Narrower than a full cell
-        'draw_height_mult': 0.8,   # Draw height = cell_size * 0.8
-        'draw_aspect': 1.0,        # Square
-        'texture_key': 'barrel',
-        'animated': False,
-    },
-    'bed': {
-        'sort_y_offset': 0.5,      # Middle of cell
-        'occlusion_height': 0.6,   # Bed is low
-        'occlusion_width': 0.5,    # Narrower than a full cell
-        'draw_height_mult': 0.85,  # Draw height = cell_size * 0.85
-        'draw_aspect': 1.0,        # Square
-        'texture_key': 'bed',
-        'animated': False,
-    },
-    'stove': {
-        'sort_y_offset': 0.5,      # Middle of cell
-        'occlusion_height': 0.7,   # Stove is medium height
-        'occlusion_width': 0.5,    # Narrower than a full cell
-        'draw_height_mult': 0.85,  # Draw height = cell_size * 0.85
-        'draw_aspect': 1.0,        # Square
-        'texture_key': 'stove',
-        'animated': False,
-    },
-    'house': {
-        'sort_y_offset': 0.0,      # Use bottom edge of house for sorting (will be adjusted per-house)
-        'occlusion_height': 2.0,   # Houses are tall (reduced by 1 cell)
-        'occlusion_width': 0,    # Houses are wide (will be adjusted per-house)
-        'draw_height_mult': 1.0,   # Calculated per-house
-        'draw_aspect': 1.0,        # Calculated per-house
-        'texture_key': 'house_s',  # Default, will select based on size
-        'animated': False,
-        'is_multi_cell': True,     # Special flag for multi-cell objects
-    },
+    # Future occluder types can be added here:
+    # 'building': {
+    #     'sort_y_offset': 0.5,
+    #     'occlusion_height': 3.0,
+    #     'occlusion_width': 1.5,
+    #     'draw_height_mult': 3.0,
+    #     'draw_aspect': 1.0,
+    #     'texture_key': 'building',
+    #     'animated': False,
+    #     'shadow_scale': 1.5,
+    # },
+}
+
+
+# =============================================================================
+# LIGHTING SYSTEM CONFIGURATION
+# =============================================================================
+# Day cycle lighting: sun moves from east (right) to west (left)
+# Time is 0.0-1.0 where 0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk
+
+LIGHTING_CONFIG = {
+    # Sun parameters
+   'dawn_time': 0.20,           # When sun rises (20% through day)
+    'dusk_time': 0.80,           # When sun sets (80% through day)
+    'noon_time': 0.50,           # Solar noon
+    
+    # Ambient lighting colors (RGBA) for different times
+    # Format: (R, G, B, overlay_alpha) - overlay_alpha controls intensity
+    'ambient_night':     (20, 30, 60, 120),     # Deep blue night
+    'ambient_dawn':      (255, 180, 120, 40),   # Warm orange dawn
+    'ambient_morning':   (255, 250, 240, 15),   # Slight warm morning
+    'ambient_noon':      (255, 255, 255, 0),    # No tint at noon
+    'ambient_afternoon': (255, 250, 235, 15),   # Slight warm afternoon
+    'ambient_dusk':      (255, 140, 80, 50),    # Orange/red dusk
+    'ambient_evening':   (80, 60, 120, 80),     # Purple evening
+    
+    # Point light parameters
+    'point_light_enabled': True,           # Enable/disable point light rendering
 }
 
 
@@ -944,27 +946,358 @@ class BoardGUI:
         self._cam_center_y = canvas_center_y
         self._cam_cell_size = cell_size
         
+        # Calculate lighting parameters for this frame
+        self._update_lighting()
+        
         # Draw grid cells
         self._draw_grid(min_visible_x, max_visible_x, min_visible_y, max_visible_y)
         
-        # Draw camps (these stay on ground level, not occluding)
+        # Draw world objects (layered)
+        self._draw_houses()
+        self._draw_barrels()
+        self._draw_beds()
+        self._draw_stoves()
         self._draw_camps()
         
         # Draw perception debug if enabled
         if SHOW_PERCEPTION_DEBUG:
             self._draw_perception_debug()
         
-        # Draw all occluders (trees, houses, barrels, beds, stoves) and characters together, Y-sorted for proper depth
+        # Draw trees and characters together, Y-sorted for proper depth
         self._draw_trees_and_characters()
         
         # Draw death animations
         self._draw_death_animations()
+        
+        # Draw ambient lighting overlay (handles point lights and shadows)
+        self._draw_ambient_lighting()
     
     def _world_to_screen(self, world_x, world_y):
         """Convert world coordinates to screen coordinates"""
         screen_x = self._cam_center_x + (world_x - self.camera_x) * self._cam_cell_size
         screen_y = self._cam_center_y + (world_y - self.camera_y) * self._cam_cell_size
         return screen_x, screen_y
+    
+    # =========================================================================
+    # LIGHTING SYSTEM
+    # =========================================================================
+    
+    def _update_lighting(self):
+        """Calculate current lighting parameters based on game time."""
+        # Get day progress (0.0 to 1.0)
+        day_progress = (self.state.ticks % TICKS_PER_DAY) / TICKS_PER_DAY
+        
+        cfg = LIGHTING_CONFIG
+        dawn = cfg['dawn_time']
+        dusk = cfg['dusk_time']
+        noon = cfg['noon_time']
+        
+        # Calculate sun angle (0 = east, 90 = overhead, 180 = west)
+        # Sun is only visible between dawn and dusk
+        if day_progress < dawn:
+            # Before dawn - sun below horizon (east)
+            sun_angle = 0
+            sun_intensity = 0
+        elif day_progress > dusk:
+            # After dusk - sun below horizon (west)
+            sun_angle = 180
+            sun_intensity = 0
+        else:
+            # Daytime - sun moves from 0° (east) to 180° (west)
+            day_fraction = (day_progress - dawn) / (dusk - dawn)
+            sun_angle = day_fraction * 180
+            
+            # Intensity peaks at noon, fades at dawn/dusk
+            if day_progress < noon:
+                sun_intensity = (day_progress - dawn) / (noon - dawn)
+            else:
+                sun_intensity = (dusk - day_progress) / (dusk - noon)
+            sun_intensity = max(0, min(1, sun_intensity))
+        
+        # Store lighting state
+        self._lighting = {
+            'day_progress': day_progress,
+            'sun_angle': sun_angle,
+            'sun_intensity': sun_intensity,
+            'ambient_color': self._calculate_ambient_color(day_progress),
+        }
+    
+    def _calculate_ambient_color(self, day_progress):
+        """Calculate ambient light color based on time of day."""
+        cfg = LIGHTING_CONFIG
+        
+        # Time thresholds
+        night_end = 0.18      # End of deep night
+        dawn_start = 0.20     # Dawn begins  
+        dawn_end = 0.28       # Dawn ends, morning begins
+        morning_end = 0.40    # Morning ends
+        noon_start = 0.45     # Approaching noon
+        noon_end = 0.55       # Noon ends
+        afternoon_end = 0.70  # Afternoon ends
+        dusk_start = 0.75     # Dusk begins
+        dusk_end = 0.85       # Dusk ends, evening begins
+        evening_end = 0.92    # Evening ends, night begins
+        
+        # Interpolate between ambient colors
+        if day_progress < night_end:
+            # Deep night
+            return cfg['ambient_night']
+        elif day_progress < dawn_start:
+            # Night to dawn transition
+            t = (day_progress - night_end) / (dawn_start - night_end)
+            return self._lerp_color(cfg['ambient_night'], cfg['ambient_dawn'], t)
+        elif day_progress < dawn_end:
+            # Dawn
+            t = (day_progress - dawn_start) / (dawn_end - dawn_start)
+            return self._lerp_color(cfg['ambient_dawn'], cfg['ambient_morning'], t)
+        elif day_progress < morning_end:
+            # Morning to noon transition
+            t = (day_progress - dawn_end) / (morning_end - dawn_end)
+            return self._lerp_color(cfg['ambient_morning'], cfg['ambient_noon'], t)
+        elif day_progress < noon_end:
+            # Noon (no tint)
+            return cfg['ambient_noon']
+        elif day_progress < afternoon_end:
+            # Noon to afternoon
+            t = (day_progress - noon_end) / (afternoon_end - noon_end)
+            return self._lerp_color(cfg['ambient_noon'], cfg['ambient_afternoon'], t)
+        elif day_progress < dusk_start:
+            # Afternoon to dusk
+            t = (day_progress - afternoon_end) / (dusk_start - afternoon_end)
+            return self._lerp_color(cfg['ambient_afternoon'], cfg['ambient_dusk'], t)
+        elif day_progress < dusk_end:
+            # Dusk
+            t = (day_progress - dusk_start) / (dusk_end - dusk_start)
+            return self._lerp_color(cfg['ambient_dusk'], cfg['ambient_evening'], t)
+        elif day_progress < evening_end:
+            # Evening to night
+            t = (day_progress - dusk_end) / (evening_end - dusk_end)
+            return self._lerp_color(cfg['ambient_evening'], cfg['ambient_night'], t)
+        else:
+            # Night
+            return cfg['ambient_night']
+    
+    def _lerp_color(self, c1, c2, t):
+        """Linear interpolation between two RGBA color tuples."""
+        t = max(0, min(1, t))
+        return (
+            int(c1[0] + (c2[0] - c1[0]) * t),
+            int(c1[1] + (c2[1] - c1[1]) * t),
+            int(c1[2] + (c2[2] - c1[2]) * t),
+            int(c1[3] + (c2[3] - c1[3]) * t),
+        )
+    
+    def _draw_ambient_lighting(self):
+        """Draw ambient darkness with point lights cutting through.
+        
+        At night, darkness covers the scene. Campfires/stoves illuminate nearby
+        tiles, and objects block that light creating shadows.
+        """
+        if not hasattr(self, '_lighting'):
+            return
+        
+        r, g, b, base_alpha = self._lighting['ambient_color']
+        
+        if base_alpha <= 0:
+            return
+        
+        # If point lights disabled, just draw flat darkness
+        if not LIGHTING_CONFIG.get('point_light_enabled', True):
+            rl.draw_rectangle(0, 0, self.canvas_width, self.canvas_height, 
+                             rl.Color(r, g, b, base_alpha))
+            return
+        
+        current_time = time.time()
+        lights = self._get_active_lights(current_time)
+        
+        if not lights:
+            # No lights, just draw flat darkness
+            rl.draw_rectangle(0, 0, self.canvas_width, self.canvas_height, 
+                             rl.Color(r, g, b, base_alpha))
+            return
+        
+        # Collect shadow-casting objects
+        shadow_casters = self._get_shadow_casters_for_area()
+        
+        cell_size = self._cam_cell_size
+        tile_size = 8  # pixels
+        
+        for screen_y in range(0, self.canvas_height + tile_size, tile_size):
+            for screen_x in range(0, self.canvas_width + tile_size, tile_size):
+                tile_center_x = screen_x + tile_size / 2
+                tile_center_y = screen_y + tile_size / 2
+                
+                world_x = self.camera_x + (tile_center_x - self._cam_center_x) / cell_size
+                world_y = self.camera_y + (tile_center_y - self._cam_center_y) / cell_size
+                
+                # Calculate light from point sources
+                total_light = 0.0
+                
+                for light in lights:
+                    lx, ly = light['center']
+                    radius = light['radius']
+                    
+                    dx = world_x - lx
+                    dy = world_y - ly
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    
+                    if dist < radius:
+                        shadow_factor = self._calculate_shadow_factor(
+                            lx, ly, world_x, world_y, shadow_casters
+                        )
+                        falloff = 1.0 - (dist / radius)
+                        falloff = falloff * falloff
+                        total_light += falloff * shadow_factor
+                
+                total_light = min(1.0, total_light)
+                tile_alpha = int(base_alpha * (1.0 - total_light))
+                
+                if tile_alpha > 0:
+                    rl.draw_rectangle(
+                        screen_x, screen_y,
+                        tile_size, tile_size,
+                        rl.Color(r, g, b, tile_alpha)
+                    )
+    
+    def _get_shadow_casters_for_area(self):
+        """Get all shadow-casting objects in the visible area."""
+        casters = []
+        
+        min_x = self.camera_x - 15
+        max_x = self.camera_x + 15
+        min_y = self.camera_y - 15
+        max_y = self.camera_y + 15
+        
+        # Trees
+        for pos, tree in self.state.interactables.trees.items():
+            x, y = pos
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                casters.append({'center': (x + 0.5, y + 0.5), 'radius': 0.4})
+        
+        # Characters
+        for char in self.state.characters:
+            cx, cy = char.x, char.y
+            if min_x <= cx <= max_x and min_y <= cy <= max_y:
+                casters.append({'center': (cx, cy), 'radius': 0.3})
+        
+        # Barrels
+        for pos in self.state.interactables.barrels:
+            x, y = pos
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                casters.append({'center': (x + 0.5, y + 0.5), 'radius': 0.3})
+        
+        # Houses
+        for house in self.state.interactables.houses.values():
+            hx, hy = house.center
+            if min_x <= hx <= max_x and min_y <= hy <= max_y:
+                casters.append({
+                    'center': (hx, hy),
+                    'radius': max(house.width, house.height) / 2,
+                })
+        
+        return casters
+    
+    def _calculate_shadow_factor(self, light_x, light_y, point_x, point_y, shadow_casters):
+        """Calculate how much a point is in shadow from a light source.
+        
+        Returns 1.0 if fully lit, 0.0 if fully shadowed, values in between for partial.
+        """
+        # Direction from light to point
+        dx = point_x - light_x
+        dy = point_y - light_y
+        dist_to_point = math.sqrt(dx * dx + dy * dy)
+        
+        if dist_to_point < 0.1:
+            return 1.0  # Point is at the light source
+        
+        # Normalize direction
+        dir_x = dx / dist_to_point
+        dir_y = dy / dist_to_point
+        
+        shadow_factor = 1.0
+        
+        for caster in shadow_casters:
+            cx, cy = caster['center']
+            caster_radius = caster['radius']
+            
+            # Vector from light to caster
+            to_caster_x = cx - light_x
+            to_caster_y = cy - light_y
+            
+            # Project caster onto ray from light to point
+            dot = to_caster_x * dir_x + to_caster_y * dir_y
+            
+            # Caster must be between light and point
+            if dot <= 0 or dot >= dist_to_point:
+                continue
+            
+            # Closest point on ray to caster center
+            closest_x = light_x + dir_x * dot
+            closest_y = light_y + dir_y * dot
+            
+            # Distance from caster center to ray
+            dist_to_ray = math.sqrt(
+                (cx - closest_x) ** 2 + (cy - closest_y) ** 2
+            )
+            
+            # Check if ray passes through caster
+            if dist_to_ray < caster_radius:
+                # Calculate shadow intensity based on how centered the hit is
+                # and how far the caster is from the light (closer = sharper shadow)
+                dist_to_caster = math.sqrt(to_caster_x**2 + to_caster_y**2)
+                
+                # Penumbra - shadows get softer further from caster
+                softness = dist_to_caster / 3.0  # Adjust divisor for shadow softness
+                penetration = 1.0 - (dist_to_ray / caster_radius)
+                
+                # Reduce shadow factor
+                shadow_strength = penetration * min(1.0, 1.0 / (1.0 + softness * 0.5))
+                shadow_factor *= (1.0 - shadow_strength * 0.85)  # 85% max shadow
+        
+        return max(0.0, shadow_factor)
+    
+    def _get_active_lights(self, current_time):
+        """Get all light sources with positions and radii.
+        
+        Returns list of dicts with 'center', 'radius'
+        """
+        lights = []
+        
+        # Get lights from interactables (stoves, campfires in world)
+        try:
+            raw_lights = self.state.interactables.get_light_sources_in_area(
+                self.camera_x - 25, self.camera_y - 25,
+                self.camera_x + 25, self.camera_y + 25
+            )
+            for light in raw_lights:
+                lights.append({
+                    'center': (light['x'] + 0.5, light['y'] + 0.5),
+                    'radius': light['radius']
+                })
+        except Exception:
+            pass
+        
+        # Get campfires from characters' camp_position
+        for char in self.state.characters:
+            camp_pos = char.get('camp_position')
+            if camp_pos:
+                x, y = camp_pos
+                lights.append({
+                    'center': (x + 0.5, y + 0.5),
+                    'radius': 4.0  # Standard campfire radius
+                })
+        
+        # Apply subtle global flicker to all lights (very gentle - 5% variation)
+        flicker = 1.0 + math.sin(current_time * 3.0) * 0.03 + math.sin(current_time * 7.0) * 0.02
+        
+        for light in lights:
+            light['radius'] *= flicker
+        
+        return lights
+    
+    def _collect_light_sources(self):
+        """Legacy method - redirects to _get_active_lights."""
+        return self._get_active_lights(time.time())
     
     def _draw_grid(self, min_x, max_x, min_y, max_y):
         """Draw grid cells"""
@@ -1210,80 +1543,6 @@ class BoardGUI:
             config = OCCLUDER_CONFIG.get(occluder_type)
             if not config:
                 continue
-            
-            ox, oy = pos
-            
-            # Special handling for houses
-            if occluder_type == 'house':
-                # Find the house at this position
-                house = None
-                for h in self.state.interactables.houses.values():
-                    y_start, x_start, y_end, x_end = h.bounds
-                    # Houses use y_end - 1 as position key (front edge)
-                    if x_start == ox and y_end - 1 == oy:
-                        house = h
-                        break
-                if not house:
-                    continue
-                
-                bounds = house.bounds
-                y_start, x_start, y_end, x_end = bounds
-                house_width_cells = x_end - x_start
-                house_height_cells = y_end - y_start
-                
-                screen_x, screen_y = self._world_to_screen(x_start, y_start)
-                width = house_width_cells * cell_size
-                height = house_height_cells * cell_size
-                
-                if house_width_cells <= 4:
-                    tex = self.world_textures.get('house_s')
-                else:
-                    tex = self.world_textures.get('house_m') or self.world_textures.get('house_s')
-                
-                if tex:
-                    source = rl.Rectangle(0, 0, tex.width, tex.height)
-                    dest = rl.Rectangle(screen_x, screen_y, width, height)
-                    rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-                else:
-                    rl.draw_rectangle(int(screen_x), int(screen_y), int(width), int(height), rl.WHITE)
-                continue
-            
-            # Special handling for beds (no texture, draw solid shape for mask)
-            if occluder_type == 'bed':
-                screen_x, screen_y = self._world_to_screen(ox, oy)
-                padding = int(4 * self.zoom)
-                bed_size = int(cell_size - 2*padding)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 bed_size, bed_size, rl.WHITE)
-                continue
-            
-            # Special handling for stoves (no texture, draw solid shape for mask)
-            if occluder_type == 'stove':
-                screen_x, screen_y = self._world_to_screen(ox, oy)
-                padding = int(4 * self.zoom)
-                stove_size = int(cell_size - 2*padding)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 stove_size, stove_size, rl.WHITE)
-                continue
-            
-            # Special handling for barrels
-            if occluder_type == 'barrel':
-                tex = self.world_textures.get('barrel')
-                screen_x, screen_y = self._world_to_screen(ox, oy)
-                if tex:
-                    barrel_size = int(cell_size * 0.8)
-                    blit_x = screen_x + (cell_size - barrel_size) / 2
-                    blit_y = screen_y + (cell_size - barrel_size) / 2
-                    source = rl.Rectangle(0, 0, tex.width, tex.height)
-                    dest = rl.Rectangle(blit_x, blit_y, barrel_size, barrel_size)
-                    rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-                else:
-                    padding = int(5 * self.zoom)
-                    rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                     int(cell_size - 2*padding), int(cell_size - 2*padding), rl.WHITE)
-                continue
-            
-            # Default handling for trees and other texture-based occluders
             tex = self.world_textures.get(config['texture_key'])
             if not tex:
                 continue
@@ -1291,6 +1550,7 @@ class BoardGUI:
             draw_height = int(cell_size * config['draw_height_mult'])
             draw_width = int(draw_height * config['draw_aspect'])
             
+            ox, oy = pos
             screen_x, screen_y = self._world_to_screen(ox, oy)
             obj_blit_x = screen_x + cell_size / 2 - draw_width / 2
             obj_blit_y = screen_y + cell_size - draw_height
@@ -1369,143 +1629,44 @@ class BoardGUI:
     def _get_occluder_items(self, occluder_type):
         """Get all items of a specific occluder type.
         Returns dict of {(x, y): data} for the occluder type.
-        For houses, returns {(x, y_end): house} using the bottom edge for sorting.
         """
         if occluder_type == 'tree':
             return self.state.interactables.trees
-        elif occluder_type == 'barrel':
-            return self.state.interactables.barrels
-        elif occluder_type == 'bed':
-            return self.state.interactables.beds
-        elif occluder_type == 'stove':
-            return self.state.interactables.stoves
-        elif occluder_type == 'house':
-            # For houses, use the bottom-left corner as the key for Y-sorting
-            # Sort at y_end - 1 (front edge of house)
-            houses = {}
-            for house in self.state.interactables.houses.values():
-                y_start, x_start, y_end, x_end = house.bounds
-                houses[(x_start, y_end - 1)] = house
-            return houses
+        # Add other occluder sources here:
+        # elif occluder_type == 'building':
+        #     return self.state.interactables.buildings
+        # elif occluder_type == 'large_rock':
+        #     return self.state.interactables.large_rocks
         return {}
     
     def _draw_single_occluder(self, occluder_type, pos, data):
-        """Draw a single occluder of any type, with optional animation."""
+        """Draw a single occluder of any type, with optional animation and shadow."""
         config = OCCLUDER_CONFIG.get(occluder_type)
         if not config:
             return
         
-        cell_size = self._cam_cell_size
-        x, y = pos
-        
-        # Special handling for houses (multi-cell)
-        if occluder_type == 'house':
-            house = data
-            bounds = house.bounds
-            y_start, x_start, y_end, x_end = bounds
-            
-            house_width_cells = x_end - x_start
-            house_height_cells = y_end - y_start
-            
-            screen_x, screen_y = self._world_to_screen(x_start, y_start)
-            width = house_width_cells * cell_size
-            height = house_height_cells * cell_size
-            
-            # Select texture based on size
-            if house_width_cells <= 4:
-                tex = self.world_textures.get('house_s')
-            else:
-                tex = self.world_textures.get('house_m') or self.world_textures.get('house_s')
-            
-            if tex:
-                source = rl.Rectangle(0, 0, tex.width, tex.height)
-                dest = rl.Rectangle(screen_x, screen_y, width, height)
-                rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-            else:
-                rl.draw_rectangle(int(screen_x), int(screen_y), int(width), int(height), hex_to_color("#C4813D"))
-            return
-        
-        # Special handling for beds (no texture, draw programmatically)
-        if occluder_type == 'bed':
-            screen_x, screen_y = self._world_to_screen(x, y)
-            padding = int(4 * self.zoom)
-            bed_size = int(cell_size - 2*padding)
-            
-            # Bed base (blue)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             bed_size, bed_size, hex_to_color("#4169E1"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   bed_size, bed_size, hex_to_color("#2a4494"))
-            
-            # Pillow
-            pillow_height = int(8 * self.zoom)
-            pillow_margin = int(3 * self.zoom)
-            rl.draw_rectangle(int(screen_x + padding + pillow_margin),
-                             int(screen_y + padding + 2*self.zoom),
-                             bed_size - 2*pillow_margin, pillow_height,
-                             rl.WHITE)
-            return
-        
-        # Special handling for stoves (no texture, draw programmatically)
-        if occluder_type == 'stove':
-            screen_x, screen_y = self._world_to_screen(x, y)
-            padding = int(4 * self.zoom)
-            stove_size = int(cell_size - 2*padding)
-            
-            # Stove base (dark gray)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             stove_size, stove_size, hex_to_color("#444444"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   stove_size, stove_size, hex_to_color("#222222"))
-            
-            # Draw "S" text
-            text_x = int(screen_x + cell_size / 2 - 4)
-            text_y = int(screen_y + cell_size / 2 - 8)
-            rl.draw_text("S", text_x, text_y, 16, rl.Color(255, 150, 50, 255))
-            return
-        
-        # Standard occluder drawing (tree, barrel, etc.)
         texture_key = config['texture_key']
         tex = self.world_textures.get(texture_key)
-        
-        if occluder_type == 'barrel':
-            # Barrel uses texture if available, otherwise fallback
-            screen_x, screen_y = self._world_to_screen(x, y)
-            if tex:
-                barrel_size = int(cell_size * 0.8)
-                blit_x = screen_x + (cell_size - barrel_size) / 2
-                blit_y = screen_y + (cell_size - barrel_size) / 2
-                
-                source = rl.Rectangle(0, 0, tex.width, tex.height)
-                dest = rl.Rectangle(blit_x, blit_y, barrel_size, barrel_size)
-                rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-            else:
-                padding = int(5 * self.zoom)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 int(cell_size - 2*padding), int(cell_size - 2*padding),
-                                 hex_to_color("#8B4513"))
-            return
-        
-        # Default handling for tree and other texture-based occluders
         if not tex:
             return
         
+        cell_size = self._cam_cell_size
         draw_height = int(cell_size * config['draw_height_mult'])
         draw_width = int(draw_height * config['draw_aspect'])
         
+        x, y = pos
         screen_x, screen_y = self._world_to_screen(x, y)
         
         # Center horizontally on cell, align bottom to cell bottom
         blit_x = screen_x + cell_size / 2 - draw_width / 2
         blit_y = screen_y + cell_size - draw_height
         
-        # Check if animated
+        # Get current animation frame
         if config.get('animated') and occluder_type in self.occluder_frames:
             frames = self.occluder_frames[occluder_type]
             frame_duration = config.get('frame_duration', 0.1)
             
             # Add position-based offset so trees don't all sync
-            # Use position hash to create variation
             offset = (x * 7 + y * 13) % len(frames)
             frame_time = time.time() + offset * frame_duration
             
@@ -1514,6 +1675,7 @@ class BoardGUI:
         else:
             source = rl.Rectangle(0, 0, tex.width, tex.height)
         
+        # Draw sprite
         dest = rl.Rectangle(blit_x, blit_y, draw_width, draw_height)
         rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
     
@@ -1524,23 +1686,6 @@ class BoardGUI:
         occluding = []
         
         for occluder_type, config in OCCLUDER_CONFIG.items():
-            # Special handling for houses (multi-cell)
-            if occluder_type == 'house':
-                for house in self.state.interactables.houses.values():
-                    y_start, x_start, y_end, x_end = house.bounds
-                    house_center_x = (x_start + x_end) / 2
-                    house_width = x_end - x_start
-                    
-                    # Character is behind house if char_y < house's bottom edge (y_end)
-                    # AND character is below the walkable "behind" row (y_start)
-                    # Using char_y > y_start means the top row is NOT occluded (can walk behind)
-                    if char_y < y_end and char_y > y_start:
-                        # Check horizontal overlap (using house's full width)
-                        if abs(char_x - house_center_x) < house_width / 2:
-                            # Use bottom-left as pos for consistency
-                            occluding.append((occluder_type, (x_start, y_end - 1), config))
-                continue
-            
             occluder_items = self._get_occluder_items(occluder_type)
             sort_y_offset = config['sort_y_offset']
             occlusion_height = config['occlusion_height']
