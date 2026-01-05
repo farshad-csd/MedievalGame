@@ -2489,11 +2489,21 @@ void main() {
         cell_size = self._cam_cell_size
         current_time = time.time()
         
-        # Use local coords when character is in interior (camera is in interior space)
-        # Use world coords otherwise
-        if char.zone and not self.window_viewing:
-            vis_x = char.prevailing_x
-            vis_y = char.prevailing_y
+        # Use local coords when character is in interior and:
+        # 1. We're inside that interior (not window viewing), OR
+        # 2. We're viewing INTO that interior through a window
+        if char.zone:
+            if not self.window_viewing:
+                # We're inside the interior
+                vis_x = char.prevailing_x
+                vis_y = char.prevailing_y
+            elif self.window_viewing_interior and char.zone == self.window_viewing_interior.name:
+                # We're viewing into this character's interior through window
+                vis_x = char.prevailing_x
+                vis_y = char.prevailing_y
+            else:
+                vis_x = char.x
+                vis_y = char.y
         else:
             vis_x = char.x
             vis_y = char.y

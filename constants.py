@@ -78,6 +78,9 @@ SQUEEZE_SLIDE_SPEED = 0.8  # How fast to slide perpendicular (relative to moveme
 # Generous range so characters don't need to be perfectly aligned to trade/talk
 ADJACENCY_DISTANCE = 1.3 # Within 1.3 cells - can interact from reasonable distance
 
+# Door threshold - how close to a door to trigger zone transition (entering/exiting buildings)
+DOOR_THRESHOLD = 0.5
+
 # Combat range - need to be closer for attacks
 COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)

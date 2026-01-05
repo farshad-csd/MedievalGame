@@ -36,7 +36,8 @@ from constants import (
     BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
     PATROL_CHECK_CHANCE, PATROL_APPROACH_DISTANCE,
-    SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE
+    SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE,
+    DOOR_THRESHOLD
 )
 from scenario_world import SIZE
 from scenario_characters import CHARACTER_TEMPLATES
@@ -69,22 +70,176 @@ class GameLogic:
     def is_adjacent(self, char1, char2):
         """Check if two characters are adjacent (close enough to interact).
         Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
+        Uses prevailing coords (local when in interior) for same-zone checks.
         """
         # Must be in same zone to be adjacent
         if char1.zone != char2.zone:
             return False
-        dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
+        # Use prevailing coords - these are local interior coords when inside,
+        # or world coords when in exterior
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
         return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
     
     def is_in_combat_range(self, char1, char2):
         """Check if two characters are close enough to attack each other.
         Uses COMBAT_RANGE which is tighter than ADJACENCY_DISTANCE.
+        Uses prevailing coords (local when in interior) for same-zone checks.
         """
         # Must be in same zone to fight
         if char1.zone != char2.zone:
             return False
-        dist = math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
+        # Use prevailing coords - these are local interior coords when inside,
+        # or world coords when in exterior
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
         return dist <= COMBAT_RANGE
+    
+    # =========================================================================
+    # GOAL-SETTING HELPERS (cross-zone navigation)
+    # =========================================================================
+    
+    def set_goal_to_character(self, char, target):
+        """Set goal to another character's position (cross-zone capable).
+        
+        Args:
+            char: Character whose goal to set
+            target: Target character to move toward
+        """
+        char.goal = (target.x, target.y)  # x,y are always world coords
+        char.goal_zone = target.zone
+    
+    def set_goal_to_object(self, char, obj):
+        """Set goal to an object's position (cross-zone capable).
+        
+        Args:
+            char: Character whose goal to set
+            obj: Target object (Bed, Stove, Barrel, etc.) with world_x/world_y
+        """
+        char.goal = (obj.world_x, obj.world_y)
+        char.goal_zone = obj.zone
+    
+    def set_goal_to_position(self, char, x, y, zone=None):
+        """Set goal to explicit world position in a specific zone.
+        
+        Args:
+            char: Character whose goal to set
+            x, y: World coordinates
+            zone: Zone the position is in (None for exterior)
+        """
+        char.goal = (x, y)
+        char.goal_zone = zone
+    
+    def set_goal_same_zone(self, char, x, y):
+        """Set goal to a position in char's current zone.
+        
+        Args:
+            char: Character whose goal to set
+            x, y: World coordinates
+        """
+        char.goal = (x, y)
+        char.goal_zone = char.zone
+    
+    def clear_goal(self, char):
+        """Clear character's goal."""
+        char.goal = None
+        char.goal_zone = None
+    
+    # =========================================================================
+    # ACCESSIBILITY HELPERS (same-zone navigation checks)
+    # =========================================================================
+    
+    def is_position_accessible_same_zone(self, x, y, from_zone):
+        """
+        Check if a world position is accessible from the given zone WITHOUT zone transitions.
+        
+        Use this for behaviors that should NOT cross zones (wandering, bystander flee,
+        farm theft, camping, etc.).
+        
+        Returns False if:
+        - Position would require entering/exiting a building
+        - Position is blocked by obstacles (buildings, trees) in exterior
+        - Position is blocked by furniture/walls in interior
+        - Position is out of bounds
+        
+        Args:
+            x, y: World coordinates
+            from_zone: The zone the character is currently in (None for exterior)
+        
+        Returns:
+            True if position is reachable without zone change
+        """
+        if from_zone is None:
+            # Character is in exterior
+            cell_x, cell_y = int(x), int(y)
+            
+            # Check world bounds
+            if not self.state.is_position_valid(cell_x, cell_y):
+                return False
+            
+            # Check if position is on any building footprint
+            for house in self.state.interactables.get_all_houses():
+                if house.contains_point(x, y):
+                    return False  # Can't walk on buildings from exterior
+            
+            # Check obstacles (trees, rocks, etc.)
+            if self.state.is_obstacle_at(cell_x, cell_y):
+                return False
+            
+            return True
+        else:
+            # Character is in an interior
+            interior = self.state.interiors.get_interior(from_zone)
+            if not interior:
+                return False
+            
+            # Convert world position to interior local coords
+            local_x, local_y = interior.world_to_interior(x, y)
+            
+            # Must be within interior floor bounds (not walls/black area)
+            if not interior.is_inside_bounds(int(local_x), int(local_y)):
+                return False
+            
+            # Must not be blocked by furniture
+            if interior.is_position_blocked(int(local_x), int(local_y)):
+                return False
+            
+            return True
+    
+    def get_zone_at_world_position(self, world_x, world_y):
+        """
+        Determine which zone contains a world position.
+        
+        Returns:
+            Interior name if position is within a building footprint, None for exterior
+        """
+        for interior in self.state.interiors.get_all_interiors():
+            if interior.house.contains_point(world_x, world_y):
+                return interior.name
+        return None
+    
+    def _get_accessible_flee_goal(self, char, threat):
+        """Get a flee position that doesn't hit obstacles. Returns (x, y) or None."""
+        # Try multiple angles radiating away from threat
+        dx = char.x - threat.x
+        dy = char.y - threat.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > 0.01:
+            base_angle = math.atan2(dy, dx)
+        else:
+            base_angle = random.random() * 2 * math.pi
+        
+        # Try base direction, then ±30°, ±60°, ±90°
+        for angle_offset in [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5]:
+            angle = base_angle + angle_offset
+            test_x = char.x + math.cos(angle) * 5.0
+            test_y = char.y + math.sin(angle) * 5.0
+            
+            if self.is_position_accessible_same_zone(test_x, test_y, char.zone):
+                return (test_x, test_y)
+        
+        return None
     
     def can_attack(self, char):
         """Check if character can attack (not on cooldown).
@@ -1786,7 +1941,7 @@ class GameLogic:
                 name = char.get_display_name()
                 self.state.log_action(f"{name} woke up")
         
-        # Update velocities based on goals
+        # Update velocities based on goals (with zone transition handling)
         for char in npcs:
             if char not in self.state.characters:
                 continue
@@ -1795,10 +1950,33 @@ class GameLogic:
                 continue
             
             goal = char.goal
+            goal_zone = getattr(char, 'goal_zone', None)
+            
             if goal:
-                # Calculate direction to goal
-                dx = goal[0] - char.x
-                dy = goal[1] - char.y
+                # Get effective local goal and check for zone transitions
+                effective_goal, transition = self._get_effective_goal_and_transition(
+                    char, goal, goal_zone
+                )
+                
+                # Handle zone transitions at door thresholds
+                if transition == 'need_to_exit':
+                    interior = self.state.interiors.get_interior(char.zone)
+                    if interior and interior.is_at_door(char.prevailing_x, char.prevailing_y):
+                        self._do_exit_interior(char, interior)
+                        continue  # Re-evaluate next tick
+                
+                elif transition == 'need_to_enter':
+                    interior = self.state.interiors.get_interior(goal_zone)
+                    if interior:
+                        door_x, door_y = interior.get_exit_position()
+                        dist_to_door = math.sqrt((char.x - door_x)**2 + (char.y - door_y)**2)
+                        if dist_to_door < DOOR_THRESHOLD:
+                            self._do_enter_interior(char, interior)
+                            continue  # Re-evaluate next tick
+                
+                # Calculate velocity toward effective_goal (in local coords)
+                dx = effective_goal[0] - char.prevailing_x
+                dy = effective_goal[1] - char.prevailing_y
                 dist = math.sqrt(dx * dx + dy * dy)
                 
                 if dist < 0.35:  # Close enough - prevents overshoot jitter
@@ -1829,11 +2007,86 @@ class GameLogic:
         for char in self.state.characters:
             self.try_report_crimes_to_soldier(char)
     
+    def _get_effective_goal_and_transition(self, char, goal_world, goal_zone):
+        """
+        Convert world-coordinate goal to local coordinates for movement,
+        and determine if a zone transition is needed.
+        
+        Args:
+            char: The character moving
+            goal_world: (x, y) in world coordinates
+            goal_zone: Zone the goal is in (None for exterior)
+        
+        Returns:
+            (effective_goal_local, transition)
+            - effective_goal_local: (x, y) in char's current coordinate space
+            - transition: None, 'need_to_enter', or 'need_to_exit'
+        """
+        char_zone = char.zone
+        
+        # Same zone - move directly (convert to local if needed)
+        if char_zone == goal_zone:
+            if char_zone is None:
+                # Both exterior - world coords are local coords
+                return goal_world, None
+            else:
+                # Both in same interior - convert world to interior local coords
+                interior = self.state.interiors.get_interior(char_zone)
+                if interior:
+                    local_x, local_y = interior.world_to_interior(goal_world[0], goal_world[1])
+                    return (local_x, local_y), None
+                return goal_world, None
+        
+        # Character outside, goal inside - path to exterior door first
+        if char_zone is None and goal_zone is not None:
+            interior = self.state.interiors.get_interior(goal_zone)
+            if interior:
+                door_pos = interior.get_exit_position()  # world coords of exterior door
+                return door_pos, 'need_to_enter'
+        
+        # Character inside, goal outside or different interior - path to interior door to exit
+        if char_zone is not None:
+            interior = self.state.interiors.get_interior(char_zone)
+            if interior:
+                door_local = interior.get_entry_position()  # interior local coords
+                return door_local, 'need_to_exit'
+        
+        # Fallback
+        return goal_world, None
+    
+    def _do_enter_interior(self, char, interior):
+        """Handle character entering an interior."""
+        char.enter_interior(interior)
+        name = char.get_display_name()
+        self.state.log_action(f"{name} entered {interior.name}")
+    
+    def _do_exit_interior(self, char, interior):
+        """Handle character exiting an interior."""
+        char.exit_interior(interior)
+        
+        # If exit position is blocked (another char just exited), find nearby spot
+        if self.state.is_position_blocked(char.prevailing_x, char.prevailing_y, exclude_char=char):
+            exit_x, exit_y = interior.get_exit_position()
+            # Try offsets around exit point
+            for offset in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5), (0.5, 0.5), (-0.5, -0.5)]:
+                test_x = exit_x + offset[0]
+                test_y = exit_y + offset[1]
+                if not self.state.is_position_blocked(test_x, test_y, exclude_char=char):
+                    char.prevailing_x = test_x
+                    char.prevailing_y = test_y
+                    break
+        
+        name = char.get_display_name()
+        self.state.log_action(f"{name} exited {interior.name}")
+    
     def update_npc_positions(self, dt):
         """Update NPC positions based on velocity. Called every frame for smooth movement.
         
         Implements squeeze behavior: when blocked for more than SQUEEZE_THRESHOLD_TICKS,
         characters will slide perpendicular to their movement direction to squeeze past obstacles.
+        
+        Uses prevailing coords (local when in interior, world when in exterior) since
+        velocity is calculated in that coordinate space.
         """
         npcs = [c for c in self.state.characters if not c.is_player]
         
@@ -1847,19 +2100,33 @@ class GameLogic:
                 char['squeeze_direction'] = 0
                 continue
             
-            # Calculate base new position
-            new_x = char['x'] + vx * dt
-            new_y = char['y'] + vy * dt
+            # Use prevailing coords (local when in interior, world when exterior)
+            # Velocity is calculated in this space, so movement must be too
+            curr_x = char.prevailing_x
+            curr_y = char.prevailing_y
             
-            # Keep within bounds (allow touching edges)
-            new_x = max(0, min(SIZE, new_x))
-            new_y = max(0, min(SIZE, new_y))
+            # Calculate base new position
+            new_x = curr_x + vx * dt
+            new_y = curr_y + vy * dt
+            
+            # Keep within bounds - different for interior vs exterior
+            if char.zone is None:
+                # Exterior - use world SIZE
+                new_x = max(0, min(SIZE, new_x))
+                new_y = max(0, min(SIZE, new_y))
+            else:
+                # Interior - use interior dimensions
+                interior = self.state.interiors.get_interior(char.zone)
+                if interior:
+                    new_x = max(0.3, min(interior.width - 0.3, new_x))
+                    new_y = max(0.3, min(interior.height - 0.3, new_y))
             
             # Check for collision with other characters
+            # is_position_blocked handles zone-aware collision checking
             if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
                 # Clear path - move normally
-                char['x'] = new_x
-                char['y'] = new_y
+                char.prevailing_x = new_x
+                char.prevailing_y = new_y
                 char['blocked_ticks'] = 0
                 char['squeeze_direction'] = 0
             else:
@@ -1874,32 +2141,38 @@ class GameLogic:
         2. If blocked for 3+ ticks, pick a perpendicular direction and slide that way
         3. Keep sliding in that direction until we make forward progress or get unstuck
         
+        Uses prevailing coords (local when in interior, world when in exterior).
+        
         Returns True if character moved, False if completely stuck.
         """
         moved = False
         made_forward_progress = False
         
+        # Use prevailing coords - match coordinate space of new_x/new_y
+        curr_x = char.prevailing_x
+        curr_y = char.prevailing_y
+        
         # Try simple axis-aligned sliding first (handles glancing collisions)
         # Only try if we're actually moving in that direction
         if abs(vx) >= abs(vy):
             # Moving mostly horizontal - try X only first
-            if abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
-                char['x'] = new_x
+            if abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
+                char.prevailing_x = new_x
                 moved = True
                 made_forward_progress = True
             # Then try Y if we have Y velocity
-            elif abs(vy) > 0.01 and not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
-                char['y'] = new_y
+            elif abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
+                char.prevailing_y = new_y
                 moved = True
         else:
             # Moving mostly vertical - try Y only first
-            if abs(vy) > 0.01 and not self.state.is_position_blocked(char['x'], new_y, exclude_char=char):
-                char['y'] = new_y
+            if abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
+                char.prevailing_y = new_y
                 moved = True
                 made_forward_progress = True
             # Then try X if we have X velocity
-            elif abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, char['y'], exclude_char=char):
-                char['x'] = new_x
+            elif abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
+                char.prevailing_x = new_x
                 moved = True
         
         if made_forward_progress:
@@ -1925,34 +2198,34 @@ class GameLogic:
             # Calculate slide movement perpendicular to travel direction
             if abs(vx) > abs(vy):
                 # Moving horizontal, slide vertical
-                slide_y = char['y'] + squeeze_dir * slide_speed
+                slide_y = curr_y + squeeze_dir * slide_speed
                 # Try to move: slide perpendicular + forward progress
                 if not self.state.is_position_blocked(new_x, slide_y, exclude_char=char):
-                    char['x'] = new_x
-                    char['y'] = slide_y
+                    char.prevailing_x = new_x
+                    char.prevailing_y = slide_y
                     char['blocked_ticks'] = 0
                     char['squeeze_direction'] = 0
                     return True
                 # Try just sliding perpendicular
-                elif not self.state.is_position_blocked(char['x'], slide_y, exclude_char=char):
-                    char['y'] = slide_y
+                elif not self.state.is_position_blocked(curr_x, slide_y, exclude_char=char):
+                    char.prevailing_y = slide_y
                     return True
                 else:
                     # This direction is blocked, try the other way
                     char['squeeze_direction'] = -squeeze_dir
             else:
                 # Moving vertical, slide horizontal
-                slide_x = char['x'] + squeeze_dir * slide_speed
+                slide_x = curr_x + squeeze_dir * slide_speed
                 # Try to move: slide perpendicular + forward progress
                 if not self.state.is_position_blocked(slide_x, new_y, exclude_char=char):
-                    char['x'] = slide_x
-                    char['y'] = new_y
+                    char.prevailing_x = slide_x
+                    char.prevailing_y = new_y
                     char['blocked_ticks'] = 0
                     char['squeeze_direction'] = 0
                     return True
                 # Try just sliding perpendicular
-                elif not self.state.is_position_blocked(slide_x, char['y'], exclude_char=char):
-                    char['x'] = slide_x
+                elif not self.state.is_position_blocked(slide_x, curr_y, exclude_char=char):
+                    char.prevailing_x = slide_x
                     return True
                 else:
                     # This direction is blocked, try the other way
@@ -1965,6 +2238,10 @@ class GameLogic:
         Picks the direction with more open space, or random if equal.
         Returns -1 or 1.
         """
+        # Use prevailing coords for interior/exterior compatibility
+        curr_x = char.prevailing_x
+        curr_y = char.prevailing_y
+        
         # Check space in both perpendicular directions
         check_dist = 1.0  # How far to look
         
@@ -1973,18 +2250,18 @@ class GameLogic:
             space_pos = 0
             space_neg = 0
             for d in [0.3, 0.6, 1.0]:
-                if not self.state.is_position_blocked(char['x'], char['y'] + d, exclude_char=char):
+                if not self.state.is_position_blocked(curr_x, curr_y + d, exclude_char=char):
                     space_pos += 1
-                if not self.state.is_position_blocked(char['x'], char['y'] - d, exclude_char=char):
+                if not self.state.is_position_blocked(curr_x, curr_y - d, exclude_char=char):
                     space_neg += 1
         else:
             # Moving vertical, check horizontal space
             space_pos = 0
             space_neg = 0
             for d in [0.3, 0.6, 1.0]:
-                if not self.state.is_position_blocked(char['x'] + d, char['y'], exclude_char=char):
+                if not self.state.is_position_blocked(curr_x + d, curr_y, exclude_char=char):
                     space_pos += 1
-                if not self.state.is_position_blocked(char['x'] - d, char['y'], exclude_char=char):
+                if not self.state.is_position_blocked(curr_x - d, curr_y, exclude_char=char):
                     space_neg += 1
         
         if space_pos > space_neg:
@@ -2090,6 +2367,7 @@ class GameLogic:
     def _choose_homeless_destination(self, char):
         """Choose a destination for homeless wandering.
         Picks a random non-farm cell within moderate distance.
+        Uses accessibility check to avoid buildings and trees.
         """
         current_x, current_y = int(char['x']), int(char['y'])
         
@@ -2100,8 +2378,12 @@ class GameLogic:
         for dy in range(-wander_range, wander_range + 1):
             for dx in range(-wander_range, wander_range + 1):
                 nx, ny = current_x + dx, current_y + dy
-                if not self.state.is_position_valid(nx, ny):
+                world_x, world_y = nx + 0.5, ny + 0.5
+                
+                # Use accessibility check - excludes buildings, trees, out of bounds
+                if not self.is_position_accessible_same_zone(world_x, world_y, None):
                     continue
+                
                 # Skip farm cells
                 if (nx, ny) in self.state.farm_cells:
                     continue
@@ -2123,7 +2405,7 @@ class GameLogic:
         return (cell[0] + 0.5, cell[1] + 0.5)
     
     def _get_flee_goal(self, char, threat):
-        """Get a position away from the threat. Returns float position."""
+        """Get a position away from the threat. Returns float position (world coords)."""
         dx = char['x'] - threat['x']
         dy = char['y'] - threat['y']
         dist = math.sqrt(dx * dx + dy * dy)
@@ -2137,6 +2419,92 @@ class GameLogic:
             dx = math.cos(angle)
             dy = math.sin(angle)
         return (char['x'] + dx * 5.0, char['y'] + dy * 5.0)
+    
+    def _get_interior_flee_goal(self, char, threat, interior):
+        """Get a flee position within an interior, respecting walls.
+        
+        Returns:
+            (goal_x, goal_y, goal_zone) - world coords and zone
+            goal_zone is None if character should exit, interior.name if staying inside
+        """
+        # Use prevailing (local) coords for interior calculations
+        char_x = char.prevailing_x
+        char_y = char.prevailing_y
+        threat_x = threat.prevailing_x
+        threat_y = threat.prevailing_y
+        
+        # Door position in local coords (door is at bottom wall)
+        door_local_x = interior.door_x + 0.5
+        door_local_y = interior.height - 0.5  # Just inside the door
+        near_door_threshold = 1.5  # If flee pos is within this of door, just exit
+        
+        # Calculate flee direction (away from threat)
+        dx = char_x - threat_x
+        dy = char_y - threat_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > 0.01:
+            dx = dx / dist
+            dy = dy / dist
+        else:
+            # Random direction if on top of threat
+            angle = random.random() * 2 * math.pi
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+        
+        # Helper to check if a position is near the door
+        def is_near_door(x, y):
+            door_dist = math.sqrt((x - door_local_x)**2 + (y - door_local_y)**2)
+            return door_dist < near_door_threshold
+        
+        # Try to find valid flee position within interior
+        # Try multiple distances, starting far and working closer
+        wall_buffer = 0.5
+        for flee_dist in [3.0, 2.0, 1.5, 1.0]:
+            target_x = char_x + dx * flee_dist
+            target_y = char_y + dy * flee_dist
+            
+            # Clamp to interior bounds
+            target_x = max(wall_buffer, min(interior.width - wall_buffer, target_x))
+            target_y = max(wall_buffer, min(interior.height - wall_buffer, target_y))
+            
+            # Check if this position is valid (not blocked by furniture)
+            if not interior.is_position_blocked(int(target_x), int(target_y)):
+                # If flee position is near door, just exit instead
+                if is_near_door(target_x, target_y):
+                    exit_x, exit_y = interior.get_exit_position()
+                    return (exit_x, exit_y, None)
+                
+                # Found valid flee position - convert to world coords
+                world_x, world_y = interior.interior_to_world(target_x, target_y)
+                return (world_x, world_y, interior.name)
+        
+        # Try perpendicular directions if straight back is blocked
+        for angle_offset in [math.pi/2, -math.pi/2, math.pi/4, -math.pi/4]:
+            base_angle = math.atan2(dy, dx)
+            new_angle = base_angle + angle_offset
+            new_dx = math.cos(new_angle)
+            new_dy = math.sin(new_angle)
+            
+            for flee_dist in [2.0, 1.5, 1.0]:
+                target_x = char_x + new_dx * flee_dist
+                target_y = char_y + new_dy * flee_dist
+                
+                target_x = max(wall_buffer, min(interior.width - wall_buffer, target_x))
+                target_y = max(wall_buffer, min(interior.height - wall_buffer, target_y))
+                
+                if not interior.is_position_blocked(int(target_x), int(target_y)):
+                    # If flee position is near door, just exit instead
+                    if is_near_door(target_x, target_y):
+                        exit_x, exit_y = interior.get_exit_position()
+                        return (exit_x, exit_y, None)
+                    
+                    world_x, world_y = interior.interior_to_world(target_x, target_y)
+                    return (world_x, world_y, interior.name)
+        
+        # Cornered - flee to exit
+        exit_x, exit_y = interior.get_exit_position()
+        return (exit_x, exit_y, None)
     
     def _find_camp_spot(self, char):
         """Find a nearby position where the character can make a camp (outside village).
@@ -2219,10 +2587,12 @@ class GameLogic:
     def _get_wander_goal(self, char, area):
         """Get the current idle destination for this character within the given area.
         Uses a state machine to create natural wandering behavior:
-        - Choose a point of interest or random valid cell
+        - Choose a point of interest or random valid position
         - Move toward it at reduced speed
         - Wait there for a while
         - Sometimes pause mid-journey
+        
+        Works for both exterior areas and interiors.
         Returns float position or None if waiting/paused.
         """
         is_village = self.state.is_village_area(area) if area else False
@@ -2261,9 +2631,9 @@ class GameLogic:
                 char['idle_state'] = 'choosing'
                 return None
             
-            # Check if we've arrived at destination
-            dx = destination[0] - char['x']
-            dy = destination[1] - char['y']
+            # Check if we've arrived at destination (use world coords)
+            dx = destination[0] - char.x
+            dy = destination[1] - char.y
             dist = math.sqrt(dx * dx + dy * dy)
             
             if dist < 0.4:  # Arrived at destination
@@ -2287,38 +2657,51 @@ class GameLogic:
     def _choose_idle_destination(self, char, area, is_village):
         """Choose a destination for idle wandering.
         70% chance to pick a point of interest (corners, center, edges)
-        30% chance to pick a random valid cell
-        Avoids farm cells.
+        30% chance to pick a random valid position
+        Avoids farm cells and inaccessible positions (buildings, trees).
+        Works for both exterior areas and interiors.
         """
-        # Get points of interest
+        # Get points of interest (world coords)
         poi_list = self.state.get_area_points_of_interest(area, is_village)
         
-        # Get valid cells for random wandering
-        valid_cells = self.state.get_valid_idle_cells(area, is_village)
+        # Get valid positions for random wandering (world coords)
+        valid_positions = self.state.get_valid_idle_cells(area, is_village)
         
-        if not poi_list and not valid_cells:
+        # Filter POIs for accessibility (can't wander into buildings from exterior)
+        accessible_pois = [
+            p for p in poi_list 
+            if self.is_position_accessible_same_zone(p[0], p[1], char.zone)
+        ]
+        
+        # Filter positions for accessibility
+        accessible_positions = [
+            p for p in valid_positions
+            if self.is_position_accessible_same_zone(p[0], p[1], char.zone)
+        ]
+        
+        if not accessible_pois and not accessible_positions:
             return None
         
         # 70% chance to go to a point of interest if available
-        if poi_list and (not valid_cells or random.random() < 0.7):
+        if accessible_pois and (not accessible_positions or random.random() < 0.7):
             # Pick a POI that's not too close to current position
-            current_pos = (char['x'], char['y'])
-            far_pois = [p for p in poi_list if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
+            current_pos = (char.x, char.y)
+            far_pois = [p for p in accessible_pois if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
             if far_pois:
                 return random.choice(far_pois)
-            elif poi_list:
-                return random.choice(poi_list)
+            elif accessible_pois:
+                return random.choice(accessible_pois)
         
-        # Pick a random valid cell
-        if valid_cells:
-            # Prefer cells that are at least 2 cells away
-            current_cell = (int(char['x']), int(char['y']))
-            far_cells = [c for c in valid_cells if abs(c[0]-current_cell[0]) + abs(c[1]-current_cell[1]) > 2]
-            if far_cells:
-                cell = random.choice(far_cells)
+        # Pick a random valid position
+        if accessible_positions:
+            # Prefer positions that are at least 2 units away
+            current_pos = (char.x, char.y)
+            far_positions = [p for p in accessible_positions 
+                           if math.sqrt((p[0]-current_pos[0])**2 + (p[1]-current_pos[1])**2) > 2.0]
+            if far_positions:
+                return random.choice(far_positions)
             else:
-                cell = random.choice(valid_cells)
-            return (cell[0] + 0.5, cell[1] + 0.5)
+                return random.choice(accessible_positions)
         
         return None
     

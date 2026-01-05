@@ -146,6 +146,7 @@ class Character:
         # Movement goal - where this character is trying to go
         # Set by job.decide(), used by movement system
         self.goal = None
+        self.goal_zone = None  # None = exterior, "interior_name" = inside that building
         
         
         # Theft state (ongoing goal-directed behavior, not a reaction)

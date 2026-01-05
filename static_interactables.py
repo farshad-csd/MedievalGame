@@ -29,6 +29,37 @@ class Interactable:
         self.y = y
         self.home = home
         self.zone = zone  # None = exterior, "Interior Name" = inside that interior
+        
+        # Interior projection parameters (set via set_interior_projection when in interior)
+        self._interior_proj_x = 0
+        self._interior_proj_y = 0
+        self._interior_scale_x = 1.0
+        self._interior_scale_y = 1.0
+    
+    def set_interior_projection(self, interior):
+        """Configure projection params when placed in an interior.
+        
+        Args:
+            interior: Interior object this interactable is placed in
+        """
+        self._interior_proj_x = interior.exterior_x
+        self._interior_proj_y = interior.exterior_y
+        self._interior_scale_x = interior.scale_x
+        self._interior_scale_y = interior.scale_y
+    
+    @property
+    def world_x(self):
+        """Get world X coordinate (projected if in interior)."""
+        if self.zone is None:
+            return self.x + 0.5
+        return self._interior_proj_x + ((self.x + 0.5) * self._interior_scale_x)
+    
+    @property
+    def world_y(self):
+        """Get world Y coordinate (projected if in interior)."""
+        if self.zone is None:
+            return self.y + 0.5
+        return self._interior_proj_y + ((self.y + 0.5) * self._interior_scale_y)
     
     @property
     def position(self):

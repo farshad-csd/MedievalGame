@@ -108,7 +108,7 @@ class GameState:
         self.interactables.init_houses(HOUSES)
     
     def _init_interiors(self):
-        """Initialize interior spaces for all houses."""
+        """Initialize interior spaces for all houses and set up object projections."""
         for house in self.interactables.get_all_houses():
             # Create a 6x6 interior for each house
             # Interior is white/empty cells by default
@@ -116,10 +116,30 @@ class GameState:
             
             # Link interior to house for easy access
             house.interior = interior
+        
+        # Set interior projection for all objects that are in interiors
+        for barrel in self.interactables.barrels.values():
+            if barrel.zone:
+                interior = self.interiors.get_interior(barrel.zone)
+                if interior:
+                    barrel.set_interior_projection(interior)
+        
+        for bed in self.interactables.beds.values():
+            if bed.zone:
+                interior = self.interiors.get_interior(bed.zone)
+                if interior:
+                    bed.set_interior_projection(interior)
+        
+        for stove in self.interactables.stoves.values():
+            if stove.zone:
+                interior = self.interiors.get_interior(stove.zone)
+                if interior:
+                    stove.set_interior_projection(interior)
     
     def _init_characters(self):
         """Initialize characters from templates.
         Homes, beds, and barrels are assigned based on starting_job, not hardcoded in config.
+        Characters spawn inside their home if it's an interior.
         """
         occupied = set()
         
@@ -129,11 +149,33 @@ class GameState:
 
             # Find spawn location in home area (or default if no home)
             home_area = template.get('starting_home')
-            x, y = self._find_spawn_location(home_area, occupied)
-            occupied.add((x, y))
             
-            # Create Character object (not dict)
-            char = create_character(name, x, y, home_area)
+            # Check if home is an interior (house/farmhouse)
+            home_interior = self.interiors.get_interior(home_area) if home_area else None
+            
+            if home_interior:
+                # Spawn inside the interior
+                # Find a valid position inside the interior (center area, not on furniture)
+                spawn_x, spawn_y = self._find_interior_spawn(home_interior, occupied)
+                
+                # Create Character object
+                char = create_character(name, 0, 0, home_area)  # Temp coords
+                
+                # Set up interior projection and place inside
+                char.enter_interior(home_interior)
+                char.prevailing_x = spawn_x
+                char.prevailing_y = spawn_y
+                
+                # Track occupied positions in interior space
+                occupied.add((home_area, int(spawn_x), int(spawn_y)))
+            else:
+                # Spawn in exterior
+                x, y = self._find_spawn_location(home_area, occupied)
+                occupied.add((None, x, y))
+                
+                # Create Character object (not dict)
+                char = create_character(name, x, y, home_area)
+            
             self.characters.append(char)
             
             # Assign bed and barrel based on job
@@ -142,6 +184,38 @@ class GameState:
             
             if char.is_player:
                 self.player = char
+    
+    def _find_interior_spawn(self, interior, occupied):
+        """Find a valid spawn location inside an interior.
+        
+        Args:
+            interior: Interior object to spawn in
+            occupied: Set of (zone, x, y) tuples that are already taken
+            
+        Returns:
+            (x, y) in interior coordinates
+        """
+        # Try center first
+        center_x = interior.width / 2
+        center_y = interior.height / 2
+        
+        # Check if center is valid and unoccupied
+        if not interior.is_position_blocked(int(center_x), int(center_y)):
+            key = (interior.name, int(center_x), int(center_y))
+            if key not in occupied:
+                return (center_x, center_y)
+        
+        # Try other positions
+        for local_y in range(interior.height):
+            for local_x in range(interior.width):
+                if interior.is_position_blocked(local_x, local_y):
+                    continue
+                key = (interior.name, local_x, local_y)
+                if key not in occupied:
+                    return (local_x + 0.5, local_y + 0.5)
+        
+        # Fallback to center
+        return (center_x, center_y)
     
     
     def _assign_job_resources(self, char, job, home_area):
@@ -276,6 +350,13 @@ class GameState:
     def is_position_valid(self, x, y):
         """Check if position is within bounds (works with float positions)"""
         return 0 <= x < SIZE and 0 <= y < SIZE
+    
+    def is_obstacle_at(self, x, y):
+        """Check if there's an obstacle (tree, rock, etc.) at this cell position."""
+        cell_x = int(x)
+        cell_y = int(y)
+        # Currently just trees, but will expand to other obstacles
+        return self.interactables.has_tree_at(cell_x, cell_y)
     
     def is_position_blocked(self, x, y, exclude_char=None, zone=None):
         """Check if a position would hard-collide with any character or obstacle.
@@ -523,8 +604,39 @@ class GameState:
         - Center of area
         - Corners of area
         - Midpoints of edges
-        Avoids farm cells.
+        Avoids farm cells and blocked positions.
+        
+        Also handles interiors - if area_name matches an interior, returns
+        interior floor positions in world coordinates.
         """
+        # Check if this is an interior
+        interior = self.interiors.get_interior(area_name)
+        if interior:
+            # Return POIs within the interior (in world coords)
+            points = []
+            
+            # Center
+            center_x = interior.width / 2
+            center_y = interior.height / 2
+            if not interior.is_position_blocked(int(center_x), int(center_y)):
+                world_x, world_y = interior.interior_to_world(center_x, center_y)
+                points.append((world_x, world_y))
+            
+            # Corners (slightly inward)
+            corners = [
+                (0.5, 0.5),
+                (interior.width - 0.5, 0.5),
+                (0.5, interior.height - 0.5),
+                (interior.width - 0.5, interior.height - 0.5),
+            ]
+            for lx, ly in corners:
+                if not interior.is_position_blocked(int(lx), int(ly)):
+                    world_x, world_y = interior.interior_to_world(lx, ly)
+                    points.append((world_x, world_y))
+            
+            return points
+        
+        # Exterior area logic
         if is_village:
             bounds = self.get_village_bounds()
         else:
@@ -571,10 +683,26 @@ class GameState:
         return valid_points
     
     def get_valid_idle_cells(self, area_name, is_village=False):
-        """Get all valid cells for idle wandering in an area.
-        Excludes farm cells.
+        """Get all valid positions for idle wandering in an area.
+        Excludes farm cells and blocked positions.
+        Returns list of (x, y) world coordinate tuples (cell centers).
+        
+        Also handles interiors - if area_name matches an interior, returns
+        interior floor positions in world coordinates.
         """
-        valid_cells = []
+        # Check if this is an interior
+        interior = self.interiors.get_interior(area_name)
+        if interior:
+            valid_positions = []
+            for local_y in range(interior.height):
+                for local_x in range(interior.width):
+                    if not interior.is_position_blocked(local_x, local_y):
+                        world_x, world_y = interior.interior_to_world(local_x + 0.5, local_y + 0.5)
+                        valid_positions.append((world_x, world_y))
+            return valid_positions
+        
+        # Exterior area logic - return cell centers (world coords)
+        valid_positions = []
         for y in range(SIZE):
             for x in range(SIZE):
                 # Skip farm cells
@@ -583,11 +711,11 @@ class GameState:
                 
                 if is_village:
                     if self.is_in_village(x, y):
-                        valid_cells.append((x, y))
+                        valid_positions.append((x + 0.5, y + 0.5))
                 else:
                     if self.get_area_at(x, y) == area_name:
-                        valid_cells.append((x, y))
-        return valid_cells
+                        valid_positions.append((x + 0.5, y + 0.5))
+        return valid_positions
     
     def get_village_perimeter(self):
         """Get cells forming the perimeter around the village in clockwise order"""

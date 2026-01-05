@@ -328,6 +328,8 @@ class Job:
         2. If at safe distance and defender nearby, stay near defender
         3. If at safe distance with no defender, stop and watch attacker
         4. Can report crimes to same-allegiance soldiers via sound
+        5. If in same interior as attacker, flee to exit
+        6. If outside and own home is in safe direction, can flee into home
         
         Behavior for BYSTANDERS (just saw violence, don't know who's guilty):
         1. Flee until out of danger distance
@@ -350,7 +352,7 @@ class Job:
         # Get current flee reason
         flee_reason = char.intent.get('reason') if char.intent else None
         
-        # BYSTANDER: Simple behavior - flee to safe distance, then watch
+        # BYSTANDER: Simple behavior - flee to safe distance, then watch (no cross-zone)
         if flee_reason == 'bystander':
             # Perception check already done in _check_flee, but double-check
             can_perceive, _ = logic.can_perceive_event(char, attacker.x, attacker.y)
@@ -358,17 +360,28 @@ class Job:
                 char.clear_intent()
                 return False
             
-            # Check distance - low confidence bystanders keep more distance
-            dx = attacker.x - char.x
-            dy = attacker.y - char.y
+            # Check distance - use prevailing coords if same zone
+            if char.zone is not None and char.zone == attacker.zone:
+                dx = attacker.prevailing_x - char.prevailing_x
+                dy = attacker.prevailing_y - char.prevailing_y
+            else:
+                dx = attacker.x - char.x
+                dy = attacker.y - char.y
             dist = math.sqrt(dx*dx + dy*dy)
             
             confidence = char.get_trait('confidence')
             safe_distance = VISION_RANGE / 2 if confidence < 7 else VISION_RANGE / 3
             
             if dist < safe_distance:
-                # Too close - keep fleeing
-                char.goal = logic._get_flee_goal(char, attacker)
+                # Too close - keep fleeing (same zone only, use interior-aware flee if applicable)
+                if char.zone is not None and char.zone == attacker.zone:
+                    interior = state.interiors.get_interior(char.zone)
+                    if interior:
+                        flee_x, flee_y, flee_zone = logic._get_interior_flee_goal(char, attacker, interior)
+                        logic.set_goal_to_position(char, flee_x, flee_y, flee_zone)
+                        return False
+                flee_pos = logic._get_flee_goal(char, attacker)
+                logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
                 return False
             else:
                 # Safe distance - switch to watching
@@ -378,6 +391,17 @@ class Job:
                 return False
         
         # VICTIM: Complex flee logic (being_attacked, witnessed_crime, etc.)
+        
+        # If both in same interior, try to flee within interior first
+        if char.zone is not None and attacker.zone == char.zone:
+            interior = state.interiors.get_interior(char.zone)
+            if interior:
+                # Get best flee position (may be inside or exit if cornered)
+                flee_x, flee_y, flee_zone = logic._get_interior_flee_goal(char, attacker, interior)
+                logic.set_goal_to_position(char, flee_x, flee_y, flee_zone)
+                if char.intent is None or char.intent.get('action') not in ('flee', 'watch'):
+                    char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
+                return False
         
         # Set flee intent if not already set
         if char.intent is None or char.intent.get('action') not in ('flee', 'watch'):
@@ -395,10 +419,24 @@ class Job:
         else:
             dir_to_attacker_x, dir_to_attacker_y = 0, 0
         
+        # Check if we can flee into own home (exterior only) - check at ALL distances
+        if char.zone is None and attacker.zone is None:
+            home_interior = state.interiors.get_interior(char.get('home')) if char.get('home') else None
+            if home_interior:
+                door_x, door_y = home_interior.get_exit_position()
+                if self._is_safe_direction(char, attacker, door_x, door_y):
+                    # Target center of home interior
+                    center_x = home_interior.width / 2
+                    center_y = home_interior.height / 2
+                    world_x, world_y = home_interior.interior_to_world(center_x, center_y)
+                    logic.set_goal_to_position(char, world_x, world_y, char.get('home'))
+                    return False
+        
         # PRIORITY 1: Self-preservation - if attacker is too close, FLEE!
         if dist_to_attacker < VISION_RANGE / 2:
             char.set_intent('flee', attacker, reason='being_attacked', started_tick=state.ticks)
-            char.goal = logic._get_flee_goal(char, attacker)
+            flee_pos = logic._get_flee_goal(char, attacker)
+            logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
             return False
         
         # Look for any defender in range
@@ -425,9 +463,9 @@ class Job:
                 # Report the crime if defender doesn't already know (only works for same-allegiance soldiers)
                 self._try_report_attack_to_defender(char, attacker, defender, state, logic)
             
-            # PRIORITY 2: If defender is in a safe direction, go to them
+            # PRIORITY 2: If defender is in a safe direction, go to them (cross-zone capable)
             if defender_is_safe_direction:
-                char.goal = (defender.x, defender.y)
+                logic.set_goal_to_character(char, defender)
                 return False
         
         # PRIORITY 3: No safe defender - if at safe distance, stop and watch
@@ -438,7 +476,8 @@ class Job:
             return False
         
         # Between safe and danger distance - keep moving away
-        char.goal = logic._get_flee_goal(char, attacker)
+        flee_pos = logic._get_flee_goal(char, attacker)
+        logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
         return False
     
     def _do_watch_threat(self, char, state, logic):
@@ -457,9 +496,13 @@ class Job:
         
         reason = char.intent.get('reason') if char.intent else None
         
-        # Calculate distance to threat
-        dx = threat.x - char.x
-        dy = threat.y - char.y
+        # Calculate distance to threat - use prevailing coords if same zone
+        if char.zone is not None and char.zone == threat.zone:
+            dx = threat.prevailing_x - char.prevailing_x
+            dy = threat.prevailing_y - char.prevailing_y
+        else:
+            dx = threat.x - char.x
+            dy = threat.y - char.y
         dist_to_threat = math.sqrt(dx * dx + dy * dy)
         
         # If threat got too close, switch to flee
@@ -476,7 +519,18 @@ class Job:
                 char.set_intent('flee', threat, reason='bystander', started_tick=state.ticks)
             else:
                 char.set_intent('flee', threat, reason='threat_approaching', started_tick=state.ticks)
-            char.goal = logic._get_flee_goal(char, threat)
+            
+            # Use interior-aware flee if in same interior
+            if char.zone is not None and char.zone == threat.zone:
+                interior = state.interiors.get_interior(char.zone)
+                if interior:
+                    flee_x, flee_y, flee_zone = logic._get_interior_flee_goal(char, threat, interior)
+                    logic.set_goal_to_position(char, flee_x, flee_y, flee_zone)
+                    state.log_action(f"{char.get_display_name()} fleeing - {threat.get_display_name()} too close!")
+                    return False
+            
+            flee_pos = logic._get_flee_goal(char, threat)
+            logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
             state.log_action(f"{char.get_display_name()} fleeing - {threat.get_display_name()} too close!")
             return False
         
@@ -484,11 +538,24 @@ class Job:
         char.goal = None
         self._face_target(char, threat)
         
-        # Only victims (monitoring_threat) look for defenders and try to report
+        # Only victims (monitoring_threat) look for defenders and try to go home
         # Bystanders just watch
         if reason == 'monitoring_threat':
             dir_to_threat_x = dx / dist_to_threat if dist_to_threat > 0.01 else 0
             dir_to_threat_y = dy / dist_to_threat if dist_to_threat > 0.01 else 0
+            
+            # Check if we can go home (exterior only, safe direction)
+            if char.zone is None and threat.zone is None:
+                home_interior = state.interiors.get_interior(char.get('home')) if char.get('home') else None
+                if home_interior:
+                    door_x, door_y = home_interior.get_exit_position()
+                    if self._is_safe_direction(char, threat, door_x, door_y):
+                        # Target center of home interior
+                        center_x = home_interior.width / 2
+                        center_y = home_interior.height / 2
+                        world_x, world_y = home_interior.interior_to_world(center_x, center_y)
+                        logic.set_goal_to_position(char, world_x, world_y, char.get('home'))
+                        return False
             
             defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=threat)
             if defender:
@@ -504,8 +571,8 @@ class Job:
                 dot = dx_to_defender * dir_to_threat_x + dy_to_defender * dir_to_threat_y
                 if dist_to_defender > 0.01:
                     cos_angle = dot / dist_to_defender
-                    if cos_angle < 0.5:  # Safe direction
-                        char.goal = (defender.x, defender.y)
+                    if cos_angle < 0.5:  # Safe direction (cross-zone capable)
+                        logic.set_goal_to_character(char, defender)
         
         return False
     
@@ -573,7 +640,7 @@ class Job:
             logic._do_attack(char, attacker)
             return True
         
-        char.goal = (attacker.x, attacker.y)
+        logic.set_goal_to_character(char, attacker)
         return False
     
     def _do_combat(self, char, state, logic):
@@ -592,7 +659,7 @@ class Job:
                 return True
             char.goal = None
         else:
-            char.goal = (target.x, target.y)
+            logic.set_goal_to_character(char, target)
         return False
     
     def _do_flee_criminal(self, char, state, logic):
@@ -606,6 +673,8 @@ class Job:
         5. Report crime via sound radius (not adjacency)
         6. Can report to multiple defenders
         7. Prioritize fleeing over going to defender if defender is in dangerous direction
+        8. If in same interior as criminal, flee to exit
+        9. If outside and own home is in safe direction, can flee into home
         """
         # Get flee target from intent or find new one
         flee_target = None
@@ -623,6 +692,14 @@ class Job:
                 char.clear_intent()
                 return False
         
+        # If both in same interior, try to flee within interior first
+        if char.zone is not None and flee_target.zone == char.zone:
+            interior = state.interiors.get_interior(char.zone)
+            if interior:
+                flee_x, flee_y, flee_zone = logic._get_interior_flee_goal(char, flee_target, interior)
+                logic.set_goal_to_position(char, flee_x, flee_y, flee_zone)
+                return False
+        
         # Calculate distance and direction to criminal
         dx_to_criminal = flee_target.x - char.x
         dy_to_criminal = flee_target.y - char.y
@@ -634,6 +711,19 @@ class Job:
             dir_to_criminal_y = dy_to_criminal / dist_to_criminal
         else:
             dir_to_criminal_x, dir_to_criminal_y = 0, 0
+        
+        # Check if we can flee into own home (exterior only) - check at ALL distances
+        if char.zone is None and flee_target.zone is None:
+            home_interior = state.interiors.get_interior(char.get('home')) if char.get('home') else None
+            if home_interior:
+                door_x, door_y = home_interior.get_exit_position()
+                if self._is_safe_direction(char, flee_target, door_x, door_y):
+                    # Target center of home interior
+                    center_x = home_interior.width / 2
+                    center_y = home_interior.height / 2
+                    world_x, world_y = home_interior.interior_to_world(center_x, center_y)
+                    logic.set_goal_to_position(char, world_x, world_y, char.get('home'))
+                    return False
         
         # Look for any defender in range
         defender = logic.find_nearby_defender(char, VISION_RANGE * 2, exclude=flee_target)
@@ -662,9 +752,9 @@ class Job:
                 # Report crimes if defender doesn't already know
                 self._try_report_crimes_to_defender(char, flee_target, defender, state, logic)
             
-            # Go to defender only if they're in a safe direction
+            # Go to defender only if they're in a safe direction (cross-zone capable)
             if defender_is_safe_direction:
-                char.goal = (defender.x, defender.y)
+                logic.set_goal_to_character(char, defender)
                 return False
         
         # No safe defender - decide whether to flee or watch based on distance
@@ -678,12 +768,39 @@ class Job:
         
         if dist_to_criminal < VISION_RANGE / 2:
             # Too close - flee!
-            char.goal = logic._get_flee_goal(char, flee_target)
+            flee_pos = logic._get_flee_goal(char, flee_target)
+            logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
             return False
         
         # Between safe and danger - keep moving away
-        char.goal = logic._get_flee_goal(char, flee_target)
+        flee_pos = logic._get_flee_goal(char, flee_target)
+        logic.set_goal_same_zone(char, flee_pos[0], flee_pos[1])
         return False
+    
+    def _is_safe_direction(self, char, threat, target_x, target_y):
+        """Check if target position is in a safe direction (>60° from threat)."""
+        # Direction to threat
+        dx_threat = threat.x - char.x
+        dy_threat = threat.y - char.y
+        dist_threat = math.sqrt(dx_threat**2 + dy_threat**2)
+        if dist_threat < 0.01:
+            return True  # Threat is on top of us, any direction is fine
+        
+        dir_threat_x = dx_threat / dist_threat
+        dir_threat_y = dy_threat / dist_threat
+        
+        # Direction to target
+        dx_target = target_x - char.x
+        dy_target = target_y - char.y
+        dist_target = math.sqrt(dx_target**2 + dy_target**2)
+        if dist_target < 0.01:
+            return False  # Already at target
+        
+        # Dot product gives cos(angle)
+        dot = (dx_target * dir_threat_x + dy_target * dir_threat_y) / dist_target
+        
+        # Safe if angle > 60° (cos < 0.5)
+        return dot < 0.5
     
     def _try_report_crimes_to_defender(self, char, criminal, defender, state, logic):
         """Try to report crimes to a defender via sound.
@@ -729,7 +846,7 @@ class Job:
                 logic._do_attack(char, criminal)
                 return True
         
-        char.goal = (criminal.x, criminal.y)
+        logic.set_goal_to_character(char, criminal)
         return False
     
     def _do_watch_fleeing_person(self, char, state, logic):
@@ -788,59 +905,86 @@ class Job:
             logic.bake_bread(char, amount)
             return True
         
-        # Go to cooking spot
+        # Go to cooking spot (cross-zone capable)
         cooking_spot, cooking_pos = logic.get_nearest_cooking_spot(char)
-        if cooking_pos:
-            char.goal = cooking_pos
-        elif logic.can_make_camp_at(char.x, char.y):
+        if cooking_spot:
+            # cooking_spot is a dict with 'source' key being the actual object
+            stove_obj = cooking_spot.get('source')
+            if stove_obj:
+                logic.set_goal_to_object(char, stove_obj)
+            elif cooking_pos:
+                # Fallback if no object (campfire case)
+                logic.set_goal_same_zone(char, cooking_pos[0], cooking_pos[1])
+        elif char.zone is None and logic.can_make_camp_at(char.x, char.y):
+            # Can't camp indoors
             logic.make_camp(char)
             return True
         return False
     
     def _do_sleep(self, char, state, logic):
         """Go to sleep or head to bed."""
-        sleep_pos = logic.get_sleep_position(char)
+        bed = state.get_character_bed(char)
         
-        if sleep_pos:
-            sleep_center = (sleep_pos[0] + 0.5, sleep_pos[1] + 0.5)
-            dist = math.sqrt((char.x - sleep_center[0])**2 + (char.y - sleep_center[1])**2)
+        if bed:
+            # Calculate distance using world coordinates
+            dist = math.sqrt((char.x - bed.world_x)**2 + (char.y - bed.world_y)**2)
             
-            if dist < 0.15:
+            # Must be in same zone and close to actually sleep
+            if char.zone == bed.zone and dist < 0.15:
                 if not char.get('is_sleeping'):
                     char.is_sleeping = True
                     state.log_action(f"{char.get_display_name()} went to sleep")
                 char.goal = None
+                char.goal_zone = None
                 return True
             else:
-                char.goal = sleep_center
+                # Navigate to bed (cross-zone capable)
+                logic.set_goal_to_object(char, bed)
                 return False
         else:
-            # No bed - make camp
-            if logic.can_make_camp_at(char.x, char.y):
+            # No bed - make camp (exterior only)
+            if char.zone is None and logic.can_make_camp_at(char.x, char.y):
                 logic.make_camp(char)
                 char.is_sleeping = True
                 return True
+            elif char.zone is None:
+                camp_spot = logic._find_camp_spot(char)
+                if camp_spot:
+                    logic.set_goal_same_zone(char, camp_spot[0], camp_spot[1])
+                return False
             else:
-                char.goal = logic._find_camp_spot(char)
+                # Inside an interior with no bed - just stay put
+                char.goal = None
                 return False
     
     def _do_wander(self, char, state, logic):
-        """Wander aimlessly."""
+        """Wander aimlessly within home area or interior."""
         home = char.get('home')
         if home:
-            char.goal = logic._get_wander_goal(char, home)
+            # _get_wander_goal handles both exterior areas and interior wandering
+            wander_goal = logic._get_wander_goal(char, home)
+            if wander_goal:
+                logic.set_goal_same_zone(char, wander_goal[0], wander_goal[1])
+            else:
+                char.goal = None
         else:
-            char.goal = logic._get_homeless_idle_goal(char)
+            # Homeless wandering (exterior only)
+            wander_goal = logic._get_homeless_idle_goal(char)
+            if wander_goal:
+                logic.set_goal_same_zone(char, wander_goal[0], wander_goal[1])
+            else:
+                char.goal = None
         return False
     
     def _do_forage(self, char, state, logic):
-        """Forage or steal food from farms."""
+        """Forage or steal food from farms. Farms are always exterior."""
         # Check for theft in progress
         theft_target = char.get('theft_target')
         if theft_target:
             data = state.farm_cells.get(theft_target)
             if data and data['state'] == 'ready':
                 char.goal = (theft_target[0] + 0.5, theft_target[1] + 0.5)
+                char.goal_zone = None  # Farms are always exterior
                 return logic.continue_theft(char)
             else:
                 char.theft_target = None
@@ -850,6 +994,7 @@ class Job:
             farm_pos = logic.get_farm_waiting_position(char)
             if farm_pos:
                 char.goal = farm_pos
+                char.goal_zone = None  # Farms are always exterior
             return logic.continue_theft(char)
         
         # Critical hunger - start looking for food to steal
@@ -859,6 +1004,7 @@ class Job:
             if ready_cell:
                 char.theft_target = ready_cell
                 char.goal = (ready_cell[0] + 0.5, ready_cell[1] + 0.5)
+                char.goal_zone = None  # Farms are always exterior
                 return logic.continue_theft(char)
             else:
                 # No ready crops - wait near farm
@@ -866,6 +1012,7 @@ class Job:
                 farm_pos = logic.get_farm_waiting_position(char)
                 if farm_pos:
                     char.goal = farm_pos
+                    char.goal_zone = None  # Farms are always exterior
                 return False
         
         return False
@@ -956,11 +1103,13 @@ class SoldierJob(Job):
     
     @classmethod
     def get_enlistment_goal(cls, char, state, logic):
-        """Go to barracks to enlist."""
+        """Go to barracks to enlist. Returns (position, zone) tuple or (None, None)."""
         military_area = state.get_area_by_role('military_housing')
         if military_area and state.get_area_at(char.x, char.y) != military_area:
-            return logic._nearest_in_area(char, military_area)
-        return None
+            pos = logic._nearest_in_area(char, military_area)
+            if pos:
+                return pos, None  # Barracks is exterior
+        return None, None
     
     # =========================================================================
     # DECIDE - Soldiers have modified priorities
@@ -1011,7 +1160,7 @@ class SoldierJob(Job):
                 return True
             char.goal = None
         else:
-            char.goal = (criminal.x, criminal.y)
+            logic.set_goal_to_character(char, criminal)
         return False
     
     def _do_patrol(self, char, state, logic):
@@ -1063,6 +1212,7 @@ class SoldierJob(Job):
             target_x, target_y = waypoints[waypoint_idx]
         
         char.goal = (target_x, target_y)
+        char.goal_zone = None  # Patrol is always exterior
         return False
 
 
