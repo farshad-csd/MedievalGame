@@ -110,9 +110,9 @@ class GameState:
     def _init_interiors(self):
         """Initialize interior spaces for all houses."""
         for house in self.interactables.get_all_houses():
-            # Create an 8x8 interior for each house
+            # Create a 6x6 interior for each house
             # Interior is white/empty cells by default
-            interior = self.interiors.create_interior(house, width=8, height=8)
+            interior = self.interiors.create_interior(house, width=6, height=6)
             
             # Link interior to house for easy access
             house.interior = interior

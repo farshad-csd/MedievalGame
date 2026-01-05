@@ -182,11 +182,38 @@ class Bed(Interactable):
     """
     Sleeping spot that can be owned by a character.
     Associated with a home area.
+    Beds are 2 cells tall visually, but have expanded collision bounds.
     """
     
-    def __init__(self, name, x, y, home=None, owner=None, zone=None):
+    def __init__(self, name, x, y, home=None, owner=None, zone=None, height=2):
         super().__init__(name, x, y, home, zone=zone)
         self.owner = owner
+        self.height = height  # Visual height (2 cells)
+        # Collision padding - extends hitbox beyond visual bounds
+        self.collision_pad_top = 0.3     # Extend collision above bed
+        self.collision_pad_bottom = 0.5  # Extend collision below bed (front)
+        self.collision_pad_left = 0.2    # Extend collision left
+        self.collision_pad_right = 0.2   # Extend collision right
+    
+    @property
+    def center(self):
+        """Get center point (for distance calculations). Accounts for height."""
+        return (self.x + 0.5, self.y + self.height / 2)
+    
+    @property
+    def collision_bounds(self):
+        """Get expanded collision bounds (x_min, y_min, x_max, y_max)."""
+        return (
+            self.x - self.collision_pad_left,
+            self.y - self.collision_pad_top,
+            self.x + 1 + self.collision_pad_right,
+            self.y + self.height + self.collision_pad_bottom
+        )
+    
+    def contains_point(self, px, py):
+        """Check if a point is within the bed's collision area."""
+        x_min, y_min, x_max, y_max = self.collision_bounds
+        return (x_min <= px < x_max and y_min <= py < y_max)
     
     def assign_owner(self, owner_name):
         """Assign an owner to this bed."""
@@ -353,7 +380,8 @@ class InteractableManager:
                 name=bed_def["name"],
                 x=x, y=y,
                 home=bed_def.get("home"),
-                zone=zone
+                zone=zone,
+                height=bed_def.get("height", 2)  # Default to 2 cells tall visually
             )
             # Key includes zone to allow same coords in different zones
             self.beds[(x, y, zone)] = bed

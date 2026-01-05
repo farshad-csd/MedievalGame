@@ -105,11 +105,12 @@ OCCLUDER_CONFIG = {
     'bed': {
         'sort_y_offset': 0.5,      # Middle of cell
         'occlusion_height': 0.6,   # Bed is low
-        'occlusion_width': 0.5,    # Narrower than a full cell
-        'draw_height_mult': 0.85,  # Draw height = cell_size * 0.85
-        'draw_aspect': 1.0,        # Square
+        'occlusion_width': 0.5,    # 1 cell wide
+        'draw_height_mult': 1.7,   # Draw height = cell_size * 1.7 (2 cells tall)
+        'draw_aspect': 0.5,        # Width/height ratio (1 cell wide, 2 cells tall)
         'texture_key': 'bed',
         'animated': False,
+        'height': 2,               # Bed spans 2 cells vertically (visual)
     },
     'stove': {
         'sort_y_offset': 0.5,      # Middle of cell
@@ -324,6 +325,16 @@ class BoardGUI:
             'house_s': 'sprites/House_S.png',
             'house_m': 'sprites/House_M.png',
             'grass': 'sprites/Grass_BG.png',
+            # Interior sprites
+            'interior_floor': 'sprites/Interior_Floor.png',
+            'interior_back_wall': 'sprites/Interior_BackWall.png',
+            'interior_back_wall_window': 'sprites/Interior_BackWallWindow.png',
+            'interior_south_wall': 'sprites/Interior_SouthWall.png',
+            'interior_east_wall': 'sprites/Interior_EastWall.png',
+            'interior_west_wall': 'sprites/Interior_WestWall.png',
+            # Object sprites
+            'bed': 'sprites/Bed.png',
+            'stove': 'sprites/Stove.png',
         }
         
         for name, filename in sprite_files.items():
@@ -1115,6 +1126,10 @@ class BoardGUI:
         - Right wall at x=width (with centered window)
         - Front wall at y=height (with door)
         - Floor tiles from (0,0) to (width-1, height-1) - all walkable
+        
+        Corner priority:
+        - Front wall (south) takes priority at y=height corners
+        - Side walls (east/west) take priority at y=-1 corners (back wall)
         """
         player = self.state.player
         
@@ -1134,63 +1149,73 @@ class BoardGUI:
         cell_size = self._cam_cell_size
         tile_size = int(cell_size) + 1
         
-        # Colors
+        # Fallback colors (used if textures missing)
         floor_color = rl.Color(240, 235, 220, 255)
         wall_color = rl.Color(120, 100, 80, 255)
         window_color = rl.Color(150, 200, 255, 180)
         door_color = rl.Color(139, 90, 43, 255)
-        grid_color = rl.Color(180, 175, 160, 100)
+        
+        # Get textures
+        floor_tex = self.world_textures.get('interior_floor')
+        back_wall_tex = self.world_textures.get('interior_back_wall')
+        back_wall_window_tex = self.world_textures.get('interior_back_wall_window')
+        south_wall_tex = self.world_textures.get('interior_south_wall')
+        east_wall_tex = self.world_textures.get('interior_east_wall')
+        west_wall_tex = self.world_textures.get('interior_west_wall')
         
         # Helper to check if a position has a window
         def has_window_at(x, y):
             return any(w.interior_x == x and w.interior_y == y for w in interior.windows)
         
-        # Draw extra back wall row at y=-2 (solid wall, no windows)
-        for x in range(-1, interior.width + 1):
-            screen_x, screen_y = self._world_to_screen(x, -2)
-            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, wall_color)
-            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        # Helper to draw a tile with texture or fallback color
+        def draw_tile(screen_x, screen_y, tex, fallback_color):
+            if tex:
+                source = rl.Rectangle(0, 0, tex.width, tex.height)
+                dest = rl.Rectangle(int(screen_x), int(screen_y), tile_size, tile_size)
+                rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            else:
+                rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, fallback_color)
         
-        # Draw back wall row at y=-1
+        # Draw extra back wall row at y=-2 (solid wall, no windows) - excludes corners
+        for x in range(interior.width):
+            screen_x, screen_y = self._world_to_screen(x, -2)
+            draw_tile(screen_x, screen_y, back_wall_tex, wall_color)
+        
+        # Draw back wall row at y=-1 (may have windows) - excludes corners (side walls handle those)
         for x in range(interior.width):
             screen_x, screen_y = self._world_to_screen(x, -1)
-            color = window_color if has_window_at(x, -1) else wall_color
-            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
-            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+            if has_window_at(x, -1):
+                draw_tile(screen_x, screen_y, back_wall_window_tex, window_color)
+            else:
+                draw_tile(screen_x, screen_y, back_wall_tex, wall_color)
         
-        # Draw left wall column at x=-1 (from y=-1 to y=height)
-        for y in range(-1, interior.height + 1):
+        # Draw left wall column at x=-1 (from y=-2 to y=height-1, NOT including front wall row)
+        # Side walls take priority at back corners (y=-2, y=-1)
+        for y in range(-2, interior.height):
             screen_x, screen_y = self._world_to_screen(-1, y)
-            color = window_color if has_window_at(-1, y) else wall_color
-            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
-            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+            draw_tile(screen_x, screen_y, west_wall_tex, wall_color)
         
-        # Draw right wall column at x=width (from y=-1 to y=height)
-        for y in range(-1, interior.height + 1):
+        # Draw right wall column at x=width (from y=-2 to y=height-1, NOT including front wall row)
+        # Side walls take priority at back corners (y=-2, y=-1)
+        for y in range(-2, interior.height):
             screen_x, screen_y = self._world_to_screen(interior.width, y)
-            color = window_color if has_window_at(interior.width, y) else wall_color
-            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
-            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+            draw_tile(screen_x, screen_y, east_wall_tex, wall_color)
         
-        # Draw front wall row at y=height (with door)
-        for x in range(interior.width):
+        # Draw front wall row at y=height (with door) - INCLUDES corners (south takes priority)
+        for x in range(-1, interior.width + 1):
             screen_x, screen_y = self._world_to_screen(x, interior.height)
             is_door = (x == interior.door_x)
             if is_door:
-                color = door_color
-            elif has_window_at(x, interior.height):
-                color = window_color
+                # Door
+                rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, door_color)
             else:
-                color = wall_color
-            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
-            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+                draw_tile(screen_x, screen_y, south_wall_tex, wall_color)
         
         # Draw floor tiles (y=0 to y=height-1, x=0 to x=width-1, all walkable floor)
         for y in range(interior.height):
             for x in range(interior.width):
                 screen_x, screen_y = self._world_to_screen(x, y)
-                rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, floor_color)
-                rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+                draw_tile(screen_x, screen_y, floor_tex, floor_color)
         
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
@@ -1280,6 +1305,7 @@ class BoardGUI:
         if (x, y) in self._road_set:
             return ROAD_COLOR
         
+        # Only show farm cell colors for actual farmable cells
         farm_cell = self.state.get_farm_cell_state(x, y)
         if farm_cell:
             return FARM_CELL_COLORS.get(farm_cell['state'], BG_COLOR)
@@ -1288,7 +1314,9 @@ class BoardGUI:
         if area:
             for area_def in AREAS:
                 if area_def["name"] == area:
-                    if area_def.get("role") == "village":
+                    role = area_def.get("role")
+                    # Make these area types transparent (just show background)
+                    if role in ("village", "house", "farmhouse", "farm"):
                         return BG_COLOR
                     return area_def.get("color", BG_COLOR)
         
@@ -1518,22 +1546,45 @@ class BoardGUI:
                     rl.draw_rectangle(int(screen_x), int(screen_y), int(width), int(height), rl.WHITE)
                 continue
             
-            # Special handling for beds (no texture, draw solid shape for mask)
+            # Special handling for beds (2 cells tall visually, use texture or solid shape for mask)
             if occluder_type == 'bed':
                 screen_x, screen_y = self._world_to_screen(ox, oy)
-                padding = int(4 * self.zoom)
-                bed_size = int(cell_size - 2*padding)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 bed_size, bed_size, rl.WHITE)
+                tex = self.world_textures.get('bed')
+                
+                if tex:
+                    # Bed is 1 cell wide, 2 cells tall
+                    bed_width = int(cell_size * 0.9)
+                    bed_height = int(cell_size * 2 * 0.85)
+                    blit_x = screen_x + (cell_size - bed_width) / 2
+                    blit_y = screen_y + (cell_size * 0.1)
+                    source = rl.Rectangle(0, 0, tex.width, tex.height)
+                    dest = rl.Rectangle(blit_x, blit_y, bed_width, bed_height)
+                    rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+                else:
+                    padding = int(4 * self.zoom)
+                    bed_width = int(cell_size - 2*padding)
+                    bed_height = int(cell_size * 2 - 2*padding)
+                    rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
+                                     bed_width, bed_height, rl.WHITE)
                 continue
             
-            # Special handling for stoves (no texture, draw solid shape for mask)
+            # Special handling for stoves (use texture or solid shape for mask)
             if occluder_type == 'stove':
                 screen_x, screen_y = self._world_to_screen(ox, oy)
-                padding = int(4 * self.zoom)
-                stove_size = int(cell_size - 2*padding)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 stove_size, stove_size, rl.WHITE)
+                tex = self.world_textures.get('stove')
+                
+                if tex:
+                    stove_size = int(cell_size * 0.8)
+                    blit_x = screen_x + (cell_size - stove_size) / 2
+                    blit_y = screen_y + (cell_size - stove_size) / 2
+                    source = rl.Rectangle(0, 0, tex.width, tex.height)
+                    dest = rl.Rectangle(blit_x, blit_y, stove_size, stove_size)
+                    rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+                else:
+                    padding = int(4 * self.zoom)
+                    stove_size = int(cell_size - 2*padding)
+                    rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
+                                     stove_size, stove_size, rl.WHITE)
                 continue
             
             # Special handling for barrels
@@ -1711,43 +1762,72 @@ class BoardGUI:
                 rl.draw_rectangle(int(screen_x), int(screen_y), int(width), int(height), hex_to_color("#C4813D"))
             return
         
-        # Special handling for beds (no texture, draw programmatically)
+        # Special handling for beds (use texture, 2 cells tall visually)
         if occluder_type == 'bed':
             screen_x, screen_y = self._world_to_screen(x, y)
-            padding = int(4 * self.zoom)
-            bed_size = int(cell_size - 2*padding)
+            tex = self.world_textures.get('bed')
             
-            # Bed base (blue)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             bed_size, bed_size, hex_to_color("#4169E1"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   bed_size, bed_size, hex_to_color("#2a4494"))
-            
-            # Pillow
-            pillow_height = int(8 * self.zoom)
-            pillow_margin = int(3 * self.zoom)
-            rl.draw_rectangle(int(screen_x + padding + pillow_margin),
-                             int(screen_y + padding + 2*self.zoom),
-                             bed_size - 2*pillow_margin, pillow_height,
-                             rl.WHITE)
+            if tex:
+                # Bed is 1 cell wide, 2 cells tall
+                bed_width = int(cell_size * 0.9)
+                bed_height = int(cell_size * 2 * 0.85)
+                
+                # Center horizontally in cell
+                blit_x = screen_x + (cell_size - bed_width) / 2
+                blit_y = screen_y + (cell_size * 0.1)  # Small offset from top
+                
+                source = rl.Rectangle(0, 0, tex.width, tex.height)
+                dest = rl.Rectangle(blit_x, blit_y, bed_width, bed_height)
+                rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            else:
+                # Fallback: draw programmatically
+                padding = int(4 * self.zoom)
+                bed_width = int(cell_size - 2*padding)
+                bed_height = int(cell_size * 2 - 2*padding)
+                
+                # Bed base (blue)
+                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
+                                 bed_width, bed_height, hex_to_color("#4169E1"))
+                rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
+                                       bed_width, bed_height, hex_to_color("#2a4494"))
+                
+                # Pillow at top
+                pillow_height = int(8 * self.zoom)
+                pillow_margin = int(3 * self.zoom)
+                rl.draw_rectangle(int(screen_x + padding + pillow_margin),
+                                 int(screen_y + padding + 2*self.zoom),
+                                 bed_width - 2*pillow_margin, pillow_height,
+                                 rl.WHITE)
             return
         
-        # Special handling for stoves (no texture, draw programmatically)
+        # Special handling for stoves (use texture)
         if occluder_type == 'stove':
             screen_x, screen_y = self._world_to_screen(x, y)
-            padding = int(4 * self.zoom)
-            stove_size = int(cell_size - 2*padding)
+            tex = self.world_textures.get('stove')
             
-            # Stove base (dark gray)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             stove_size, stove_size, hex_to_color("#444444"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   stove_size, stove_size, hex_to_color("#222222"))
-            
-            # Draw "S" text
-            text_x = int(screen_x + cell_size / 2 - 4)
-            text_y = int(screen_y + cell_size / 2 - 8)
-            rl.draw_text("S", text_x, text_y, 16, rl.Color(255, 150, 50, 255))
+            if tex:
+                stove_size = int(cell_size * 0.8)
+                blit_x = screen_x + (cell_size - stove_size) / 2
+                blit_y = screen_y + (cell_size - stove_size) / 2
+                
+                source = rl.Rectangle(0, 0, tex.width, tex.height)
+                dest = rl.Rectangle(blit_x, blit_y, stove_size, stove_size)
+                rl.draw_texture_pro(tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            else:
+                # Fallback: draw programmatically
+                padding = int(4 * self.zoom)
+                stove_size = int(cell_size - 2*padding)
+                
+                # Stove base (dark gray)
+                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
+                                 stove_size, stove_size, hex_to_color("#444444"))
+                rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
+                                       stove_size, stove_size, hex_to_color("#222222"))
+                
+                # Draw "S" text
+                text_x = int(screen_x + cell_size / 2 - 4)
+                text_y = int(screen_y + cell_size / 2 - 8)
+                rl.draw_text("S", text_x, text_y, 16, rl.Color(255, 150, 50, 255))
             return
         
         # Standard occluder drawing (tree, barrel, etc.)
