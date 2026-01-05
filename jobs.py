@@ -358,7 +358,11 @@ class Job:
             can_perceive, _ = logic.can_perceive_character(char, attacker)
             if not can_perceive:
                 char.clear_intent()
+                char['face_target'] = None  # Clear face target
                 return False
+            
+            # Set face_target so they backpedal (face attacker while moving away)
+            char['face_target'] = attacker
             
             # Check distance - use prevailing coords if same zone
             if char.zone is not None and char.zone == attacker.zone:
@@ -386,6 +390,7 @@ class Job:
             else:
                 # Safe distance - switch to watching
                 char.goal = None
+                char['face_target'] = None  # Clear - _face_target will handle it
                 self._face_target(char, attacker)
                 char.set_intent('watch', attacker, reason='bystander', started_tick=state.ticks)
                 return False
@@ -527,6 +532,7 @@ class Job:
             # Bystanders stay bystanders, victims stay victims
             if reason == 'bystander':
                 char.set_intent('flee', threat, reason='bystander', started_tick=state.ticks)
+                char['face_target'] = threat  # Backpedal while watching
             else:
                 char.set_intent('flee', threat, reason='threat_approaching', started_tick=state.ticks)
             
@@ -546,6 +552,7 @@ class Job:
         
         # Stand still and face threat
         char.goal = None
+        char['face_target'] = None  # Not moving, clear face target
         self._face_target(char, threat)
         
         # Only victims (monitoring_threat) look for defenders and try to go home

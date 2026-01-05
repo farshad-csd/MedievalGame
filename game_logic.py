@@ -2341,7 +2341,26 @@ class GameLogic:
             return random.choice([-1, 1])
 
     def _update_facing_from_velocity(self, char):
-        """Update character's facing direction based on velocity."""
+        """Update character's facing direction based on velocity.
+        
+        If char has a 'face_target' set (another character), face them instead
+        of the movement direction. This allows backpedaling.
+        """
+        # Check for face_target override first
+        face_target = char.get('face_target')
+        if face_target and face_target in self.state.characters:
+            # Face the target instead of movement direction
+            if char.zone == face_target.zone and char.zone is not None:
+                dx = face_target.prevailing_x - char.prevailing_x
+                dy = face_target.prevailing_y - char.prevailing_y
+            else:
+                dx = face_target.x - char.x
+                dy = face_target.y - char.y
+            
+            if abs(dx) > 0.01 or abs(dy) > 0.01:
+                self._update_facing(char, dx, dy)
+                return
+        
         vx = char.get('vx', 0.0)
         vy = char.get('vy', 0.0)
         

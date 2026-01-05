@@ -423,6 +423,7 @@ class Character:
     def clear_intent(self):
         """Clear current intent."""
         self.intent = None
+        self['face_target'] = None  # Also clear face target
     
     def set_intent(self, action, target, reason=None, started_tick=None):
         """Set current intent.
