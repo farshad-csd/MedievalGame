@@ -138,11 +138,9 @@ class PlayerController:
         new_x = player.x + vx * dt
         new_y = player.y + vy * dt
         
-        # Keep within bounds
-        half_width = player.width / 2
-        half_height = player.height / 2
-        new_x = max(half_width, min(SIZE - half_width, new_x))
-        new_y = max(half_height, min(SIZE - half_height, new_y))
+        # Keep within bounds (allow touching edges)
+        new_x = max(0, min(SIZE, new_x))
+        new_y = max(0, min(SIZE, new_y))
         
         # Try to move, handling collisions
         self._apply_movement_with_collision(player, new_x, new_y, vx, vy, dt)
@@ -499,19 +497,18 @@ class PlayerController:
         new_x = player.prevailing_x + vx * dt
         new_y = player.prevailing_y + vy * dt
         
-        # Keep within interior bounds
-        half_width = player.width / 2
-        half_height = player.height / 2
-        new_x = max(half_width, min(interior.width - half_width, new_x))
-        new_y = max(half_height, min(interior.height - half_height, new_y))
+        # Keep within interior bounds (allow touching edges)
+        new_x = max(0, min(interior.width, new_x))
+        new_y = max(0, min(interior.height, new_y))
         
-        # Check collision within interior
-        if not interior.is_position_blocked(new_x, new_y):
+        # Check collision using unified system (same as exterior)
+        zone = interior.name
+        if not self.state.is_position_blocked(new_x, new_y, exclude_char=player, zone=zone):
             player.prevailing_x = new_x
             player.prevailing_y = new_y
         else:
             # Try sliding along axes
-            if not interior.is_position_blocked(new_x, player.prevailing_y):
+            if not self.state.is_position_blocked(new_x, player.prevailing_y, exclude_char=player, zone=zone):
                 player.prevailing_x = new_x
-            elif not interior.is_position_blocked(player.prevailing_x, new_y):
+            elif not self.state.is_position_blocked(player.prevailing_x, new_y, exclude_char=player, zone=zone):
                 player.prevailing_y = new_y

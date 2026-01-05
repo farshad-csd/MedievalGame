@@ -132,21 +132,25 @@ class DebugWindowProcess:
         
         # Build barrel data
         barrels = {}
-        for pos, barrel in self.state.interactables.barrels.items():
-            barrels[pos] = {
+        for barrel in self.state.interactables.barrels.values():
+            key = (barrel.x, barrel.y, barrel.zone)
+            barrels[key] = {
                 'name': barrel.name,
                 'home': barrel.home,
                 'owner': barrel.owner,
                 'inventory': barrel.inventory[:],
+                'zone': barrel.zone,
             }
         
         # Build bed data
         beds = {}
-        for pos, bed in self.state.interactables.beds.items():
-            beds[pos] = {
+        for bed in self.state.interactables.beds.values():
+            key = (bed.x, bed.y, bed.zone)
+            beds[key] = {
                 'name': bed.name,
                 'home': bed.home,
                 'owner': bed.owner,
+                'zone': bed.zone,
             }
         
         # Player info for status

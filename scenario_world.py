@@ -142,6 +142,8 @@ HOUSES = _generate_houses()
 #       - Objects in WORLD coordinates (exterior)
 #   house/farmhouse: 1 barrel, 1 bed, 1 stove
 #       - Objects in INTERIOR coordinates with zone set to interior name
+#       - Interior layout: back wall at y=-1, floor from y=0 to y=height-1
+#       - Objects placed at y=0 (against back wall)
 #   market, village, encampment, farm: nothing
 #
 # Positioning:
@@ -149,10 +151,10 @@ HOUSES = _generate_houses()
 #     - Barrel at (x_start, y_end - 1)
 #     - Beds in row: (x_start + 1, y_end - 1), (x_start + 2, y_end - 1), ...
 #     - Stove at (x_end - 1, y_end - 1)
-#   House/Farmhouse (interior coords): Objects in top row of interior
-#     - Barrel at (0, 0)
-#     - Bed at (1, 0)
-#     - Stove at (2, 0)
+#   House/Farmhouse (interior coords): Objects against back wall
+#     - Barrel at (0, 0) - back-left
+#     - Bed at (1, 0) - next to barrel
+#     - Stove at (2, 0) - next to bed
 
 def _generate_objects():
     """Generate barrels, beds, and stoves based on area roles and bounds."""
@@ -202,28 +204,29 @@ def _generate_objects():
             # Objects inside the house interior (not world coordinates)
             # Interior is typically 4x4, objects placed in interior coordinate space
             # Zone is set to the house name (which matches interior name)
+            # y=0 is the floor row against the back wall (back wall is at y=-1)
             interior_name = name  # Interior uses same name as house
             
-            # Barrel at interior position (0, 0) - top-left
+            # Barrel at interior position (0, 0) - back-left corner
             barrels.append({
                 "name": f"{name} Barrel",
-                "position": [0, 0],  # Interior coordinates
+                "position": [0, 0],  # Interior coordinates (against back wall)
                 "home": name,
                 "zone": interior_name
             })
             
-            # Bed at interior position (1, 0)
+            # Bed at interior position (1, 0) - next to barrel
             beds.append({
                 "name": f"{name} Bed",
-                "position": [1, 0],  # Interior coordinates
+                "position": [1, 0],  # Interior coordinates (against back wall)
                 "home": name,
                 "zone": interior_name
             })
             
-            # Stove at interior position (2, 0)
+            # Stove at interior position (2, 0) - next to bed
             stoves.append({
                 "name": f"{name} Stove",
-                "position": [2, 0],  # Interior coordinates
+                "position": [2, 0],  # Interior coordinates (against back wall)
                 "home": name,
                 "zone": interior_name
             })

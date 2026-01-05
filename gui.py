@@ -1106,7 +1106,16 @@ class BoardGUI:
             self._draw_window_viewing_indicator()
     
     def _draw_interior_canvas(self):
-        """Draw the interior when player is inside a building or looking in from outside."""
+        """Draw the interior when player is inside a building or looking in from outside.
+        
+        Interior layout (for width x height walkable floor):
+        - Back wall at y=-2 (extra back row)
+        - Back wall at y=-1 (with centered window)
+        - Left wall at x=-1 (with centered window)
+        - Right wall at x=width (with centered window)
+        - Front wall at y=height (with door)
+        - Floor tiles from (0,0) to (width-1, height-1) - all walkable
+        """
         player = self.state.player
         
         # Determine which interior to render
@@ -1123,56 +1132,65 @@ class BoardGUI:
             return
         
         cell_size = self._cam_cell_size
+        tile_size = int(cell_size) + 1
         
-        # Interior floor color (white-ish)
+        # Colors
         floor_color = rl.Color(240, 235, 220, 255)
         wall_color = rl.Color(120, 100, 80, 255)
         window_color = rl.Color(150, 200, 255, 180)
         door_color = rl.Color(139, 90, 43, 255)
+        grid_color = rl.Color(180, 175, 160, 100)
         
-        # Draw interior cells
+        # Helper to check if a position has a window
+        def has_window_at(x, y):
+            return any(w.interior_x == x and w.interior_y == y for w in interior.windows)
+        
+        # Draw extra back wall row at y=-2 (solid wall, no windows)
+        for x in range(-1, interior.width + 1):
+            screen_x, screen_y = self._world_to_screen(x, -2)
+            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, wall_color)
+            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        
+        # Draw back wall row at y=-1
+        for x in range(interior.width):
+            screen_x, screen_y = self._world_to_screen(x, -1)
+            color = window_color if has_window_at(x, -1) else wall_color
+            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
+            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        
+        # Draw left wall column at x=-1 (from y=-1 to y=height)
+        for y in range(-1, interior.height + 1):
+            screen_x, screen_y = self._world_to_screen(-1, y)
+            color = window_color if has_window_at(-1, y) else wall_color
+            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
+            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        
+        # Draw right wall column at x=width (from y=-1 to y=height)
+        for y in range(-1, interior.height + 1):
+            screen_x, screen_y = self._world_to_screen(interior.width, y)
+            color = window_color if has_window_at(interior.width, y) else wall_color
+            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
+            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        
+        # Draw front wall row at y=height (with door)
+        for x in range(interior.width):
+            screen_x, screen_y = self._world_to_screen(x, interior.height)
+            is_door = (x == interior.door_x)
+            if is_door:
+                color = door_color
+            elif has_window_at(x, interior.height):
+                color = window_color
+            else:
+                color = wall_color
+            rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, color)
+            rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
+        
+        # Draw floor tiles (y=0 to y=height-1, x=0 to x=width-1, all walkable floor)
         for y in range(interior.height):
             for x in range(interior.width):
                 screen_x, screen_y = self._world_to_screen(x, y)
-                
-                tile_size = int(cell_size) + 1
-                
-                # Check if this is a wall edge
-                is_wall_top = (y == 0)
-                is_wall_bottom = (y == interior.height - 1)
-                is_wall_left = (x == 0)
-                is_wall_right = (x == interior.width - 1)
-                is_wall = is_wall_top or is_wall_bottom or is_wall_left or is_wall_right
-                
-                # Check if this is the door
-                is_door = (x == interior.door_x and y == interior.door_y)
-                
-                # Check if this is a window
-                is_window = any(w.interior_x == x and w.interior_y == y 
-                               for w in interior.windows)
-                
-                # Choose color
-                if is_door:
-                    color = door_color
-                elif is_window:
-                    color = window_color
-                elif is_wall:
-                    color = wall_color
-                else:
-                    color = floor_color
-                
-                rl.draw_rectangle(
-                    int(screen_x), int(screen_y),
-                    tile_size, tile_size,
-                    color
-                )
-                
-                # Draw grid lines
-                rl.draw_rectangle_lines(
-                    int(screen_x), int(screen_y),
-                    tile_size, tile_size,
-                    rl.Color(180, 175, 160, 100)
-                )
+                rl.draw_rectangle(int(screen_x), int(screen_y), tile_size, tile_size, floor_color)
+                rl.draw_rectangle_lines(int(screen_x), int(screen_y), tile_size, tile_size, grid_color)
         
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
@@ -1962,12 +1980,12 @@ void main() {
             self._draw_single_occluder('tree', pos, tree)
     
     def _draw_barrels(self):
-        """Draw all barrels"""
+        """Draw all barrels (legacy - now handled by _draw_trees_and_characters)"""
         cell_size = self._cam_cell_size
         barrel_tex = self.world_textures.get('barrel')
         
-        for pos, barrel in self.state.interactables.barrels.items():
-            x, y = pos
+        for barrel in self.state.interactables.barrels.values():
+            x, y = barrel.x, barrel.y
             screen_x, screen_y = self._world_to_screen(x, y)
             
             if barrel_tex:
@@ -1985,11 +2003,11 @@ void main() {
                                  hex_to_color("#8B4513"))
     
     def _draw_beds(self):
-        """Draw all beds"""
+        """Draw all beds (legacy - now handled by _draw_trees_and_characters)"""
         cell_size = self._cam_cell_size
         
-        for pos, bed in self.state.interactables.beds.items():
-            x, y = pos
+        for bed in self.state.interactables.beds.values():
+            x, y = bed.x, bed.y
             screen_x, screen_y = self._world_to_screen(x, y)
             
             padding = int(4 * self.zoom)
@@ -2010,11 +2028,11 @@ void main() {
                              rl.WHITE)
     
     def _draw_stoves(self):
-        """Draw all stoves"""
+        """Draw all stoves (legacy - now handled by _draw_trees_and_characters)"""
         cell_size = self._cam_cell_size
         
-        for pos, stove in self.state.interactables.stoves.items():
-            x, y = pos
+        for stove in self.state.interactables.stoves.values():
+            x, y = stove.x, stove.y
             screen_x, screen_y = self._world_to_screen(x, y)
             
             padding = int(4 * self.zoom)
@@ -2314,13 +2332,11 @@ void main() {
             # Interior - stoves block vision
             interior = self.state.interiors.get_interior(zone)
             if interior:
-                for pos, stove in self.state.interactables.stoves.items():
-                    sx, sy = pos
-                    house = interior.house
-                    y_start, x_start, y_end, x_end = house.bounds
-                    if x_start <= sx < x_end and y_start <= sy < y_end:
-                        int_x, int_y = interior.world_to_interior(sx + 0.5, sy + 0.5)
-                        obstacles.append((int_x, int_y, 0.4))
+                for stove in self.state.interactables.stoves.values():
+                    if stove.zone != zone:
+                        continue
+                    # Stove is in interior coords
+                    obstacles.append((stove.x + 0.5, stove.y + 0.5, 0.4))
         
         return obstacles
     
@@ -3017,7 +3033,7 @@ void main() {
             }
         
         # Check for adjacent barrel
-        for pos, barrel in self.state.interactables.barrels.items():
+        for barrel in self.state.interactables.barrels.values():
             if barrel.is_adjacent(player):
                 actions = []
                 if barrel.can_use(player):
@@ -3031,7 +3047,7 @@ void main() {
                 }
         
         # Check for adjacent bed
-        for pos, bed in self.state.interactables.beds.items():
+        for bed in self.state.interactables.beds.values():
             if bed.is_adjacent(player):
                 is_owned = bed.is_owned_by(player.name)
                 if is_owned or not bed.is_owned():

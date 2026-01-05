@@ -63,9 +63,9 @@ class Interior:
         # Windows - positions where perception crosses boundary
         self.windows = []  # List of Window objects
         
-        # Door position (in interior coordinates)
+        # Door position (in interior coordinates) - in front wall
         self.door_x = self.width // 2
-        self.door_y = self.height - 1  # Bottom edge by default
+        self.door_y = self.height  # Front wall (outside walkable area)
         
         # Door position in exterior (world) coordinates
         self.exterior_door_x = self.exterior_x + self.exterior_width // 2
@@ -157,9 +157,10 @@ class Interior:
         Get the position a character should be placed at when entering.
         
         Returns:
-            (interior_x, interior_y) tuple - centered on door
+            (interior_x, interior_y) tuple - just inside the door (on floor)
         """
-        return (self.door_x + 0.5, self.door_y + 0.5)
+        # Door is in front wall at y=height, spawn player just inside at y=height-1
+        return (self.door_x + 0.5, self.height - 0.5)
     
     def get_exit_position(self):
         """
@@ -170,9 +171,10 @@ class Interior:
         """
         return (self.exterior_door_x + 0.5, self.exterior_door_y + 0.5)
     
-    def is_at_door(self, interior_x, interior_y, threshold=1.0):
+    def is_at_door(self, interior_x, interior_y, threshold=1.5):
         """
         Check if a position is at the door (for exiting).
+        Door is in front wall at y=height. Player can exit from last floor row.
         
         Args:
             interior_x: X position in interior
@@ -183,7 +185,8 @@ class Interior:
             True if at door
         """
         dx = abs(interior_x - (self.door_x + 0.5))
-        dy = abs(interior_y - (self.door_y + 0.5))
+        # Check if near bottom of floor (y approaching height)
+        dy = abs(interior_y - (self.height - 0.5))
         return dx < threshold and dy < threshold
     
     # =========================================================================
@@ -214,21 +217,17 @@ class Interior:
     
     def setup_default_windows(self):
         """
-        Set up default windows on each wall.
-        Places one window on each wall, centered.
+        Set up default windows on walls around the interior (except front).
+        Walls are at: y=-1 (back), y=height (front), x=-1 (left), x=width (right)
         """
-        # North wall (top)
-        self.add_window(self.width // 2, 0, 'north')
+        # North wall (back wall at y=-1) - centered window
+        self.add_window(self.width // 2, -1, 'north')
         
-        # South wall (bottom) - skip if door is there
-        if self.door_y != self.height - 1 or self.door_x != self.width // 2:
-            self.add_window(self.width // 2, self.height - 1, 'south')
+        # East wall (right wall at x=width)
+        self.add_window(self.width, self.height // 2, 'east')
         
-        # East wall (right)
-        self.add_window(self.width - 1, self.height // 2, 'east')
-        
-        # West wall (left)
-        self.add_window(0, self.height // 2, 'west')
+        # West wall (left wall at x=-1)
+        self.add_window(-1, self.height // 2, 'west')
     
     def __repr__(self):
         return f"<Interior '{self.name}' {self.width}x{self.height} -> {self.exterior_width}x{self.exterior_height}>"

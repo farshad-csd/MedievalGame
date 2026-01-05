@@ -472,13 +472,16 @@ class GameLogic:
         best_pos = None
         best_dist = float('inf')
         
-        # Check stoves the character can use (home matches)
-        for pos, stove in self.state.interactables.stoves.items():
+        # Check stoves the character can use (home matches and same zone)
+        char_zone = getattr(char, 'zone', None)
+        for stove in self.state.interactables.stoves.values():
             if not stove.can_use(char):
                 continue
-            sx, sy = pos
-            stove_cx = sx + 0.5
-            stove_cy = sy + 0.5
+            # Only consider stoves in the same zone
+            if stove.zone != char_zone:
+                continue
+            stove_cx = stove.x + 0.5
+            stove_cy = stove.y + 0.5
             dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
             if dist < best_dist:
                 best_dist = dist
@@ -514,12 +517,15 @@ class GameLogic:
         best_pos = None
         best_dist = float('inf')
         
-        for pos, stove in self.state.interactables.stoves.items():
+        char_zone = getattr(char, 'zone', None)
+        for stove in self.state.interactables.stoves.values():
             if not stove.can_use(char):
                 continue
-            sx, sy = pos
-            stove_cx = sx + 0.5
-            stove_cy = sy + 0.5
+            # Only consider stoves in the same zone
+            if stove.zone != char_zone:
+                continue
+            stove_cx = stove.x + 0.5
+            stove_cy = stove.y + 0.5
             dist = math.sqrt((char['x'] - stove_cx) ** 2 + (char['y'] - stove_cy) ** 2)
             if dist < best_dist:
                 best_dist = dist
@@ -851,18 +857,12 @@ class GameLogic:
             # Interior - stoves block vision, beds don't (too low)
             interior = self.state.interiors.get_interior(zone)
             if interior:
-                # Check stoves in this interior
-                for pos, stove in self.state.interactables.stoves.items():
-                    # Need to check if stove is in this interior
-                    # Stoves are in world coords, convert to check
-                    sx, sy = pos
-                    # Check if stove position projects into this interior
-                    house = interior.house
-                    y_start, x_start, y_end, x_end = house.bounds
-                    if x_start <= sx < x_end and y_start <= sy < y_end:
-                        # Convert to interior coords
-                        int_x, int_y = interior.world_to_interior(sx + 0.5, sy + 0.5)
-                        obstacles.append((int_x, int_y, 0.4))
+                # Check stoves in this interior (zone matches interior name)
+                for stove in self.state.interactables.stoves.values():
+                    if stove.zone != zone:
+                        continue
+                    # Stove is in interior coords
+                    obstacles.append((stove.x + 0.5, stove.y + 0.5, 0.4))
         
         return obstacles
     
@@ -1851,11 +1851,9 @@ class GameLogic:
             new_x = char['x'] + vx * dt
             new_y = char['y'] + vy * dt
             
-            # Keep within bounds
-            half_width = char.get('width', CHARACTER_WIDTH) / 2
-            half_height = char.get('height', CHARACTER_HEIGHT) / 2
-            new_x = max(half_width, min(SIZE - half_width, new_x))
-            new_y = max(half_height, min(SIZE - half_height, new_y))
+            # Keep within bounds (allow touching edges)
+            new_x = max(0, min(SIZE, new_x))
+            new_y = max(0, min(SIZE, new_y))
             
             # Check for collision with other characters
             if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
@@ -2345,9 +2343,9 @@ class GameLogic:
             nx = char['x'] + math.cos(angle) * distance
             ny = char['y'] + math.sin(angle) * distance
             
-            # Clamp to bounds
-            nx = max(0.5, min(SIZE - 0.5, nx))
-            ny = max(0.5, min(SIZE - 0.5, ny))
+            # Clamp to bounds (allow touching edges)
+            nx = max(0, min(SIZE, nx))
+            ny = max(0, min(SIZE, ny))
             
             # Check if this is a farm cell
             cell_x, cell_y = int(nx), int(ny)

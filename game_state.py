@@ -277,7 +277,7 @@ class GameState:
         """Check if position is within bounds (works with float positions)"""
         return 0 <= x < SIZE and 0 <= y < SIZE
     
-    def is_position_blocked(self, x, y, exclude_char=None):
+    def is_position_blocked(self, x, y, exclude_char=None, zone=None):
         """Check if a position would hard-collide with any character or obstacle.
         Uses a small collision radius to allow characters to squeeze past each other
         like in ALTTP - characters can overlap significantly but can't stand on same spot.
@@ -285,69 +285,102 @@ class GameState:
         Args:
             x, y: Position to check (float)
             exclude_char: Character to exclude from check (for self-collision)
+            zone: Which zone to check collisions in (None=exterior, interior_name=inside)
+                  If not provided but exclude_char is, uses exclude_char's zone
         """
-        # Check tree collisions (trees are solid obstacles)
-        tree_collision_radius = 0.4  # Trees block most of their cell
-        for tree_pos in self.interactables.trees.keys():
-            tree_x, tree_y = tree_pos
-            tree_center_x = tree_x + 0.5
-            tree_center_y = tree_y + 0.5
-            dx = abs(x - tree_center_x)
-            dy = abs(y - tree_center_y)
-            if dx < tree_collision_radius and dy < tree_collision_radius:
-                return True
+        # Infer zone from exclude_char if not explicitly provided
+        if zone is None and exclude_char is not None:
+            zone = getattr(exclude_char, 'zone', None)
         
-        # Check house collisions (houses block their footprint minus 1 cell from top, plus a buffer)
-        house_collision_buffer = 0.35  # Buffer around house edges
-        for house in self.interactables.houses.values():
-            y_start, x_start, y_end, x_end = house.bounds
-            # Use y_start + 1 to make houses 1 cell shorter from top (allows walking behind)
-            effective_y_start = y_start + 1
-            # Expand bounds by buffer for collision
-            if (x_start - house_collision_buffer <= x < x_end + house_collision_buffer and
-                effective_y_start - house_collision_buffer <= y < y_end + house_collision_buffer):
-                return True
+        # Interior wall collision - check bounds when in an interior
+        if zone is not None:
+            interior = self.interiors.get_interior(zone)
+            if interior:
+                wall_buffer = 0.3
+                # Block if outside walkable floor area
+                if x < wall_buffer or x > interior.width - wall_buffer:
+                    return True
+                if y < wall_buffer or y > interior.height - wall_buffer:
+                    return True
         
-        # Check barrel collisions (barrels block most of their cell)
+        # Trees only exist in exterior (zone=None)
+        if zone is None:
+            tree_collision_radius = 0.4  # Trees block most of their cell
+            for tree_pos in self.interactables.trees.keys():
+                tree_x, tree_y = tree_pos
+                tree_center_x = tree_x + 0.5
+                tree_center_y = tree_y + 0.5
+                dx = abs(x - tree_center_x)
+                dy = abs(y - tree_center_y)
+                if dx < tree_collision_radius and dy < tree_collision_radius:
+                    return True
+        
+        # Houses only exist in exterior (zone=None)
+        if zone is None:
+            house_collision_buffer = 0.35  # Buffer around house edges
+            for house in self.interactables.houses.values():
+                y_start, x_start, y_end, x_end = house.bounds
+                # Use y_start + 1 to make houses 1 cell shorter from top (allows walking behind)
+                effective_y_start = y_start + 1
+                # Expand bounds by buffer for collision
+                if (x_start - house_collision_buffer <= x < x_end + house_collision_buffer and
+                    effective_y_start - house_collision_buffer <= y < y_end + house_collision_buffer):
+                    return True
+        
+        # Check barrel collisions - only in same zone
         barrel_collision_radius = 0.35
-        for barrel_pos in self.interactables.barrels.keys():
-            barrel_x, barrel_y = barrel_pos
-            barrel_center_x = barrel_x + 0.5
-            barrel_center_y = barrel_y + 0.5
+        for barrel in self.interactables.barrels.values():
+            if barrel.zone != zone:
+                continue
+            barrel_center_x = barrel.x + 0.5
+            barrel_center_y = barrel.y + 0.5
             dx = abs(x - barrel_center_x)
             dy = abs(y - barrel_center_y)
             if dx < barrel_collision_radius and dy < barrel_collision_radius:
                 return True
         
-        # Check bed collisions (beds block most of their cell)
+        # Check bed collisions - only in same zone
         bed_collision_radius = 0.35
-        for bed_pos in self.interactables.beds.keys():
-            bed_x, bed_y = bed_pos
-            bed_center_x = bed_x + 0.5
-            bed_center_y = bed_y + 0.5
+        for bed in self.interactables.beds.values():
+            if bed.zone != zone:
+                continue
+            bed_center_x = bed.x + 0.5
+            bed_center_y = bed.y + 0.5
             dx = abs(x - bed_center_x)
             dy = abs(y - bed_center_y)
             if dx < bed_collision_radius and dy < bed_collision_radius:
                 return True
         
-        # Check stove collisions (stoves block most of their cell)
+        # Check stove collisions - only in same zone
         stove_collision_radius = 0.35
-        for stove_pos in self.interactables.stoves.keys():
-            stove_x, stove_y = stove_pos
-            stove_center_x = stove_x + 0.5
-            stove_center_y = stove_y + 0.5
+        for stove in self.interactables.stoves.values():
+            if stove.zone != zone:
+                continue
+            stove_center_x = stove.x + 0.5
+            stove_center_y = stove.y + 0.5
             dx = abs(x - stove_center_x)
             dy = abs(y - stove_center_y)
             if dx < stove_collision_radius and dy < stove_collision_radius:
                 return True
         
-        # Check character collisions
+        # Check character collisions - only in same zone
         for char in self.characters:
             if char is exclude_char:
                 continue
+            # Only collide with characters in the same zone
+            char_zone = char.zone if hasattr(char, 'zone') else None
+            if char_zone != zone:
+                continue
+            # Use interior coords when in interior, world coords otherwise
+            if zone is not None:
+                char_x = char.prevailing_x
+                char_y = char.prevailing_y
+            else:
+                char_x = char.x
+                char_y = char.y
             # Use small collision radius - characters can squeeze past each other
-            dx = abs(char['x'] - x)
-            dy = abs(char['y'] - y)
+            dx = abs(char_x - x)
+            dy = abs(char_y - y)
             # Only block if centers are VERY close (within 2x collision radius)
             collision_dist = CHARACTER_COLLISION_RADIUS * 2
             if dx < collision_dist and dy < collision_dist:

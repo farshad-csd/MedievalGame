@@ -42,17 +42,29 @@ class Interactable:
     
     def distance_to(self, char):
         """Calculate distance from character to this object's center.
-        Only meaningful if character and object are in the same zone.
+        Uses interior coords (prevailing_x/y) when both are in same interior zone,
+        world coords (x/y) when both are in exterior.
         """
         cx, cy = self.center
-        return math.sqrt((char.x - cx) ** 2 + (char.y - cy) ** 2)
+        
+        # Use interior coords when object is in an interior
+        if self.zone is not None:
+            # Character must have interior coords set if they're in an interior
+            char_x = char.prevailing_x
+            char_y = char.prevailing_y
+        else:
+            # Use world coords for exterior objects
+            char_x = char.x
+            char_y = char.y
+        
+        return math.sqrt((char_x - cx) ** 2 + (char_y - cy) ** 2)
     
     def is_adjacent(self, char):
         """Check if character is adjacent to this object.
         Character must be in the same zone (interior or exterior) as the object.
         """
-        # Check zone match first
-        char_zone = getattr(char, 'zone', None)
+        # Check zone match first - both must be in same zone
+        char_zone = char.zone if hasattr(char, 'zone') else None
         if char_zone != self.zone:
             return False
         return self.distance_to(char) <= ADJACENCY_DISTANCE
