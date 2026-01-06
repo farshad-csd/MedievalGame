@@ -35,7 +35,7 @@ import time
 
 # Animation timing
 WALK_FRAME_DURATION = 0.12  # 120ms per frame = 480ms per cycle (4 frames)
-SPRINT_FRAME_DURATION = 0.08  # 80ms per frame = 320ms per cycle
+SPRINT_FRAME_DURATION = 0.1  # 80ms per frame = 320ms per cycle
 ATTACK_FRAME_DURATION = 0.06  # 60ms per frame = 240ms for full attack (4 frames)
 DEATH_FRAME_DURATION = 0.15  # Not used much with 1 frame
 

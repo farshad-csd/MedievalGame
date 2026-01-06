@@ -95,6 +95,7 @@ CHARACTER_TEMPLATES = {
         "morality": 5,
         "starting_allegiance": None,
         "starting_job": None,
+        "starting_home": "Dunmere Farmhouse 2",
         "starting_money": 50,
         "starting_wheat": 0,
         "starting_age": 22,

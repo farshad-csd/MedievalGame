@@ -27,13 +27,15 @@ from constants import (
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
     SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE, SHOW_PERCEPTION_DEBUG,
-    ADJACENCY_DISTANCE, SKILLS
+    ADJACENCY_DISTANCE, SKILLS, START_MUTED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
 from sprites import get_sprite_manager
+from dialogue import DialogueSystem, get_nearest_interactable_npc
+from environment_menu import EnvironmentMenu
 
 
 # =============================================================================
@@ -158,12 +160,8 @@ class InputState:
         # Actions
         self.attack = False
         self.eat = False
-        self.trade = False
-        self.bake = False
-        self.make_camp = False
         self.recenter = False
-        self.door_interact = False  # Enter/exit buildings
-        self.window_look = False    # Toggle window "security camera" view
+        self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
         self.pan_x = 0.0
@@ -175,6 +173,7 @@ class InputState:
         self.pause = False
         self.menu = False
         self.inventory_toggle = False
+        self.environment_menu_toggle = False
         
         # Mouse state
         self.mouse_x = 0
@@ -209,6 +208,12 @@ class BoardGUI:
         self.state = GameState()
         self.logic = GameLogic(self.state)
         self.player_controller = PlayerController(self.state, self.logic)
+        
+        # Dialogue system
+        self.dialogue = DialogueSystem(self.state, self.logic)
+        
+        # Environment interaction menu
+        self.environment_menu = EnvironmentMenu(self.state, self.logic)
         
         # Input state
         self.input = InputState()
@@ -275,6 +280,12 @@ class BoardGUI:
         # Spatial hash for trees (built once, massive performance improvement)
         self._tree_spatial_hash = None
         self._tree_spatial_chunk_size = 16  # 16x16 cell chunks
+        
+        # Track health/stamina for bar visibility
+        self._char_prev_health = {}  # char_name -> previous health
+        self._char_prev_stamina = {}  # char_name -> previous stamina
+        self._char_show_bars_until = {}  # char_name -> time to show bars until
+        self._bar_display_duration = 3.0  # Show bars for 3 seconds after change
     
     def _init_window(self):
         """Initialize Raylib window with appropriate size."""
@@ -315,12 +326,15 @@ class BoardGUI:
         # Initialize audio
         rl.init_audio_device()
         
+        # Mute state
+        self.is_muted = START_MUTED
+        
         # Load and play background music
         music_path = os.path.join(self.script_dir, "Forest__8-Bit_Music_.mp3")
         self.music = None
         if os.path.exists(music_path):
             self.music = rl.load_music_stream(music_path)
-            rl.set_music_volume(self.music, 0.3)
+            rl.set_music_volume(self.music, 0.0 if self.is_muted else 0.3)
             rl.play_music_stream(self.music)
     
     def _load_resources(self):
@@ -466,6 +480,43 @@ class BoardGUI:
         rl.close_audio_device()
         rl.close_window()
     
+    def _toggle_mute(self):
+        """Toggle music mute state"""
+        self.is_muted = not self.is_muted
+        if self.music:
+            rl.set_music_volume(self.music, 0.0 if self.is_muted else 0.3)
+    
+    def _handle_environment_action(self, action):
+        """Handle an action selected from the environment menu.
+        
+        Args:
+            action: The action string selected (e.g., "Harvest", "Plant", "Build Campfire", "Build")
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        name = player.get_display_name()
+        
+        if action == "Harvest":
+            # Instant harvest via game logic (handles theft detection)
+            if not self.logic.player_harvest_cell(player):
+                self.state.log_action(f"{name} couldn't harvest here.")
+        
+        elif action == "Plant":
+            # Instant plant via game logic
+            if not self.logic.player_plant_cell(player):
+                self.state.log_action(f"{name} couldn't plant here.")
+        
+        elif action == "Build Campfire":
+            # Build a campfire at current location
+            if not self.logic.make_camp(player):
+                self.state.log_action(f"{name} can't make a camp here")
+        
+        elif action == "Build":
+            # TODO: Open build menu (future feature)
+            self.state.log_action(f"{name} looks around for building materials...")
+    
     # =========================================================================
     # INPUT HANDLING
     # =========================================================================
@@ -475,18 +526,39 @@ class BoardGUI:
         # Reset per-frame input state
         self.input.attack = False
         self.input.eat = False
-        self.input.trade = False
-        self.input.bake = False
-        self.input.make_camp = False
         self.input.recenter = False
         self.input.pause = False
         self.input.inventory_toggle = False
+        self.input.environment_menu_toggle = False
         self.input.zoom_in = False
         self.input.zoom_out = False
         self.input.mouse_left_click = False
         self.input.mouse_right_click = False
-        self.input.door_interact = False
-        self.input.window_look = False
+        self.input.interact = False
+        
+        # Handle dialogue input first (blocks other input when active)
+        if self.dialogue.is_active:
+            self.dialogue.handle_input()
+            # Still need to handle window resize
+            if rl.is_window_resized():
+                self.window_width = rl.get_screen_width()
+                self.window_height = rl.get_screen_height()
+                self.canvas_width = self.window_width
+                self.canvas_height = self.window_height
+            return
+        
+        # Handle environment menu input (blocks other input when active)
+        if self.environment_menu.is_active:
+            action = self.environment_menu.handle_input()
+            if action and action != "closed":
+                self._handle_environment_action(action)
+            # Still need to handle window resize
+            if rl.is_window_resized():
+                self.window_width = rl.get_screen_width()
+                self.window_height = rl.get_screen_height()
+                self.canvas_width = self.window_width
+                self.canvas_height = self.window_height
+            return
         
         # Handle resize
         if rl.is_window_resized():
@@ -551,24 +623,20 @@ class BoardGUI:
         
         # Actions (key pressed, not held)
         if rl.is_key_pressed(rl.KEY_E):
-            self.input.eat = True
-        if rl.is_key_pressed(rl.KEY_T):
-            self.input.trade = True
-        if rl.is_key_pressed(rl.KEY_B):
-            self.input.bake = True
-        if rl.is_key_pressed(rl.KEY_C):
-            self.input.make_camp = True
+            self.input.interact = True  # E for unified interact (NPC, door, window, stove)
+        if rl.is_key_pressed(rl.KEY_Q):
+            self.input.eat = True       # Q for eat
         if rl.is_key_pressed(rl.KEY_R):
             self.input.recenter = True
         if rl.is_key_pressed(rl.KEY_ESCAPE):
             self.input.pause = True
-        if rl.is_key_pressed(rl.KEY_F):
-            self.input.door_interact = True  # F to enter/exit buildings
-        if rl.is_key_pressed(rl.KEY_V):
-            self.input.window_look = True    # V to look through windows
+        if rl.is_key_pressed(rl.KEY_M):
+            self._toggle_mute()         # M for mute/unmute music
+        if rl.is_key_pressed(rl.KEY_G):
+            self.input.environment_menu_toggle = True  # G for environment menu
         
-        # Inventory toggle (I or Tab)
-        if rl.is_key_pressed(rl.KEY_I) or rl.is_key_pressed(rl.KEY_TAB):
+        # Inventory toggle (Tab only)
+        if rl.is_key_pressed(rl.KEY_TAB):
             self.input.inventory_toggle = True
         
         # Zoom
@@ -644,26 +712,22 @@ class BoardGUI:
             self.input.zoom_in = True
         
         # Face buttons
-        # A/Cross - Attack
+        # A/Cross - Interact (unified: NPC, door, window, stove)
         if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_DOWN):
-            self.input.attack = True
+            self.input.interact = True
         
-        # B/Circle - Make camp
-        if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_RIGHT):
-            self.input.make_camp = True
+        # B/Circle - (unused - closes menus when open)
         
-        # X/Square - Trade
+        # X/Square - Environment menu
         if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_LEFT):
-            self.input.trade = True
+            self.input.environment_menu_toggle = True
         
         # Y/Triangle - Eat
         if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP):
             self.input.eat = True
         
         # Bumpers
-        # Left bumper - Bake
-        if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1):
-            self.input.bake = True
+        # Left bumper - (unused)
         
         # Right bumper - Sprint (hold)
         self.input.sprint = self.input.sprint or rl.is_gamepad_button_down(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_TRIGGER_1)
@@ -691,6 +755,20 @@ class BoardGUI:
         
         # Block movement while viewing through window
         if self.window_viewing:
+            if self.player_moving:
+                self.player_controller.stop_movement()
+                self.player_moving = False
+            return
+        
+        # Block movement during dialogue
+        if self.dialogue.is_active:
+            if self.player_moving:
+                self.player_controller.stop_movement()
+                self.player_moving = False
+            return
+        
+        # Block movement when environment menu is open
+        if self.environment_menu.is_active:
             if self.player_moving:
                 self.player_controller.stop_movement()
                 self.player_moving = False
@@ -733,108 +811,127 @@ class BoardGUI:
         if self.inventory_open:
             return
         
+        # Unified interact (E key / A button) - handles NPC, door, window, stove
+        if self.input.interact:
+            self._handle_unified_interact()
+        
         if self.input.attack:
             self.player_controller.handle_attack_input()
         
         if self.input.eat:
             self.player_controller.handle_eat_input()
-        
-        if self.input.trade:
-            self.player_controller.handle_trade_input()
-        
-        if self.input.bake:
-            self.player_controller.handle_bake_input()
-        
-        if self.input.make_camp:
-            self._handle_make_camp()
-        
-        if self.input.door_interact:
-            self._handle_door_interact()
-        
-        if self.input.window_look:
-            self._handle_window_look()
     
-    def _handle_door_interact(self):
-        """Handle door interaction - enter/exit buildings."""
-        if self.player_controller.handle_door_input():
-            # Successfully entered/exited - update camera
-            player = self.state.player
-            if player:
+    def _handle_unified_interact(self):
+        """Handle unified interact (E key / A button).
+        
+        Checks for interactables in priority order:
+        1. If window viewing → toggle off
+        2. NPC → start dialogue
+        3. Door → enter/exit building  
+        4. Window → start window viewing
+        5. Stove/campfire → bake bread
+        6. Barrel → take wheat
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        # Priority 1: If currently window viewing, toggle it off
+        if self.window_viewing:
+            self._toggle_window_view_off()
+            return
+        
+        # Priority 2: Check for nearby NPC
+        npc = get_nearest_interactable_npc(self.state, player)
+        if npc:
+            if self.dialogue.can_start_dialogue(npc):
+                self.dialogue.start_dialogue(npc)
+                return
+            else:
+                self.state.log_action(f"{npc.get_display_name()} is busy!")
+                return
+        
+        # Priority 3: Check for door
+        house = self.state.get_adjacent_door(player)
+        if house:
+            if self.player_controller.handle_door_input():
+                # Successfully entered/exited - update camera
+                self.camera_x = player.x
+                self.camera_y = player.y
+                return
+        
+        # Priority 4: Check for window
+        window = self.player_controller.handle_window_input()
+        if window:
+            self._start_window_viewing(window)
+            return
+        
+        # Priority 5: Check for stove/campfire (baking)
+        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
+        if cooking_spot:
+            self.player_controller.handle_bake_input()
+            return
+        
+        # Priority 6: Check for barrel
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                self.player_controller.handle_barrel_input()
+                return
+        
+        # Nothing to interact with - give feedback
+        self.state.log_action("Nothing to interact with")
+    
+    def _toggle_window_view_off(self):
+        """Stop window viewing and recenter on player."""
+        player = self.state.player
+        self.window_viewing = False
+        self.window_viewing_window = None
+        self.window_viewing_interior = None
+        self.camera_following_player = True
+        if player:
+            player.viewing_through_window = None
+            player.viewing_into_interior = None
+            if player.zone:
+                self.camera_x = player.prevailing_x
+                self.camera_y = player.prevailing_y
+            else:
                 self.camera_x = player.x
                 self.camera_y = player.y
     
-    def _handle_window_look(self):
-        """Handle window look toggle - security camera view."""
+    def _start_window_viewing(self, window):
+        """Start viewing through a window."""
         player = self.state.player
-        
-        if self.window_viewing:
-            # Currently viewing - stop viewing and recenter on player
-            self.window_viewing = False
-            self.window_viewing_window = None
-            self.window_viewing_interior = None
-            self.camera_following_player = True
-            if player:
-                # Clear player's window viewing state (for game logic)
-                player.viewing_through_window = None
-                player.viewing_into_interior = None
-                # Use local coords when inside (for interior rendering)
-                if player.zone:
-                    self.camera_x = player.prevailing_x
-                    self.camera_y = player.prevailing_y
-                else:
-                    self.camera_x = player.x
-                    self.camera_y = player.y
+        if not player:
             return
         
-        # Try to start viewing
-        window = self.player_controller.handle_window_input()
-        if window:
-            if player.zone is not None:
-                # Inside looking out - camera goes to exterior position
-                look_x, look_y = window.get_exterior_look_position()
-                self.camera_x = look_x
-                self.camera_y = look_y
-                self.window_viewing_interior = None
-                # Store on player for game logic
-                player.viewing_through_window = window
-                player.viewing_into_interior = None
-            else:
-                # Outside looking in - camera goes to interior center
-                interior = window.interior
-                self.camera_x = interior.width / 2
-                self.camera_y = interior.height / 2
-                self.window_viewing_interior = interior
-                # Store on player for game logic
-                player.viewing_through_window = window
-                player.viewing_into_interior = interior
-            
-            self.window_viewing = True
-            self.window_viewing_window = window
-            self.camera_following_player = False
+        if player.zone is not None:
+            # Inside looking out - camera goes to exterior position
+            look_x, look_y = window.get_exterior_look_position()
+            self.camera_x = look_x
+            self.camera_y = look_y
+            self.window_viewing_interior = None
+            player.viewing_through_window = window
+            player.viewing_into_interior = None
+        else:
+            # Outside looking in - camera goes to interior center
+            interior = window.interior
+            self.camera_x = interior.width / 2
+            self.camera_y = interior.height / 2
+            self.window_viewing_interior = interior
+            player.viewing_through_window = window
+            player.viewing_into_interior = interior
+        
+        self.window_viewing = True
+        self.window_viewing_window = window
+        self.camera_following_player = False
     
     def _apply_camera_input(self):
         """Apply camera control input"""
         player = self.state.player
         
-        # Don't allow camera changes while window viewing (except to exit)
+        # Don't allow camera changes while window viewing
+        # Use E (unified interact) to exit window viewing, not R
         if self.window_viewing:
-            # Only allow recenter to exit window viewing
-            if self.input.recenter:
-                self.window_viewing = False
-                self.window_viewing_window = None
-                self.window_viewing_interior = None
-                self.camera_following_player = True
-                if player:
-                    # Clear player's window viewing state (for game logic)
-                    player.viewing_through_window = None
-                    player.viewing_into_interior = None
-                    # Use local coords when inside (for interior rendering)
-                    if player.zone:
-                        self.camera_x = player.prevailing_x
-                        self.camera_y = player.prevailing_y
-                    else:
-                        self.camera_x = player.x
-                        self.camera_y = player.y
             return
         
         # Recenter on player
@@ -875,14 +972,22 @@ class BoardGUI:
                 self.camera_y = player.y
     
     def _apply_ui_input(self):
-        """Apply UI input (pause, inventory)"""
+        """Apply UI input (pause, inventory, environment menu)"""
         # Escape = toggle pause (always, regardless of inventory state)
         if self.input.pause:
             self.state.paused = not self.state.paused
         
-        # Inventory toggle (I/Tab or Select button)
+        # Environment menu toggle (G or X button)
+        if self.input.environment_menu_toggle:
+            if self.environment_menu.is_active:
+                self.environment_menu.close()
+            else:
+                self.environment_menu.open()
+        
+        # Inventory toggle (Tab or Select button) - but not if environment menu is open
         if self.input.inventory_toggle:
-            self.inventory_open = not self.inventory_open
+            if not self.environment_menu.is_active:
+                self.inventory_open = not self.inventory_open
         
         # Tab switching in inventory (Q/E or bumpers)
         if self.inventory_open:
@@ -1022,27 +1127,6 @@ class BoardGUI:
         
         return True
     
-    def _handle_make_camp(self):
-        """Handle player camp creation"""
-        player = self.state.player
-        if not player:
-            return
-        
-        name = player.get_display_name()
-        
-        if player.get('camp_position'):
-            self.state.log_action(f"{name} already has a camp")
-            return
-        
-        cell_x = int(player.x)
-        cell_y = int(player.y)
-        
-        if not self.logic.can_make_camp_at(cell_x, cell_y):
-            self.state.log_action(f"{name} can't make a camp here (must be outside village)")
-            return
-        
-        self.logic.make_camp(player)
-    
     # =========================================================================
     # GAME LOOP
     # =========================================================================
@@ -1097,6 +1181,12 @@ class BoardGUI:
             else:
                 self.camera_x = player.x
                 self.camera_y = player.y
+        
+        # Update dialogue system (runs even when game is unpaused)
+        self.dialogue.update(dt)
+        
+        # Update environment menu
+        self.environment_menu.update(dt)
     
     # =========================================================================
     # RENDERING
@@ -1122,6 +1212,12 @@ class BoardGUI:
         else:
             self._draw_hud()
         t2 = time.time()
+        
+        # Draw dialogue UI (on top of everything)
+        self.dialogue.render(self.canvas_width, self.canvas_height)
+        
+        # Draw environment menu (on top of everything)
+        self.environment_menu.render(self.canvas_width, self.canvas_height)
         
         rl.end_drawing()
         
@@ -1230,10 +1326,6 @@ class BoardGUI:
         self._draw_death_animations()
         _cp_t5 = time.time()
         self._canvas_profile['death'] += _cp_t5 - _cp_t4
-        
-        # Draw window viewing indicator
-        if self.window_viewing:
-            self._draw_window_viewing_indicator()
         
         self._canvas_profile_count += 1
         if self._canvas_profile_count >= 60:
@@ -1362,42 +1454,6 @@ class BoardGUI:
         # Draw perception debug if enabled
         if SHOW_PERCEPTION_DEBUG:
             self._draw_perception_debug()
-        
-        # Draw interior name at top
-        if self.window_viewing_interior is not None:
-            name_text = f"Viewing: {interior.name}"
-            hint_text = "V or R - Stop viewing"
-        else:
-            name_text = f"Inside: {interior.name}"
-            hint_text = "F - Exit | V - Look through window"
-        
-        text_width = rl.measure_text(name_text, 16)
-        rl.draw_text(name_text, 
-                    int(self.canvas_width / 2 - text_width / 2), 
-                    20, 16, COLOR_TEXT_BRIGHT)
-        
-        # Draw controls hint
-        hint_width = rl.measure_text(hint_text, 12)
-        rl.draw_text(hint_text,
-                    int(self.canvas_width / 2 - hint_width / 2),
-                    45, 12, COLOR_TEXT_DIM)
-    
-    def _draw_window_viewing_indicator(self):
-        """Draw an indicator that player is viewing through a window."""
-        # Draw vignette effect at edges to indicate "viewing through"
-        vignette_color = rl.Color(0, 0, 0, 100)
-        
-        # Top bar
-        rl.draw_rectangle(0, 0, self.canvas_width, 40, vignette_color)
-        # Bottom bar
-        rl.draw_rectangle(0, self.canvas_height - 40, self.canvas_width, 40, vignette_color)
-        
-        # Window viewing label
-        label = "Looking through window (V to return, R to exit)"
-        label_width = rl.measure_text(label, 14)
-        rl.draw_text(label,
-                    int(self.canvas_width / 2 - label_width / 2),
-                    10, 14, COLOR_TEXT_BRIGHT)
     
     def _world_to_screen(self, world_x, world_y):
         """Convert world coordinates to screen coordinates"""
@@ -2632,9 +2688,38 @@ void main() {
         text_y = int(pixel_cy + sprite_height / 3.2)
         rl.draw_text(first_name, text_x, text_y, 10, rl.WHITE)
         
-        # Draw HP and Stamina bars when health < 100
+        # Check if we should show HP/Stamina bars
+        char_name = char['name']
         health = char.get('health', 100)
-        if health < 100:
+        stamina = char.get('stamina', 100)
+        is_sprinting = char.get('is_sprinting', False)
+        current_time = time.time()
+        
+        # Get previous values
+        prev_health = self._char_prev_health.get(char_name, health)
+        prev_stamina = self._char_prev_stamina.get(char_name, stamina)
+        
+        # Check if values changed
+        health_changed = abs(health - prev_health) > 0.1
+        stamina_changed = abs(stamina - prev_stamina) > 0.1
+        
+        # Update previous values
+        self._char_prev_health[char_name] = health
+        self._char_prev_stamina[char_name] = stamina
+        
+        # If changed, extend the show timer
+        if health_changed or stamina_changed:
+            self._char_show_bars_until[char_name] = current_time + self._bar_display_duration
+        
+        # Determine if we should show bars
+        show_bars_timer = self._char_show_bars_until.get(char_name, 0)
+        should_show_bars = (
+            is_sprinting or 
+            current_time < show_bars_timer or
+            health < 100
+        )
+        
+        if should_show_bars:
             bar_width = sprite_width
             bar_height = max(3, int(4 * self.zoom))
             bar_x = int(pixel_cx - bar_width / 2)
@@ -2654,7 +2739,6 @@ void main() {
                                  rl.Color(COLOR_HEALTH.r, COLOR_HEALTH.g, COLOR_HEALTH.b, 220))
             
             # Stamina bar (below HP bar)
-            stamina = char.get('stamina', 100)
             stamina_bar_y = hp_bar_y + bar_height + bar_gap
             
             # Background
@@ -3217,13 +3301,11 @@ void main() {
         self._draw_stat_bars(player)
         
         # Bottom-left: Item slots (below stat bars)
-        self._draw_item_slots(player)
+        # TODO: Hotkey slots will be implemented later (requires conditions not yet in game)
+        # self._draw_item_slots(player)
         
         # Top-right: Location and time
         self._draw_location_time()
-        
-        # Bottom-right: Context actions (what can player interact with)
-        self._draw_context_actions(player)
         
         # Top-left: Minimal debug info (optional)
         self._draw_debug_info()
@@ -3355,10 +3437,15 @@ void main() {
     
     def _draw_context_actions(self, player):
         """Draw available actions based on what player is near"""
-        context = self._get_player_context(player)
-        
         x = self.canvas_width - HUD_MARGIN
         y = self.canvas_height - HUD_MARGIN - 140
+        
+        # If window viewing, show stop viewing action
+        if self.window_viewing:
+            self._draw_action_prompt(x, y, 'E', 'Stop Viewing')
+            return
+        
+        context = self._get_player_context(player)
         
         # Always show self-actions first (eat, etc.)
         self_actions = self._get_self_actions(player)
@@ -3394,7 +3481,7 @@ void main() {
         # Eat bread if hungry and has bread
         bread_count = player.get_item('bread')
         if bread_count > 0 and player.hunger < 80:
-            actions.append({'key': 'E', 'label': 'Eat Bread'})
+            actions.append({'key': 'Q', 'label': 'Eat Bread'})
         
         # Make camp if outside village and doesn't have one
         if not player.get('camp_position'):
@@ -3405,16 +3492,15 @@ void main() {
         return actions
     
     def _draw_action_prompt(self, right_x, y, key, label):
-        """Draw a single action prompt like [E] Trade"""
+        """Draw a single action prompt like [E] Interact"""
         is_controller = self.input.gamepad_connected
         
         # Map keyboard keys to controller buttons
         controller_map = {
-            'E': 'A',
-            'T': 'X', 
-            'B': 'LB',
-            'C': 'B',
-            'F': 'Y',
+            'E': 'A',     # Primary interact
+            'Q': 'Y',     # Eat
+            'C': 'B',     # Make camp
+            'LMB': 'RT',  # Attack
         }
         
         display_key = controller_map.get(key, key) if is_controller else key
@@ -3440,8 +3526,24 @@ void main() {
         rl.draw_text(label, label_x, y, HUD_FONT_SIZE_MEDIUM, COLOR_TEXT_DIM)
     
     def _get_player_context(self, player):
-        """Determine what the player can interact with"""
+        """Determine what the player can interact with.
+        
+        Returns the nearest interactable in priority order, with 'E' as the 
+        unified interact key for everything.
+        
+        Priority order:
+        1. NPC (dialogue)
+        2. Door (enter/exit)
+        3. Window (look through)
+        4. Stove (bake bread)
+        5. Campfire (bake bread)
+        6. Barrel (storage access)
+        7. Bed (future: sleep)
+        """
         # Check for adjacent characters (NPCs) - must be in same zone
+        nearest_npc = None
+        nearest_npc_dist = float('inf')
+        
         for char in self.state.characters:
             if char == player:
                 continue
@@ -3456,66 +3558,18 @@ void main() {
                 dist = math.sqrt((player.prevailing_x - char.prevailing_x)**2 + (player.prevailing_y - char.prevailing_y)**2)
             else:
                 dist = math.sqrt((player.x - char.x)**2 + (player.y - char.y)**2)
-            if dist <= ADJACENCY_DISTANCE:
-                actions = []
-                
-                # Check if this is a vendor
-                job = char.get('job')
-                if job in ('Farmer', 'Trader'):
-                    actions.append({'key': 'T', 'label': 'Trade'})
-                
-                # Attack is always available
-                actions.append({'key': 'LMB', 'label': 'Attack'})
-                
-                return {
-                    'type': job if job else 'Character',
-                    'name': char.get_display_name(),
-                    'actions': actions
-                }
+            
+            if dist <= ADJACENCY_DISTANCE and dist < nearest_npc_dist:
+                nearest_npc = char
+                nearest_npc_dist = dist
         
-        # Check for adjacent stove
-        stove = self.state.interactables.get_adjacent_stove(player)
-        if stove and stove.can_use(player):
+        if nearest_npc:
+            job = nearest_npc.get('job')
             return {
-                'type': 'Stove',
-                'name': stove.name,
-                'actions': [{'key': 'B', 'label': 'Bake Bread'}]
+                'type': job if job else 'Character',
+                'name': nearest_npc.get_display_name(),
+                'actions': [{'key': 'E', 'label': 'Talk'}]
             }
-        
-        # Check for adjacent campfire
-        campfire = self.state.interactables.get_adjacent_campfire(player)
-        if campfire:
-            return {
-                'type': 'Campfire',
-                'name': 'Campfire',
-                'actions': [{'key': 'B', 'label': 'Bake Bread'}]
-            }
-        
-        # Check for adjacent barrel
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                actions = []
-                if barrel.can_use(player):
-                    wheat_count = barrel.get_wheat()
-                    if wheat_count > 0:
-                        actions.append({'key': 'T', 'label': f'Take Wheat ({wheat_count})'})
-                return {
-                    'type': 'Barrel',
-                    'name': barrel.name,
-                    'actions': actions if actions else [{'key': '-', 'label': 'Empty'}]
-                }
-        
-        # Check for adjacent bed
-        for bed in self.state.interactables.beds.values():
-            if bed.is_adjacent(player):
-                is_owned = bed.is_owned_by(player.name)
-                if is_owned or not bed.is_owned():
-                    # Could sleep here
-                    return {
-                        'type': 'Bed',
-                        'name': bed.name,
-                        'actions': []  # Sleep not implemented yet
-                    }
         
         # Check for door (entering/exiting buildings)
         house = self.state.get_adjacent_door(player)
@@ -3525,14 +3579,14 @@ void main() {
                 return {
                     'type': 'Door',
                     'name': house.name,
-                    'actions': [{'key': 'F', 'label': 'Enter'}]
+                    'actions': [{'key': 'E', 'label': 'Enter'}]
                 }
             else:
                 # Inside - can exit
                 return {
                     'type': 'Door',
                     'name': 'Exit',
-                    'actions': [{'key': 'F', 'label': 'Exit Building'}]
+                    'actions': [{'key': 'E', 'label': 'Exit Building'}]
                 }
         
         # Check for window (inside looking out, or outside looking in)
@@ -3545,7 +3599,7 @@ void main() {
                         return {
                             'type': 'Window',
                             'name': f'Window ({window.facing})',
-                            'actions': [{'key': 'V', 'label': 'Look Outside'}]
+                            'actions': [{'key': 'E', 'label': 'Look Outside'}]
                         }
         else:
             # Outside - check if near exterior window AND facing it
@@ -3560,8 +3614,64 @@ void main() {
                             return {
                                 'type': 'Window',
                                 'name': f'{house.name} Window',
-                                'actions': [{'key': 'V', 'label': 'Look Inside'}]
+                                'actions': [{'key': 'E', 'label': 'Look Inside'}]
                             }
+        
+        # Check for adjacent stove
+        stove = self.state.interactables.get_adjacent_stove(player)
+        if stove:
+            if stove.can_use(player):
+                return {
+                    'type': 'Stove',
+                    'name': stove.name,
+                    'actions': [{'key': 'E', 'label': 'Bake Bread'}]
+                }
+            else:
+                return {
+                    'type': 'Stove',
+                    'name': stove.name,
+                    'actions': [{'key': '-', 'label': 'Not your stove'}]
+                }
+        
+        # Check for adjacent campfire (camps are stored on characters as camp_position)
+        for other_char in self.state.characters:
+            camp_pos = other_char.get('camp_position')
+            if camp_pos and self.state.interactables.is_adjacent_to_camp(player, camp_pos):
+                owner_name = other_char.get_display_name()
+                return {
+                    'type': 'Campfire',
+                    'name': f"{owner_name}'s Campfire",
+                    'actions': [{'key': 'E', 'label': 'Bake Bread'}]
+                }
+        
+        # Check for adjacent barrel
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                actions = []
+                if barrel.can_use(player):
+                    wheat_count = barrel.get_wheat()
+                    if wheat_count > 0:
+                        actions.append({'key': 'E', 'label': f'Take Wheat ({wheat_count})'})
+                    else:
+                        actions.append({'key': '-', 'label': 'Empty'})
+                else:
+                    actions.append({'key': '-', 'label': 'Not yours'})
+                return {
+                    'type': 'Barrel',
+                    'name': barrel.name,
+                    'actions': actions
+                }
+        
+        # Check for adjacent bed
+        for bed in self.state.interactables.beds.values():
+            if bed.is_adjacent(player):
+                is_owned = bed.is_owned_by(player.name)
+                if is_owned or not bed.is_owned():
+                    return {
+                        'type': 'Bed',
+                        'name': bed.name,
+                        'actions': [{'key': '-', 'label': 'Sleep (not implemented)'}]
+                    }
         
         return None
     

@@ -12,6 +12,7 @@ SPEED_OPTIONS = [1, 2, 10, 20, 100]
 BG_COLOR = "#000000" # UI Background Color
 GRID_COLOR = "#cccccc" # UI Grid Color
 ROAD_COLOR = "#A89880" # Road cell color
+START_MUTED = True         # Start with music muted (toggle with M key)
 
 # =============================================================================
 # BOARD SETTINGS

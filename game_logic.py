@@ -581,6 +581,89 @@ class GameLogic:
         return False
     
     # =========================================================================
+    # PLAYER FARM ACTIONS (instant via environment menu)
+    # =========================================================================
+    
+    def player_harvest_cell(self, player):
+        """Instantly harvest the farm cell the player is standing on.
+        
+        Returns:
+            True if harvest succeeded, False otherwise
+        """
+        if not player or not player.is_player:
+            return False
+        
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        cell = (cell_x, cell_y)
+        
+        if cell not in self.state.farm_cells:
+            return False
+        
+        data = self.state.farm_cells[cell]
+        
+        # Can only harvest ready cells
+        if data['state'] != 'ready':
+            return False
+        
+        # Check inventory space
+        if not player.can_add_item('wheat', FARM_CELL_YIELD):
+            name = player.get_display_name()
+            self.state.log_action(f"{name}'s inventory is full!")
+            return False
+        
+        # Instant harvest - add wheat and set to replanting
+        player.add_item('wheat', FARM_CELL_YIELD)
+        data['state'] = 'replanting'
+        data['timer'] = FARM_REPLANT_TIME
+        
+        name = player.get_display_name()
+        is_farmer = player.get('job') == 'Farmer'
+        
+        # If player is not a farmer, this is theft
+        if not is_farmer:
+            self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
+            # Trigger witness system for theft
+            self.witness_theft(player, cell)
+        else:
+            self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")
+        
+        return True
+    
+    def player_plant_cell(self, player):
+        """Instantly plant/replant the farm cell the player is standing on.
+        
+        This transitions a 'replanting' cell to 'growing' state instantly.
+        
+        Returns:
+            True if planting succeeded, False otherwise
+        """
+        if not player or not player.is_player:
+            return False
+        
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        cell = (cell_x, cell_y)
+        
+        if cell not in self.state.farm_cells:
+            return False
+        
+        data = self.state.farm_cells[cell]
+        
+        # Can only plant cells in replanting state
+        if data['state'] != 'replanting':
+            return False
+        
+        # Instant plant - set to growing
+        data['state'] = 'growing'
+        data['timer'] = FARM_CELL_HARVEST_INTERVAL
+        
+        name = player.get_display_name()
+        self.state.log_action(f"{name} planted seeds.")
+        
+        return True
+    
+    # =========================================================================
     # STOVE / CAMPFIRE BAKING SYSTEM
     # =========================================================================
     
@@ -3409,11 +3492,16 @@ class GameLogic:
                     data['timer'] = 0
         
         # Process characters standing on farm cells
-        # Only farmers can legitimately harvest - others (including player) commit theft
+        # Only farmers can legitimately harvest - others commit theft
+        # NOTE: Player is skipped here - player uses environment menu for instant harvest/plant
         cells_being_worked = set()
         for char in self.state.characters:
             # Skip dying characters
             if char.get('health', 100) <= 0:
+                continue
+            
+            # Skip player - player harvests via environment menu
+            if char.is_player:
                 continue
             
             # Convert float position to cell coordinates
@@ -3423,10 +3511,9 @@ class GameLogic:
                 
                 # Only farmers can work farm cells without it being theft
                 is_farmer = char.get('job') == 'Farmer'
-                is_player = char.is_player
                 
-                if not is_farmer and not is_player:
-                    continue  # Non-farmers/non-players use try_farm_theft via AI
+                if not is_farmer:
+                    continue  # Non-farmers use try_farm_theft via AI
                 
                 if data['state'] == 'ready':
                     # Check if can carry more wheat
@@ -3447,14 +3534,7 @@ class GameLogic:
                             data['timer'] = FARM_REPLANT_TIME
                             
                             name = char.get_display_name()
-                            
-                            # If player (and not farmer), this is theft!
-                            if is_player and not is_farmer:
-                                self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
-                                # Trigger witness system for theft (records in memory)
-                                self.witness_theft(char, cell)
-                            elif is_player:
-                                self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")
+                            self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")
                         else:
                             # Can't harvest, leave cell ready
                             data['state'] = 'ready'

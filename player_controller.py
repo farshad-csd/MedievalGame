@@ -344,6 +344,57 @@ class PlayerController:
         amount_baked = self.logic.bake_bread(player, 1)
         return amount_baked > 0
     
+    def handle_barrel_input(self):
+        """Handle barrel interaction key press.
+        
+        Takes wheat from an adjacent barrel if possible.
+        
+        Returns:
+            True if successfully took wheat
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        name = player.get_display_name()
+        
+        # Find adjacent barrel
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                if not barrel.can_use(player):
+                    self.state.log_action(f"{name} can't use this barrel (not your home)")
+                    return False
+                
+                wheat_count = barrel.get_wheat()
+                if wheat_count <= 0:
+                    self.state.log_action(f"{barrel.name} is empty")
+                    return False
+                
+                # Take as much wheat as player can carry
+                can_take = min(wheat_count, 50)  # Take up to 50 at a time
+                if not player.can_add_item('wheat', 1):
+                    self.state.log_action(f"{name}'s inventory is full")
+                    return False
+                
+                # Calculate how much we can actually take
+                taken = 0
+                for _ in range(can_take):
+                    if not player.can_add_item('wheat', 1):
+                        break
+                    if barrel.get_wheat() <= 0:
+                        break
+                    barrel.remove_wheat(1)
+                    player.add_item('wheat', 1)
+                    taken += 1
+                
+                if taken > 0:
+                    self.state.log_action(f"{name} took {taken} wheat from {barrel.name}")
+                    return True
+                
+                return False
+        
+        return False
+    
     # =========================================================================
     # DOOR/BUILDING INTERACTION
     # =========================================================================
