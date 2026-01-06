@@ -992,6 +992,18 @@ class BoardGUI:
             player.vy = 0.0
             return False
         
+        # Check stamina for sprinting (Skyrim-style)
+        if sprinting:
+            # Check if player can sprint (has stamina)
+            if player.is_sprinting:
+                # Already sprinting - check if can continue
+                if not player.can_continue_sprint():
+                    sprinting = False
+            else:
+                # Trying to start sprinting - check if can start
+                if not player.can_start_sprint():
+                    sprinting = False
+        
         if movement_dot > 0:
             speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
             player.is_sprinting = sprinting
@@ -1830,6 +1842,7 @@ class BoardGUI:
                 
                 if house_width_cells <= 4:
                     tex = self.world_textures.get('house_s')
+                    height = house_height_cells * cell_size
                 else:
                     tex = self.world_textures.get('house_m') or self.world_textures.get('house_s')
                 

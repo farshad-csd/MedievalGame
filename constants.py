@@ -65,7 +65,7 @@ DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardi
 # Movement speed - characters move once every this many ticks
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
 MOVEMENT_SPEED = .8 # Float-based continuous movement: cells per second
-SPRINT_SPEED = 1.3      # Sprint (cells/second)
+SPRINT_SPEED = 1.2      # Sprint (cells/second)
 
 # Collision radius - how close before characters "bump" each other
 # Set VERY small to allow characters to squeeze past each other like in ALTTP
@@ -130,6 +130,24 @@ SLEEP_START_FRACTION = 2/3  # Sleep starts at 2/3 of the day (latter 1/3)
 MAX_HUNGER = 100
 MAX_FATIGUE = 100
 MAX_STAMINA = 100
+
+# =============================================================================
+# STAMINA SETTINGS (Skyrim-style sprinting)
+# =============================================================================
+# Stamina drain rate while sprinting (per tick)
+# With 100 stamina and drain of 2.0/tick, can sprint for 50 ticks (~5 seconds at 1x)
+STAMINA_DRAIN_PER_TICK = 2.0  # Stamina points per tick while sprinting
+
+# Stamina regeneration rate when not sprinting (per tick)
+STAMINA_REGEN_PER_TICK = 0.5  # Stamina points per tick
+
+# Delay before stamina starts regenerating after stopping sprint (in ticks)
+STAMINA_REGEN_DELAY_TICKS = 8  # ~0.8 seconds at 1x speed
+
+# Minimum stamina required to START sprinting (not to maintain)
+# Prevents rapidly tapping sprint to get micro-bursts
+STAMINA_SPRINT_THRESHOLD = 10.0
+
 HUNGER_DECAY = 100 / TICKS_PER_DAY  # lose all hunger in 1 day (same rate, more ticks)
 HUNGER_CRITICAL = 40  # always seek wheat at or below this
 HUNGER_CHANCE_THRESHOLD = 60  # chance to seek wheat between CRITICAL and this

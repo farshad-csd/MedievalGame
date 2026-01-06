@@ -29,7 +29,8 @@ from constants import (
     MAX_HUNGER, MAX_FATIGUE, MAX_STAMINA, INVENTORY_SLOTS, ITEMS, SKILLS,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     BREAD_PER_BITE, STARVATION_THRESHOLD,
-    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS
+    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
+    STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -100,6 +101,10 @@ class Character:
         self.fatigue = MAX_FATIGUE
         self.stamina = MAX_STAMINA
         self.morality = template.get('morality', 5)  # Mutable copy
+        
+        # Stamina system state (Skyrim-style)
+        self._last_sprint_tick = 0  # Tick when sprinting last stopped
+        self._stamina_depleted = False  # True when stamina hit 0 (must wait for threshold)
         
         # Starvation state
         self.is_starving = False
@@ -670,6 +675,93 @@ class Character:
                 result['recovered_from_starvation'] = True
         
         return result
+    
+    # =========================================================================
+    # STAMINA SYSTEM (Skyrim-style sprinting)
+    # =========================================================================
+    
+    def can_start_sprint(self):
+        """Check if character can START sprinting.
+        
+        Requires stamina above threshold. Once sprinting, can continue
+        until stamina hits 0 (handled by drain_stamina_sprint).
+        
+        Returns:
+            True if can start sprinting
+        """
+        # Can't sprint if frozen/dying
+        if self.is_frozen or self.health <= 0:
+            return False
+        
+        # If stamina was depleted, must wait for it to recover above threshold
+        if self._stamina_depleted:
+            if self.stamina >= STAMINA_SPRINT_THRESHOLD:
+                self._stamina_depleted = False
+            else:
+                return False
+        
+        return self.stamina > 0
+    
+    def can_continue_sprint(self):
+        """Check if character can CONTINUE sprinting.
+        
+        Can continue as long as stamina > 0.
+        
+        Returns:
+            True if can continue sprinting
+        """
+        if self.is_frozen or self.health <= 0:
+            return False
+        return self.stamina > 0
+    
+    def drain_stamina_sprint(self, current_tick):
+        """Drain stamina while sprinting. Called once per tick.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if still have stamina, False if depleted
+        """
+        self.stamina = max(0, self.stamina - STAMINA_DRAIN_PER_TICK)
+        
+        # Track when we last sprinted (for regen delay)
+        self._last_sprint_tick = current_tick
+        
+        if self.stamina <= 0:
+            self._stamina_depleted = True
+            return False
+        return True
+    
+    def regenerate_stamina(self, current_tick):
+        """Regenerate stamina when not sprinting. Called once per tick.
+        
+        Only regenerates if enough ticks have passed since last sprint
+        (simulates Skyrim's brief pause before regen kicks in).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Amount regenerated
+        """
+        # Check if we've waited long enough since sprinting
+        ticks_since_sprint = current_tick - self._last_sprint_tick
+        if ticks_since_sprint < STAMINA_REGEN_DELAY_TICKS:
+            return 0
+        
+        # Already full
+        if self.stamina >= MAX_STAMINA:
+            return 0
+        
+        old_stamina = self.stamina
+        self.stamina = min(MAX_STAMINA, self.stamina + STAMINA_REGEN_PER_TICK)
+        
+        return self.stamina - old_stamina
+    
+    def get_stamina_fraction(self):
+        """Get stamina as a fraction (0-1) for UI display."""
+        return self.stamina / MAX_STAMINA
     
     def can_attack(self):
         """Check if character can attack (animation not in progress).

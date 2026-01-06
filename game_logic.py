@@ -2129,13 +2129,31 @@ class GameLogic:
                 if dist < 0.35:  # Close enough - prevents overshoot jitter
                     char.vx = 0.0
                     char.vy = 0.0
+                    char.is_sprinting = False
                 else:
-                    # Use slower speed if idling or patrolling
-                    speed = MOVEMENT_SPEED
-                    if char.get('idle_is_idle', False):
+                    # Determine if NPC should sprint
+                    should_sprint = self._should_npc_sprint(char)
+                    
+                    # Check stamina before allowing sprint
+                    if should_sprint:
+                        if char.is_sprinting:
+                            if not char.can_continue_sprint():
+                                should_sprint = False
+                        else:
+                            if not char.can_start_sprint():
+                                should_sprint = False
+                    
+                    char.is_sprinting = should_sprint
+                    
+                    # Use slower speed if idling or patrolling, sprint speed if sprinting
+                    if should_sprint:
+                        speed = SPRINT_SPEED
+                    elif char.get('idle_is_idle', False):
                         speed = MOVEMENT_SPEED * IDLE_SPEED_MULTIPLIER
                     elif char.get('is_patrolling', False):
                         speed = MOVEMENT_SPEED * PATROL_SPEED_MULTIPLIER
+                    else:
+                        speed = MOVEMENT_SPEED
                     
                     # Normalize and apply speed
                     char.vx = (dx / dist) * speed
@@ -2145,6 +2163,7 @@ class GameLogic:
             else:
                 char.vx = 0.0
                 char.vy = 0.0
+                char.is_sprinting = False
             
             # If not idling, reset idle state for next time
             if not char.get('idle_is_idle', False):
@@ -2153,6 +2172,55 @@ class GameLogic:
         # Report crimes to nearby soldiers
         for char in self.state.characters:
             self.try_report_crimes_to_soldier(char)
+    
+    def _should_npc_sprint(self, char):
+        """
+        Determine if an NPC should sprint based on their current intent/situation.
+        
+        NPCs sprint when:
+        - Fleeing from danger (being attacked, saw crime, etc.)
+        - Chasing/attacking a target (soldiers pursuing criminals, fighting back)
+        - Responding urgently (soldier responding to crime report)
+        
+        NPCs do NOT sprint when:
+        - Idling/wandering
+        - Patrolling (soldiers walk their routes)
+        - Going about normal business (buying food, farming, etc.)
+        
+        Returns:
+            True if NPC should sprint, False otherwise
+        """
+        intent = char.intent
+        if not intent:
+            return False
+        
+        action = intent.get('action')
+        reason = intent.get('reason', '')
+        
+        # Sprint when fleeing from any danger
+        if action == 'flee':
+            return True
+        
+        # Sprint when attacking (chasing a target)
+        if action == 'attack':
+            # Soldiers chasing criminals should sprint
+            if reason in ('law_enforcement', 'pursuing_criminal'):
+                return True
+            # Fighting back against attacker - sprint to engage
+            if reason in ('self_defense', 'retaliation'):
+                return True
+            # High-confidence NPCs confronting criminals
+            if reason == 'confronting_criminal':
+                return True
+        
+        # Sprint when actively following an urgent target
+        if action == 'follow':
+            # Following to help or confront
+            if reason in ('help_victim', 'confronting', 'responding'):
+                return True
+        
+        # Default: don't sprint
+        return False
     
     def _get_effective_goal_and_transition(self, char, goal_world, goal_zone):
         """
@@ -2234,6 +2302,9 @@ class GameLogic:
         
         Uses prevailing coords (local when in interior, world when in exterior) since
         velocity is calculated in that coordinate space.
+        
+        Note: Stamina drain/regen is handled separately in gui._game_loop using real-time
+        to ensure consistent feel regardless of game speed.
         """
         npcs = [c for c in self.state.characters if not c.is_player]
         
@@ -3161,6 +3232,9 @@ class GameLogic:
         for char in self.state.characters:
             char['hunger'] = max(0, char['hunger'] - HUNGER_DECAY)
         
+        # Update stamina for all characters (Skyrim-style)
+        self._process_stamina()
+        
         # Process starvation
         self._process_starvation()
         
@@ -3240,6 +3314,29 @@ class GameLogic:
             
             # Immediately remove from game - no more processing
             self.state.remove_character(char)
+    
+    def _process_stamina(self):
+        """Process stamina drain/regeneration for all characters (Skyrim-style)."""
+        current_tick = self.state.ticks
+        
+        for char in self.state.characters:
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            if char.is_sprinting:
+                # Drain stamina while sprinting
+                if not char.drain_stamina_sprint(current_tick):
+                    # Stamina depleted - force stop sprinting
+                    char.is_sprinting = False
+                    # Reduce velocity to walking speed
+                    if char.vx != 0 or char.vy != 0:
+                        speed_ratio = MOVEMENT_SPEED / SPRINT_SPEED
+                        char.vx *= speed_ratio
+                        char.vy *= speed_ratio
+            else:
+                # Regenerate stamina when not sprinting
+                char.regenerate_stamina(current_tick)
     
     def _process_starvation(self):
         """Process starvation for all characters"""
