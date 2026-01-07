@@ -471,7 +471,7 @@ class PlayerController:
                 return None
             
             for window in interior.windows:
-                if window.is_character_near(player.prevailing_x, player.prevailing_y):
+                if window.is_character_near(player.prevailing_x, player.prevailing_y, threshold=1.0):
                     return window
         else:
             # Player is outside - check all house windows to look in
@@ -482,7 +482,7 @@ class PlayerController:
                     continue
                 
                 for window in interior.windows:
-                    if window.is_character_near_exterior(player.x, player.y):
+                    if window.is_character_near_exterior(player.x, player.y, threshold=1.0):
                         # Must be facing toward the window (opposite of window's facing)
                         if self._is_facing_toward_window(player, window):
                             return window

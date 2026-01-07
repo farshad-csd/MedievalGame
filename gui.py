@@ -27,15 +27,16 @@ from constants import (
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
     SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE, SHOW_PERCEPTION_DEBUG,
-    ADJACENCY_DISTANCE, SKILLS, START_MUTED
+    ADJACENCY_DISTANCE, INTERACT_DISTANCE, SKILLS, START_MUTED
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
 from sprites import get_sprite_manager
-from dialogue import DialogueSystem, get_nearest_interactable_npc
+from dialogue import DialogueSystem
 from environment_menu import EnvironmentMenu
+from inventory_menu import InventoryMenu
 
 
 # =============================================================================
@@ -160,7 +161,7 @@ class InputState:
         # Actions
         self.attack = False
         self.eat = False
-        self.recenter = False
+        self.combat_mode_toggle = False
         self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
@@ -251,8 +252,7 @@ class BoardGUI:
         self.running = True
         
         # UI state
-        self.inventory_open = False
-        self.inventory_tab = 0  # 0=world, 1=status, 2=map
+        self.inventory_menu = InventoryMenu(self.state)
         
         # Window "security camera" viewing state
         self.window_viewing = False
@@ -526,7 +526,7 @@ class BoardGUI:
         # Reset per-frame input state
         self.input.attack = False
         self.input.eat = False
-        self.input.recenter = False
+        self.input.combat_mode_toggle = False
         self.input.pause = False
         self.input.inventory_toggle = False
         self.input.environment_menu_toggle = False
@@ -627,7 +627,7 @@ class BoardGUI:
         if rl.is_key_pressed(rl.KEY_Q):
             self.input.eat = True       # Q for eat
         if rl.is_key_pressed(rl.KEY_R):
-            self.input.recenter = True
+            self.input.combat_mode_toggle = True  # R for combat mode toggle
         if rl.is_key_pressed(rl.KEY_ESCAPE):
             self.input.pause = True
         if rl.is_key_pressed(rl.KEY_M):
@@ -747,7 +747,7 @@ class BoardGUI:
             return
         
         # Block movement and facing changes when inventory is open
-        if self.inventory_open:
+        if self.inventory_menu.is_open:
             if self.player_moving:
                 self.player_controller.stop_movement()
                 self.player_moving = False
@@ -808,15 +808,18 @@ class BoardGUI:
     def _apply_action_input(self):
         """Apply action input"""
         # Block actions when inventory is open
-        if self.inventory_open:
+        if self.inventory_menu.is_open:
             return
         
         # Unified interact (E key / A button) - handles NPC, door, window, stove
         if self.input.interact:
             self._handle_unified_interact()
         
+        # Attacks require combat mode
         if self.input.attack:
-            self.player_controller.handle_attack_input()
+            player = self.state.player
+            if player and player.get('combat_mode', False):
+                self.player_controller.handle_attack_input()
         
         if self.input.eat:
             self.player_controller.handle_eat_input()
@@ -826,11 +829,13 @@ class BoardGUI:
         
         Checks for interactables in priority order:
         1. If window viewing → toggle off
-        2. NPC → start dialogue
-        3. Door → enter/exit building  
+        2. Door → enter/exit building (first so player can escape combat)
+        3. NPC → start dialogue (must be facing them)
         4. Window → start window viewing
         5. Stove/campfire → bake bread
         6. Barrel → take wheat
+        7. Bed → sleep (not implemented)
+        8. Tree → chop (not implemented)
         """
         player = self.state.player
         if not player:
@@ -841,17 +846,7 @@ class BoardGUI:
             self._toggle_window_view_off()
             return
         
-        # Priority 2: Check for nearby NPC
-        npc = get_nearest_interactable_npc(self.state, player)
-        if npc:
-            if self.dialogue.can_start_dialogue(npc):
-                self.dialogue.start_dialogue(npc)
-                return
-            else:
-                self.state.log_action(f"{npc.get_display_name()} is busy!")
-                return
-        
-        # Priority 3: Check for door
+        # Priority 2: Check for door FIRST (allows escaping combat)
         house = self.state.get_adjacent_door(player)
         if house:
             if self.player_controller.handle_door_input():
@@ -860,26 +855,103 @@ class BoardGUI:
                 self.camera_y = player.y
                 return
         
+        # Priority 3: Check for nearby NPC (must be facing them)
+        npc = self._get_facing_npc(player)
+        if npc:
+            if self.dialogue.can_start_dialogue(npc):
+                self.dialogue.start_dialogue(npc)
+                return
+            else:
+                self.state.log_action(f"{npc.get_display_name()} is busy!")
+                return
+        
         # Priority 4: Check for window
         window = self.player_controller.handle_window_input()
         if window:
             self._start_window_viewing(window)
             return
         
-        # Priority 5: Check for stove/campfire (baking)
+        # Priority 5: Check for stove/campfire (baking) - must be facing
         cooking_spot = self.logic.get_adjacent_cooking_spot(player)
         if cooking_spot:
-            self.player_controller.handle_bake_input()
-            return
-        
-        # Priority 6: Check for barrel
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                self.player_controller.handle_barrel_input()
+            # Check if facing the cooking spot
+            source = cooking_spot.get('source')
+            if cooking_spot['type'] == 'stove':
+                # Stoves are interior - use local coords
+                target_x, target_y = source.x + 0.5, source.y + 0.5
+                target_zone = source.zone
+            else:  # campfire
+                # Campfires are exterior - use world coords
+                target_x, target_y = source[0] + 0.5, source[1] + 0.5
+                target_zone = None
+            
+            if self._is_facing_position(player, target_x, target_y, target_zone):
+                self.player_controller.handle_bake_input()
                 return
         
-        # Nothing to interact with - give feedback
-        self.state.log_action("Nothing to interact with")
+        # Priority 6: Check for barrel (must be facing)
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                # Use local coords for interior barrels, world coords for exterior
+                if barrel.zone is not None:
+                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
+                else:
+                    target_x, target_y = barrel.world_x, barrel.world_y
+                if self._is_facing_position(player, target_x, target_y, barrel.zone):
+                    self.player_controller.handle_barrel_input()
+                    return
+        
+        # Priority 7: Check for bed (must be facing) - not implemented
+        for bed in self.state.interactables.beds.values():
+            if bed.is_adjacent(player):
+                # Beds are interior - use local coords
+                if self._is_facing_position(player, bed.x + 0.5, bed.y + 0.5, bed.zone):
+                    is_owned = bed.is_owned_by(player.name)
+                    if is_owned or not bed.is_owned():
+                        self.state.log_action("Sleep not implemented yet")
+                    else:
+                        self.state.log_action("Not your bed")
+                    return
+        
+        # Priority 8: Check for tree (must be facing) - not implemented
+        for pos, tree in self.state.interactables.trees.items():
+            if tree.is_adjacent(player):
+                # Trees are exterior - use world coords (zone is None)
+                if self._is_facing_position(player, tree.x + 0.5, tree.y + 0.5, None):
+                    self.state.log_action("Shaking trees not implemented yet")
+                    return
+    
+    def _get_facing_npc(self, player):
+        """Get nearest NPC that player is facing within interact distance."""
+        nearest_npc = None
+        nearest_dist = float('inf')
+        
+        for char in self.state.characters:
+            if char == player:
+                continue
+            if char.get('health', 100) <= 0:
+                continue
+            if char.zone != player.zone:
+                continue
+            
+            # Get positions in local coords (prevailing when interior, x/y when exterior)
+            if player.zone:
+                px, py = player.prevailing_x, player.prevailing_y
+                cx, cy = char.prevailing_x, char.prevailing_y
+            else:
+                px, py = player.x, player.y
+                cx, cy = char.x, char.y
+            
+            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
+            
+            # Must be within interact distance AND player facing them
+            if dist <= INTERACT_DISTANCE and dist < nearest_dist:
+                # Pass zone so _is_facing_position uses correct player coords
+                if self._is_facing_position(player, cx, cy, player.zone):
+                    nearest_npc = char
+                    nearest_dist = dist
+        
+        return nearest_npc
     
     def _toggle_window_view_off(self):
         """Stop window viewing and recenter on player."""
@@ -934,17 +1006,12 @@ class BoardGUI:
         if self.window_viewing:
             return
         
-        # Recenter on player
-        if self.input.recenter:
-            self.camera_following_player = True
+        # Toggle combat mode
+        if self.input.combat_mode_toggle:
             if player:
-                # Use local coords when inside (for interior rendering)
-                if player.zone:
-                    self.camera_x = player.prevailing_x
-                    self.camera_y = player.prevailing_y
-                else:
-                    self.camera_x = player.x
-                    self.camera_y = player.y
+                player['combat_mode'] = not player.get('combat_mode', False)
+                mode_str = "COMBAT MODE" if player['combat_mode'] else "normal mode"
+                self.state.log_action(f"{player.get_display_name()} entered {mode_str}")
         
         # Manual panning
         if self.input.pan_x != 0 or self.input.pan_y != 0:
@@ -977,24 +1044,27 @@ class BoardGUI:
         if self.input.pause:
             self.state.paused = not self.state.paused
         
-        # Environment menu toggle (G or X button)
+        # Environment menu toggle (G or X button) - blocked in combat mode
         if self.input.environment_menu_toggle:
             if self.environment_menu.is_active:
                 self.environment_menu.close()
             else:
-                self.environment_menu.open()
+                # Can't open environment menu while in combat mode
+                player = self.state.player
+                if not player or not player.get('combat_mode', False):
+                    self.environment_menu.open()
         
         # Inventory toggle (Tab or Select button) - but not if environment menu is open
         if self.input.inventory_toggle:
             if not self.environment_menu.is_active:
-                self.inventory_open = not self.inventory_open
+                self.inventory_menu.toggle()
         
         # Tab switching in inventory (Q/E or bumpers)
-        if self.inventory_open:
+        if self.inventory_menu.is_open:
             if rl.is_key_pressed(rl.KEY_Q) or rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1):
-                self.inventory_tab = (self.inventory_tab - 1) % 3
+                self.inventory_menu.prev_tab()
             if rl.is_key_pressed(rl.KEY_E) or rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_TRIGGER_1):
-                self.inventory_tab = (self.inventory_tab + 1) % 3
+                self.inventory_menu.next_tab()
     
     def _screen_to_world(self, screen_x, screen_y):
         """Convert screen coordinates to world coordinates."""
@@ -1207,8 +1277,14 @@ class BoardGUI:
         t1 = time.time()
         
         # Draw HUD overlay or inventory screen
-        if self.inventory_open:
-            self._draw_inventory_screen()
+        if self.inventory_menu.is_open:
+            # Update inventory menu state before rendering
+            self.inventory_menu.set_canvas_size(self.canvas_width, self.canvas_height)
+            self.inventory_menu.update_input(
+                self.input.mouse_x, self.input.mouse_y,
+                self.input.mouse_left_click, self.input.gamepad_connected
+            )
+            self.inventory_menu.render()
         else:
             self._draw_hud()
         t2 = time.time()
@@ -3307,6 +3383,9 @@ void main() {
         # Top-right: Location and time
         self._draw_location_time()
         
+        # Bottom-right: Unified E interaction hint
+        self._draw_interact_hint(player)
+        
         # Top-left: Minimal debug info (optional)
         self._draw_debug_info()
     
@@ -3435,28 +3514,28 @@ void main() {
         time_width = rl.measure_text(time_str, HUD_FONT_SIZE_SMALL)
         rl.draw_text(time_str, x - time_width, y, HUD_FONT_SIZE_SMALL, COLOR_TEXT_DIM)
     
-    def _draw_context_actions(self, player):
-        """Draw available actions based on what player is near"""
+    def _draw_interact_hint(self, player):
+        """Draw unified interaction hint based on what player can interact with"""
         x = self.canvas_width - HUD_MARGIN
-        y = self.canvas_height - HUD_MARGIN - 140
+        y = self.canvas_height - HUD_MARGIN - 100
         
         # If window viewing, show stop viewing action
         if self.window_viewing:
             self._draw_action_prompt(x, y, 'E', 'Stop Viewing')
             return
         
+        # Get what player can interact with
         context = self._get_player_context(player)
-        
-        # Always show self-actions first (eat, etc.)
-        self_actions = self._get_self_actions(player)
-        if self_actions:
-            for action in self_actions:
-                self._draw_action_prompt(x, y, action['key'], action['label'])
-                y += 28
-            y += 10  # Extra gap before context actions
         
         if not context:
             return
+        
+        # Get the first action (whether E or -)
+        actions = context.get('actions', [])
+        if not actions:
+            return
+        
+        action = actions[0]
         
         # Draw target type (small, dim)
         type_str = context['type'].upper()
@@ -3468,28 +3547,8 @@ void main() {
         name_width = rl.measure_text(name, HUD_FONT_SIZE_LARGE)
         rl.draw_text(name, x - name_width, y + 14, HUD_FONT_SIZE_LARGE, COLOR_TEXT_BRIGHT)
         
-        # Draw available actions
-        action_y = y + 40
-        for action in context['actions']:
-            self._draw_action_prompt(x, action_y, action['key'], action['label'])
-            action_y += 28
-    
-    def _get_self_actions(self, player):
-        """Get actions the player can perform on themselves"""
-        actions = []
-        
-        # Eat bread if hungry and has bread
-        bread_count = player.get_item('bread')
-        if bread_count > 0 and player.hunger < 80:
-            actions.append({'key': 'Q', 'label': 'Eat Bread'})
-        
-        # Make camp if outside village and doesn't have one
-        if not player.get('camp_position'):
-            area = self.state.get_area_at(player.x, player.y)
-            if area is None:  # Outside any defined area
-                actions.append({'key': 'C', 'label': 'Make Camp'})
-        
-        return actions
+        # Draw action prompt (E for interactable, - for info only)
+        self._draw_action_prompt(x, y + 40, action['key'], action['label'])
     
     def _draw_action_prompt(self, right_x, y, key, label):
         """Draw a single action prompt like [E] Interact"""
@@ -3529,49 +3588,20 @@ void main() {
         """Determine what the player can interact with.
         
         Returns the nearest interactable in priority order, with 'E' as the 
-        unified interact key for everything.
+        unified interact key for everything. Requires player to be facing
+        the target and within INTERACT_DISTANCE.
         
-        Priority order:
-        1. NPC (dialogue)
-        2. Door (enter/exit)
+        Priority order (doors first so you can escape combat):
+        1. Door (enter/exit) - essential for escaping
+        2. NPC (dialogue)
         3. Window (look through)
         4. Stove (bake bread)
         5. Campfire (bake bread)
         6. Barrel (storage access)
-        7. Bed (future: sleep)
+        7. Bed (sleep - not implemented)
+        8. Tree (chop - not implemented)
         """
-        # Check for adjacent characters (NPCs) - must be in same zone
-        nearest_npc = None
-        nearest_npc_dist = float('inf')
-        
-        for char in self.state.characters:
-            if char == player:
-                continue
-            if char.get('health', 100) <= 0:
-                continue
-            # Must be in same zone to interact
-            if char.zone != player.zone:
-                continue
-            
-            # Use prevailing coords when in interior
-            if player.zone:
-                dist = math.sqrt((player.prevailing_x - char.prevailing_x)**2 + (player.prevailing_y - char.prevailing_y)**2)
-            else:
-                dist = math.sqrt((player.x - char.x)**2 + (player.y - char.y)**2)
-            
-            if dist <= ADJACENCY_DISTANCE and dist < nearest_npc_dist:
-                nearest_npc = char
-                nearest_npc_dist = dist
-        
-        if nearest_npc:
-            job = nearest_npc.get('job')
-            return {
-                'type': job if job else 'Character',
-                'name': nearest_npc.get_display_name(),
-                'actions': [{'key': 'E', 'label': 'Talk'}]
-            }
-        
-        # Check for door (entering/exiting buildings)
+        # Check for door FIRST (entering/exiting buildings) - allows escaping combat
         house = self.state.get_adjacent_door(player)
         if house:
             if player.zone is None:
@@ -3589,13 +3619,50 @@ void main() {
                     'actions': [{'key': 'E', 'label': 'Exit Building'}]
                 }
         
+        # Check for adjacent characters (NPCs) - must be in same zone and facing them
+        nearest_npc = None
+        nearest_npc_dist = float('inf')
+        
+        for char in self.state.characters:
+            if char == player:
+                continue
+            if char.get('health', 100) <= 0:
+                continue
+            # Must be in same zone to interact
+            if char.zone != player.zone:
+                continue
+            
+            # Use prevailing coords when in interior
+            if player.zone:
+                px, py = player.prevailing_x, player.prevailing_y
+                cx, cy = char.prevailing_x, char.prevailing_y
+            else:
+                px, py = player.x, player.y
+                cx, cy = char.x, char.y
+            
+            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
+            
+            # Must be within interact distance AND player facing them
+            if dist <= INTERACT_DISTANCE and dist < nearest_npc_dist:
+                if self._is_facing_position(player, cx, cy, player.zone):
+                    nearest_npc = char
+                    nearest_npc_dist = dist
+        
+        if nearest_npc:
+            job = nearest_npc.get('job')
+            return {
+                'type': job if job else 'Character',
+                'name': nearest_npc.get_display_name(),
+                'actions': [{'key': 'E', 'label': 'Talk'}]
+            }
+        
         # Check for window (inside looking out, or outside looking in)
         if player.zone is not None:
             # Inside - check if near interior window
             interior = self.state.interiors.get_interior(player.zone)
             if interior:
                 for window in interior.windows:
-                    if window.is_character_near(player.prevailing_x, player.prevailing_y):
+                    if window.is_character_near(player.prevailing_x, player.prevailing_y, threshold=1.0):
                         return {
                             'type': 'Window',
                             'name': f'Window ({window.facing})',
@@ -3608,7 +3675,7 @@ void main() {
                 if not interior:
                     continue
                 for window in interior.windows:
-                    if window.is_character_near_exterior(player.x, player.y):
+                    if window.is_character_near_exterior(player.x, player.y, threshold=1.0):
                         # Must be facing toward the window
                         if self._is_player_facing_window(player, window):
                             return {
@@ -3617,63 +3684,154 @@ void main() {
                                 'actions': [{'key': 'E', 'label': 'Look Inside'}]
                             }
         
-        # Check for adjacent stove
+        # Check for adjacent stove (must be facing it)
         stove = self.state.interactables.get_adjacent_stove(player)
         if stove:
-            if stove.can_use(player):
-                return {
-                    'type': 'Stove',
-                    'name': stove.name,
-                    'actions': [{'key': 'E', 'label': 'Bake Bread'}]
-                }
-            else:
-                return {
-                    'type': 'Stove',
-                    'name': stove.name,
-                    'actions': [{'key': '-', 'label': 'Not your stove'}]
-                }
+            # Check if facing the stove - use local coords for interior
+            if self._is_facing_position(player, stove.x + 0.5, stove.y + 0.5, stove.zone):
+                if stove.can_use(player):
+                    return {
+                        'type': 'Stove',
+                        'name': stove.name,
+                        'actions': [{'key': 'E', 'label': 'Bake Bread'}]
+                    }
+                else:
+                    return {
+                        'type': 'Stove',
+                        'name': stove.name,
+                        'actions': [{'key': '-', 'label': 'Not your stove'}]
+                    }
         
         # Check for adjacent campfire (camps are stored on characters as camp_position)
         for other_char in self.state.characters:
             camp_pos = other_char.get('camp_position')
             if camp_pos and self.state.interactables.is_adjacent_to_camp(player, camp_pos):
-                owner_name = other_char.get_display_name()
-                return {
-                    'type': 'Campfire',
-                    'name': f"{owner_name}'s Campfire",
-                    'actions': [{'key': 'E', 'label': 'Bake Bread'}]
-                }
+                # Check if facing the campfire - exterior so no zone
+                if self._is_facing_position(player, camp_pos[0] + 0.5, camp_pos[1] + 0.5, None):
+                    owner_name = other_char.get_display_name()
+                    return {
+                        'type': 'Campfire',
+                        'name': f"{owner_name}'s Campfire",
+                        'actions': [{'key': 'E', 'label': 'Bake Bread'}]
+                    }
         
-        # Check for adjacent barrel
+        # Check for adjacent barrel (must be facing it)
         for barrel in self.state.interactables.barrels.values():
             if barrel.is_adjacent(player):
-                actions = []
-                if barrel.can_use(player):
-                    wheat_count = barrel.get_wheat()
-                    if wheat_count > 0:
-                        actions.append({'key': 'E', 'label': f'Take Wheat ({wheat_count})'})
-                    else:
-                        actions.append({'key': '-', 'label': 'Empty'})
+                # Check if facing the barrel - use local coords if interior
+                if barrel.zone is not None:
+                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
                 else:
-                    actions.append({'key': '-', 'label': 'Not yours'})
-                return {
-                    'type': 'Barrel',
-                    'name': barrel.name,
-                    'actions': actions
-                }
+                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
+                if self._is_facing_position(player, target_x, target_y, barrel.zone):
+                    if barrel.can_use(player):
+                        wheat_count = barrel.get_wheat()
+                        if wheat_count > 0:
+                            return {
+                                'type': 'Barrel',
+                                'name': barrel.name,
+                                'actions': [{'key': 'E', 'label': f'Take Wheat ({wheat_count})'}]
+                            }
+                        else:
+                            return {
+                                'type': 'Barrel',
+                                'name': barrel.name,
+                                'actions': [{'key': '-', 'label': 'Empty'}]
+                            }
+                    else:
+                        return {
+                            'type': 'Barrel',
+                            'name': barrel.name,
+                            'actions': [{'key': '-', 'label': 'Not your barrel'}]
+                        }
         
-        # Check for adjacent bed
+        # Check for adjacent bed (must be facing it)
         for bed in self.state.interactables.beds.values():
             if bed.is_adjacent(player):
-                is_owned = bed.is_owned_by(player.name)
-                if is_owned or not bed.is_owned():
+                # Check if facing the bed - use local coords for interior
+                if self._is_facing_position(player, bed.x + 0.5, bed.y + 0.5, bed.zone):
+                    is_owned = bed.is_owned_by(player.name)
+                    if is_owned or not bed.is_owned():
+                        return {
+                            'type': 'Bed',
+                            'name': bed.name,
+                            'actions': [{'key': '-', 'label': 'Sleep (not implemented)'}]
+                        }
+                    else:
+                        return {
+                            'type': 'Bed',
+                            'name': bed.name,
+                            'actions': [{'key': '-', 'label': 'Not your bed'}]
+                        }
+        
+        # Check for adjacent tree (must be facing it)
+        for pos, tree in self.state.interactables.trees.items():
+            if tree.is_adjacent(player):
+                # Check if facing the tree - exterior so no zone
+                if self._is_facing_position(player, tree.x + 0.5, tree.y + 0.5, None):
                     return {
-                        'type': 'Bed',
-                        'name': bed.name,
-                        'actions': [{'key': '-', 'label': 'Sleep (not implemented)'}]
+                        'type': 'Tree',
+                        'name': 'Tree',
+                        'actions': [{'key': '-', 'label': 'Shake (not implemented)'}]
                     }
         
         return None
+    
+    def _is_facing_position(self, player, target_x, target_y, target_zone=None):
+        """Check if player is roughly facing toward a target position.
+        
+        Uses a generous 90-degree cone in the facing direction.
+        
+        For objects that passed is_adjacent, they're in the same zone as player.
+        Just use player.zone to determine coordinate system.
+        
+        Args:
+            player: Player character
+            target_x: Target X in local coords (object.x + 0.5)
+            target_y: Target Y in local coords (object.y + 0.5)
+            target_zone: Unused, kept for compatibility
+        """
+        # Use player.zone to determine coordinate system
+        # Objects that passed is_adjacent are guaranteed to be in same zone
+        if player.zone is not None:
+            # Interior - use local/prevailing coords
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            # Exterior - use world coords
+            px, py = player.x, player.y
+        
+        # Direction to target
+        dx = target_x - px
+        dy = target_y - py
+        
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return True  # On top of target, always valid
+        
+        # Get facing direction vector
+        facing = player.get('facing', 'down')
+        facing_vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        fx, fy = facing_vectors.get(facing, (0, 1))
+        
+        # Normalize direction to target
+        dist = math.sqrt(dx*dx + dy*dy)
+        dx /= dist
+        dy /= dist
+        
+        # Dot product gives cosine of angle between vectors
+        # cos(45°) ≈ 0.707, cos(53°) ≈ 0.6, cos(60°) = 0.5, cos(90°) = 0
+        dot = dx * fx + dy * fy
+        
+        # Require ~53 degree cone (dot > 0.6) for tighter targeting
+        return dot > 0.6
     
     def _is_player_facing_window(self, player, window):
         """Check if player is facing toward a window from outside."""
@@ -3708,341 +3866,6 @@ void main() {
         if self.input.gamepad_connected:
             rl.draw_text("Gamepad", 10, self.canvas_height - 20, 
                         HUD_FONT_SIZE_SMALL, COLOR_TEXT_FAINT)
-
-    # =========================================================================
-    # INVENTORY SCREEN
-    # =========================================================================
-    
-    def _draw_inventory_screen(self):
-        """Draw the full inventory screen overlay"""
-        player = self.state.player
-        if not player:
-            return
-        
-        # Layout: Left panel (1/3) = inventory, Right panel (2/3) = tabs
-        left_width = self.canvas_width // 3
-        right_width = self.canvas_width - left_width
-        
-        # Only draw overlay on non-world tabs
-        if self.inventory_tab != 0:
-            # Semi-transparent overlay on right side only
-            rl.draw_rectangle(left_width, 0, right_width, self.canvas_height, 
-                             rl.Color(13, 21, 32, 220))
-        
-        # Left panel background (always drawn)
-        rl.draw_rectangle(0, 0, left_width, self.canvas_height, rl.Color(13, 21, 32, 230))
-        rl.draw_line(left_width, 0, left_width, self.canvas_height, COLOR_BORDER)
-        
-        # Draw left panel content
-        self._draw_inventory_left_panel(player, 0, 0, left_width)
-        
-        # Draw right panel with tabs (handles click detection)
-        self._draw_inventory_right_panel(player, left_width, 0, right_width)
-        
-        # Close hint
-        is_controller = self.input.gamepad_connected
-        close_hint = "Select to close" if is_controller else "I / Tab to close"
-        hint_width = rl.measure_text(close_hint, HUD_FONT_SIZE_SMALL)
-        rl.draw_text(close_hint, self.canvas_width - hint_width - 20, 
-                    self.canvas_height - 25, HUD_FONT_SIZE_SMALL, COLOR_TEXT_FAINT)
-    
-    def _draw_inventory_left_panel(self, player, x, y, width):
-        """Draw the left inventory panel with equipment and storage"""
-        padding = 12
-        inner_x = x + padding
-        inner_y = y + padding
-        inner_width = width - padding * 2
-        
-        # === STATUS BAR (Health, Hunger, Weight, Gold) ===
-        self._draw_inventory_status_bar(player, inner_x, inner_y, inner_width)
-        inner_y += 60
-        
-        # === EQUIPMENT AREA (Head/Body + Accessories) ===
-        self._draw_equipment_area(player, inner_x, inner_y, inner_width)
-        inner_y += 120  # label + 2 rows of slots + gaps
-        
-        # === BASE INVENTORY (5 slots) ===
-        self._draw_storage_section(player, inner_x, inner_y, inner_width, "Base Inventory", 5)
-    
-    def _draw_inventory_status_bar(self, player, x, y, width):
-        """Draw compact status bar with health, hunger, stamina, fatigue, encumbrance, gold"""
-        bar_height = 50
-        rl.draw_rectangle(x, y, width, bar_height, rl.Color(255, 255, 255, 8))
-        rl.draw_rectangle_lines(x, y, width, bar_height, COLOR_BORDER)
-        
-        # Stats with consistent HUD-style formatting
-        # HP = Health Points, S = Stamina, E = Energy (fatigue inverted), H = Hunger
-        stats = [
-            ("HP", player.health, 100, COLOR_HEALTH),
-            ("S", player.stamina, 100, COLOR_STAMINA),
-            ("E", 100 - player.fatigue, 100, COLOR_FATIGUE),
-            ("H", player.hunger, 100, COLOR_HUNGER),
-        ]
-        
-        stat_x = x + 8
-        stat_y = y + 10
-        bar_w = 30
-        bar_h = HUD_BAR_HEIGHT
-        
-        for icon, value, max_val, color in stats:
-            pct = max(0, min(1, value / max_val))
-            is_low = pct < 0.25
-            
-            # Icon (letters, consistent with HUD)
-            icon_color = color if is_low else COLOR_TEXT_DIM
-            icon_width = rl.measure_text(icon, 10)
-            rl.draw_text(icon, stat_x, stat_y, 10, icon_color)
-            
-            # Bar background (consistent with HUD)
-            bar_x = stat_x + icon_width + 4
-            rl.draw_rectangle(bar_x, stat_y + 3, bar_w, bar_h, rl.Color(255, 255, 255, 25))
-            
-            # Bar fill (consistent with HUD)
-            fill_width = int(bar_w * pct)
-            if fill_width > 0:
-                rl.draw_rectangle(bar_x, stat_y + 3, fill_width, bar_h, 
-                                 rl.Color(color.r, color.g, color.b, 220))
-            
-            # Value text (consistent with HUD)
-            value_str = str(int(value))
-            text_color = color if is_low else COLOR_TEXT_DIM
-            rl.draw_text(value_str, bar_x + bar_w + 4, stat_y, 9, text_color)
-            
-            # Move to next stat
-            stat_x = bar_x + bar_w + 28
-        
-        # Encumbrance on second row
-        enc_x = x + 8
-        enc_y = y + 32
-        rl.draw_text("Wt", enc_x, enc_y, 9, COLOR_TEXT_DIM)
-        rl.draw_text("0/100", enc_x + 18, enc_y, 9, COLOR_TEXT_FAINT)
-        
-        # Gold
-        gold = player.get_item('money')
-        gold_str = f"${gold:,}"
-        gold_width = rl.measure_text(gold_str, 12)
-        rl.draw_text(gold_str, x + width - gold_width - 10, y + 18, 12, 
-                    rl.Color(255, 215, 0, 255))
-    
-    def _draw_equipment_area(self, player, x, y, width):
-        """Draw equipment slots: head and body on left, 8 accessory slots (2x4) on right"""
-        slot_size = 36  # Same size as base inventory slots
-        slot_gap = 4
-        label_height = 14  # Space for labels above slots
-        
-        # Starting y for slots (after label space)
-        slots_y = y
-        
-        # Left side: Head slot on top, Body slot below (stacked vertically)
-        equip_x = x + 8
-        
-        # Head slot with label
-        rl.draw_text("Head", equip_x, slots_y, 9, COLOR_TEXT_FAINT)
-        self._draw_equipment_slot_no_label(equip_x, slots_y + label_height, slot_size, None)
-        
-        # Body slot with label (below head)
-        body_y = slots_y + label_height + slot_size + slot_gap + 4
-        rl.draw_text("Body", equip_x, body_y, 9, COLOR_TEXT_FAINT)
-        self._draw_equipment_slot_no_label(equip_x, body_y + label_height, slot_size, None)
-        
-        # Right side: 8 accessory slots in 2 rows of 4
-        acc_x = equip_x + slot_size + 24  # Gap between equipment and accessories
-        
-        # Accessories label
-        rl.draw_text("Accessories", acc_x, slots_y, 9, COLOR_TEXT_FAINT)
-        
-        # Accessory slots (2 rows of 4)
-        acc_slots_y = slots_y + label_height
-        for row in range(2):
-            for col in range(4):
-                slot_x = acc_x + col * (slot_size + slot_gap)
-                slot_y = acc_slots_y + row * (slot_size + slot_gap)
-                rl.draw_rectangle(slot_x, slot_y, slot_size, slot_size, COLOR_BG_SLOT)
-                rl.draw_rectangle_lines(slot_x, slot_y, slot_size, slot_size, COLOR_BORDER)
-    
-    def _draw_equipment_slot_no_label(self, x, y, size, item):
-        """Draw a single equipment slot without label"""
-        has_item = item is not None
-        bg_color = COLOR_BG_SLOT_ACTIVE if has_item else COLOR_BG_SLOT
-        rl.draw_rectangle(x, y, size, size, bg_color)
-        rl.draw_rectangle_lines(x, y, size, size, COLOR_BORDER)
-    
-    def _draw_storage_section(self, player, x, y, width, label, num_slots):
-        """Draw a storage section with label and slots"""
-        slot_size = 36
-        slot_gap = 4
-        
-        # Section background
-        section_height = slot_size + 24
-        rl.draw_rectangle(x, y, width, section_height, rl.Color(255, 255, 255, 5))
-        rl.draw_rectangle_lines(x, y, width, section_height, COLOR_BORDER)
-        
-        # Label
-        rl.draw_text(label, x + 8, y + 4, 9, COLOR_TEXT_FAINT)
-        
-        # Slots
-        slots_x = x + 8
-        slots_y = y + 18
-        
-        for i in range(num_slots):
-            slot_x = slots_x + i * (slot_size + slot_gap)
-            rl.draw_rectangle(slot_x, slots_y, slot_size, slot_size, COLOR_BG_SLOT)
-            rl.draw_rectangle_lines(slot_x, slots_y, slot_size, slot_size, COLOR_BORDER)
-    
-    def _draw_inventory_right_panel(self, player, x, y, width):
-        """Draw the right panel with tabs: World, Status, Map"""
-        tab_names = ["World", "Status", "Map"]
-        tab_height = 40
-        
-        # Tab bar background (slight tint so tabs are visible on world tab)
-        rl.draw_rectangle(x, y, width, tab_height, rl.Color(13, 21, 32, 180))
-        
-        # Tab bar
-        tab_width = width // len(tab_names)
-        mouse_x = self.input.mouse_x
-        mouse_y = self.input.mouse_y
-        
-        for i, name in enumerate(tab_names):
-            tab_x = x + i * tab_width
-            is_active = i == self.inventory_tab
-            
-            # Check for mouse hover and click
-            is_hovered = (tab_x <= mouse_x < tab_x + tab_width and 
-                         y <= mouse_y < y + tab_height)
-            
-            if is_hovered and self.input.mouse_left_click:
-                self.inventory_tab = i
-                is_active = True
-            
-            # Tab background
-            if is_active:
-                rl.draw_rectangle(tab_x, y, tab_width, tab_height, rl.Color(255, 255, 255, 15))
-                rl.draw_line(tab_x, y + tab_height - 2, tab_x + tab_width, y + tab_height - 2, 
-                            rl.Color(255, 255, 255, 128))
-            elif is_hovered:
-                rl.draw_rectangle(tab_x, y, tab_width, tab_height, rl.Color(255, 255, 255, 8))
-            
-            # Tab text
-            text_color = COLOR_TEXT_BRIGHT if is_active else (COLOR_TEXT_DIM if is_hovered else COLOR_TEXT_FAINT)
-            text_width = rl.measure_text(name, 12)
-            rl.draw_text(name, tab_x + (tab_width - text_width) // 2, y + 14, 12, text_color)
-        
-        # Tab bar border
-        rl.draw_line(x, y + tab_height, x + width, y + tab_height, COLOR_BORDER)
-        
-        # Content area
-        content_x = x + 16
-        content_y = y + tab_height + 16
-        content_width = width - 32
-        content_height = self.canvas_height - tab_height - 32
-        
-        if self.inventory_tab == 0:
-            self._draw_world_tab(player, content_x, content_y, content_width, content_height)
-        elif self.inventory_tab == 1:
-            self._draw_status_tab(player, content_x, content_y, content_width, content_height)
-        elif self.inventory_tab == 2:
-            self._draw_map_tab(player, content_x, content_y, content_width, content_height)
-    
-    def _draw_world_tab(self, player, x, y, width, height):
-        """Draw the World tab - completely transparent to show game world"""
-        # Completely blank - game world shows through
-        pass
-    
-    def _draw_status_tab(self, player, x, y, width, height):
-        """Draw the Status tab - shows skills"""
-        # Section header
-        rl.draw_text("SKILLS", x, y, 11, COLOR_TEXT_DIM)
-        rl.draw_line(x, y + 16, x + width, y + 16, COLOR_BORDER)
-        
-        skill_y = y + 28
-        
-        # Group skills by category
-        combat_skills = []
-        benign_skills = []
-        both_skills = []
-        
-        for skill_id, skill_info in SKILLS.items():
-            skill_value = player.skills.get(skill_id, 0)
-            category = skill_info.get('category', 'benign')
-            name = skill_info.get('name', skill_id.title())
-            
-            entry = (name, skill_value, category)
-            if category == 'combat':
-                combat_skills.append(entry)
-            elif category == 'both':
-                both_skills.append(entry)
-            else:
-                benign_skills.append(entry)
-        
-        # Sort by value descending
-        combat_skills.sort(key=lambda x: -x[1])
-        benign_skills.sort(key=lambda x: -x[1])
-        both_skills.sort(key=lambda x: -x[1])
-        
-        # Draw combat skills
-        if combat_skills:
-            rl.draw_text("Combat", x, skill_y, 9, COLOR_HEALTH)
-            skill_y += 14
-            for name, value, _ in combat_skills[:6]:
-                self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_HEALTH)
-                skill_y += 18
-            skill_y += 10
-        
-        # Draw benign skills
-        if benign_skills:
-            rl.draw_text("Trade", x, skill_y, 9, COLOR_FATIGUE)
-            skill_y += 14
-            for name, value, _ in benign_skills[:8]:
-                self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_FATIGUE)
-                skill_y += 18
-            skill_y += 10
-        
-        # Draw hybrid skills
-        if both_skills:
-            rl.draw_text("Hybrid", x, skill_y, 9, COLOR_STAMINA)
-            skill_y += 14
-            for name, value, _ in both_skills[:4]:
-                self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_STAMINA)
-                skill_y += 18
-    
-    def _draw_skill_bar(self, x, y, width, name, value, color):
-        """Draw a single skill bar"""
-        name_width = 100
-        bar_width = width - name_width - 30
-        
-        # Skill name
-        rl.draw_text(name, x + 10, y, 10, COLOR_TEXT_DIM)
-        
-        # Bar background
-        bar_x = x + name_width
-        rl.draw_rectangle(bar_x, y + 2, bar_width, 6, rl.Color(255, 255, 255, 15))
-        
-        # Bar fill
-        fill_width = int(bar_width * value / 100)
-        bar_color = rl.Color(color.r, color.g, color.b, 150)
-        rl.draw_rectangle(bar_x, y + 2, fill_width, 6, bar_color)
-        
-        # Value text
-        value_str = str(int(value))
-        rl.draw_text(value_str, bar_x + bar_width + 6, y, 10, COLOR_TEXT_FAINT)
-    
-    def _draw_map_tab(self, player, x, y, width, height):
-        """Draw the Map tab - shows world map (placeholder)"""
-        # Header
-        rl.draw_text("WORLD MAP", x, y, 11, COLOR_TEXT_DIM)
-        rl.draw_line(x, y + 16, x + width, y + 16, COLOR_BORDER)
-        
-        # Map placeholder
-        map_y = y + 28
-        map_height = height - 40
-        
-        rl.draw_rectangle(x, map_y, width, map_height, rl.Color(45, 74, 62, 50))
-        rl.draw_rectangle_lines(x, map_y, width, map_height, COLOR_BORDER)
-        
-        text = "[ Map ]"
-        text_width = rl.measure_text(text, 16)
-        rl.draw_text(text, x + (width - text_width) // 2, map_y + map_height // 2, 16, COLOR_TEXT_FAINT)
-
 
 # Entry point for testing
 if __name__ == "__main__":

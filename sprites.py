@@ -8,6 +8,7 @@ Designed for compatibility with eventual Rust migration (raylib-rs).
 
 Sprite Sheet Layout:
 - Civilian1_Move.png: 4 frames × 8 directions (208x416, walking animation)
+- Civilian1_Move_CombatMode.png: 4 frames × 8 directions (208x416, combat mode walking)
 - Civilian1_Attack.png: 4 frames × 8 directions (208x416, attack animation)
 - Civilian1_Faint.png: 1 frame (52x52, death pose)
 
@@ -22,10 +23,11 @@ Direction Row Mapping (rows 0-7, clockwise from down):
 - Row 7: Down-Left
 
 Animation States:
-- Walk: 4 frames, loops continuously while moving
-- Attack: 4 frames, plays once when attacking
+- Walk: 4 frames, loops continuously while moving (normal mode)
+- WalkCombat: 4 frames, loops continuously while moving (combat mode)
+- Attack: 4 frames, plays once when attacking (requires combat mode)
 - Death: 1 frame, shown when dead
-- Idle: Uses first frame of Walk
+- Idle: Uses first frame of Walk or WalkCombat depending on combat mode
 """
 
 import pyray as rl
@@ -35,7 +37,7 @@ import time
 
 # Animation timing
 WALK_FRAME_DURATION = 0.12  # 120ms per frame = 480ms per cycle (4 frames)
-SPRINT_FRAME_DURATION = 0.1  # 80ms per frame = 320ms per cycle
+SPRINT_FRAME_DURATION = 0.08  # 80ms per frame = 320ms per cycle
 ATTACK_FRAME_DURATION = 0.06  # 60ms per frame = 240ms for full attack (4 frames)
 DEATH_FRAME_DURATION = 0.15  # Not used much with 1 frame
 
@@ -86,6 +88,7 @@ class SpriteManager:
         # Map action names to filenames
         sprite_files = {
             'Walk': 'sprites/Civilian1_Move.png',
+            'WalkCombat': 'sprites/Civilian1_Move_CombatMode.png',
             'Attack': 'sprites/Civilian1_Attack.png',
             'Death': 'sprites/Civilian1_Faint.png',
         }
@@ -134,7 +137,7 @@ class SpriteManager:
         """Get the source rectangle for a specific frame.
         
         Args:
-            action: 'Walk', 'Attack', or 'Death'
+            action: 'Walk', 'WalkCombat', 'Attack', or 'Death'
             direction_row: Row index (0-7) for direction
             frame_idx: Frame index (0-3) for animation
             
@@ -145,7 +148,7 @@ class SpriteManager:
             # Death sprite is a single frame, no direction rows
             return rl.Rectangle(0, 0, FRAME_WIDTH, FRAME_HEIGHT)
         
-        # For Walk and Attack: 4 columns × 8 rows
+        # For Walk, WalkCombat, and Attack: 4 columns × 8 rows
         x = frame_idx * FRAME_WIDTH
         y = direction_row * FRAME_HEIGHT
         return rl.Rectangle(x, y, FRAME_WIDTH, FRAME_HEIGHT)
@@ -220,6 +223,10 @@ class SpriteManager:
         char['_last_anim_x'] = current_x
         char['_last_anim_y'] = current_y
         
+        # Check if in combat mode
+        in_combat_mode = char.get('combat_mode', False)
+        walk_action = 'WalkCombat' if in_combat_mode else 'Walk'
+        
         if is_moving:
             is_sprinting = char.get('is_sprinting', False)
             is_backpedaling = char.get('is_backpedaling', False)
@@ -231,10 +238,10 @@ class SpriteManager:
             if is_backpedaling:
                 frame_idx = (FRAMES_PER_ROW - 1) - frame_idx
             
-            return 'Walk', frame_idx
+            return walk_action, frame_idx
         else:
-            # Idle - first frame of walk
-            return 'Walk', 0
+            # Idle - first frame of walk (or walk combat)
+            return walk_action, 0
     
     def recolor_red_to_color(self, frame_info, target_color, red_threshold=0.3):
         """Replace red-ish pixels in a frame with a target color.

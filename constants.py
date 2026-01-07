@@ -76,8 +76,9 @@ SQUEEZE_THRESHOLD_TICKS = 3  # Ticks blocked before starting to squeeze
 SQUEEZE_SLIDE_SPEED = 0.8  # How fast to slide perpendicular (relative to movement speed)
 
 # Adjacency threshold - how close characters need to be for interactions
-# Generous range so characters don't need to be perfectly aligned to trade/talk
-ADJACENCY_DISTANCE = 1.3 # Within 1.3 cells - can interact from reasonable distance
+ADJACENCY_DISTANCE = 0.8 # Within 0.8 cells - tighter for better targeting
+# Interact distance - tighter radius for player E interactions (must also be facing target)
+INTERACT_DISTANCE = 0.8  # Within 0.8 cells for E interactions
 
 # Door threshold - how close to a door to trigger zone transition (entering/exiting buildings)
 DOOR_THRESHOLD = 0.5

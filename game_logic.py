@@ -219,9 +219,12 @@ class GameLogic:
         return None
     
     def can_attack(self, char):
-        """Check if character can attack (not on cooldown).
-        Returns True if enough time has passed since last attack.
+        """Check if character can attack (not on cooldown and in combat mode).
+        Returns True if in combat mode and enough time has passed since last attack.
         """
+        # Must be in combat mode to attack
+        if not char.get('combat_mode', False):
+            return False
         last_attack_tick = char.get('last_attack_tick', -ATTACK_COOLDOWN_TICKS)
         return self.state.ticks - last_attack_tick >= ATTACK_COOLDOWN_TICKS
     
@@ -3321,6 +3324,9 @@ class GameLogic:
         # Process starvation
         self._process_starvation()
         
+        # Update NPC combat mode based on intent
+        self._process_npc_combat_mode()
+        
         # Handle deaths IMMEDIATELY - remove from game logic, store visual info separately
         # This must happen right after starvation before any other processing
         self._process_deaths()
@@ -3481,6 +3487,43 @@ class GameLogic:
                     char['is_frozen'] = False
                     char['starvation_health_lost'] = 0
                     char['ticks_starving'] = 0
+    
+    def _process_npc_combat_mode(self):
+        """Update combat mode for NPCs based on their intent.
+        
+        NPCs enter combat mode when:
+        - Their intent is 'attack'
+        - Their intent is 'flee' (defensive stance)
+        
+        NPCs exit combat mode when:
+        - They have no intent or a non-combat intent
+        
+        Player combat mode is controlled manually via R key.
+        """
+        for char in self.state.characters:
+            # Skip player - player controls their own combat mode
+            if char.is_player:
+                continue
+            
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            intent = char.intent
+            if intent:
+                action = intent.get('action')
+                # Enter combat mode for attack or flee intents
+                if action in ('attack', 'flee'):
+                    if not char.get('combat_mode', False):
+                        char['combat_mode'] = True
+                else:
+                    # Non-combat intent - exit combat mode
+                    if char.get('combat_mode', False):
+                        char['combat_mode'] = False
+            else:
+                # No intent - exit combat mode
+                if char.get('combat_mode', False):
+                    char['combat_mode'] = False
     
     def _update_farm_cells(self):
         """Update all farm cell states"""
