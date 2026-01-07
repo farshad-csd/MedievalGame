@@ -20,22 +20,27 @@ Options (context-sensitive):
 
 import pyray as rl
 import time
+from constants import (
+    UI_COLOR_BOX_BG, UI_COLOR_BORDER, UI_COLOR_BORDER_INNER,
+    UI_COLOR_TEXT, UI_COLOR_TEXT_DIM, UI_COLOR_HEADER_GREEN,
+    UI_COLOR_OPTION_SELECTED, UI_COLOR_OPTION_HOVER
+)
 
 
 # =============================================================================
 # MENU UI CONFIGURATION
 # =============================================================================
 
-# Colors matching the game's dark translucent UI style
-COLOR_BOX_BG = rl.Color(15, 12, 10, 230)
-COLOR_BOX_BORDER = rl.Color(90, 75, 60, 255)
-COLOR_BOX_BORDER_INNER = rl.Color(60, 50, 40, 255)
-COLOR_TEXT = rl.Color(240, 230, 210, 255)
-COLOR_TEXT_DIM = rl.Color(180, 170, 150, 255)
-COLOR_HEADER = rl.Color(140, 180, 120, 255)  # Greenish for environment
-COLOR_CURSOR = rl.Color(140, 180, 120, 255)
-COLOR_OPTION_SELECTED = rl.Color(255, 255, 255, 30)
-COLOR_OPTION_HOVER = rl.Color(255, 255, 255, 15)
+# Colors from shared UI constants
+COLOR_BOX_BG = rl.Color(*UI_COLOR_BOX_BG)
+COLOR_BOX_BORDER = rl.Color(*UI_COLOR_BORDER)
+COLOR_BOX_BORDER_INNER = rl.Color(*UI_COLOR_BORDER_INNER)
+COLOR_TEXT = rl.Color(*UI_COLOR_TEXT)
+COLOR_TEXT_DIM = rl.Color(*UI_COLOR_TEXT_DIM)
+COLOR_HEADER = rl.Color(*UI_COLOR_HEADER_GREEN)  # Greenish for environment
+COLOR_CURSOR = rl.Color(*UI_COLOR_HEADER_GREEN)
+COLOR_OPTION_SELECTED = rl.Color(*UI_COLOR_OPTION_SELECTED)
+COLOR_OPTION_HOVER = rl.Color(*UI_COLOR_OPTION_HOVER)
 
 # Layout
 MENU_BOX_WIDTH = 160

@@ -657,14 +657,10 @@ class BoardGUI:
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_RIGHT):
             self.input.mouse_right_click = True
         
-        # Mouse wheel for zoom
+        # Mouse wheel - stored but not used for zoom (zoom is +/- keys only)
         wheel = rl.get_mouse_wheel_move()
         if wheel != 0:
             self.input.mouse_wheel = wheel
-            if wheel > 0:
-                self.input.zoom_in = True
-            else:
-                self.input.zoom_out = True
     
     def _handle_gamepad_input(self):
         """Handle gamepad/controller input"""
@@ -1059,12 +1055,61 @@ class BoardGUI:
             if not self.environment_menu.is_active:
                 self.inventory_menu.toggle()
         
-        # Tab switching in inventory (Q/E or bumpers)
+        # Tab switching in inventory (gamepad bumpers only)
         if self.inventory_menu.is_open:
-            if rl.is_key_pressed(rl.KEY_Q) or rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1):
-                self.inventory_menu.prev_tab()
-            if rl.is_key_pressed(rl.KEY_E) or rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_TRIGGER_1):
-                self.inventory_menu.next_tab()
+            # Check if context menu is open - it takes priority
+            if self.inventory_menu.context_menu_open:
+                # Context menu input - gamepad only for navigation
+                nav_up = False
+                nav_down = False
+                select = False
+                cancel = rl.is_key_pressed(rl.KEY_ESCAPE)  # Escape always works to cancel
+                
+                # Gamepad context menu input
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_FACE_UP):
+                    nav_up = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_FACE_DOWN):
+                    nav_down = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_DOWN):  # A
+                    select = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_RIGHT):  # B
+                    cancel = True
+                
+                # Mouse click to select option
+                if self.input.mouse_left_click:
+                    mx, my = self.input.mouse_x, self.input.mouse_y
+                    cmx, cmy, cmw, cmh = self.inventory_menu.context_menu_rect
+                    if cmx <= mx < cmx + cmw and cmy <= my < cmy + cmh:
+                        select = True
+                    else:
+                        cancel = True  # Click outside closes menu
+                
+                self.inventory_menu.handle_context_menu_input(nav_up, nav_down, select, cancel)
+            else:
+                # Normal inventory handling
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1):
+                    self.inventory_menu.prev_tab()
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_TRIGGER_1):
+                    self.inventory_menu.next_tab()
+                # Handle navigation input (gamepad only)
+                self.inventory_menu.handle_input()
+                
+                # Handle item interactions - gamepad buttons only
+                a_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_DOWN)
+                x_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_LEFT)
+                y_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP)
+                
+                # Shift+Click opens context menu (mouse)
+                if self.input.mouse_left_click and rl.is_key_down(rl.KEY_LEFT_SHIFT):
+                    clicked_slot = self.inventory_menu._get_slot_at_mouse()
+                    if clicked_slot and clicked_slot[0] == 'inventory':
+                        self.inventory_menu.open_context_menu(clicked_slot[1])
+                elif a_pressed or x_pressed:
+                    self.inventory_menu.handle_item_interaction(full_interact=a_pressed, single_interact=x_pressed)
+                
+                # Y button opens context menu (gamepad)
+                if y_pressed:
+                    self.inventory_menu.open_context_menu()
     
     def _screen_to_world(self, screen_x, screen_y):
         """Convert screen coordinates to world coordinates."""
@@ -1282,7 +1327,9 @@ class BoardGUI:
             self.inventory_menu.set_canvas_size(self.canvas_width, self.canvas_height)
             self.inventory_menu.update_input(
                 self.input.mouse_x, self.input.mouse_y,
-                self.input.mouse_left_click, self.input.gamepad_connected
+                self.input.mouse_left_click, self.input.gamepad_connected,
+                self.input.mouse_right_click,
+                rl.is_key_down(rl.KEY_LEFT_SHIFT) or rl.is_key_down(rl.KEY_RIGHT_SHIFT)
             )
             self.inventory_menu.render()
         else:

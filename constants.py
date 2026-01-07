@@ -422,3 +422,38 @@ ALLEGIANCE_WHEAT_TIMEOUT = 30 * TICK_MULTIPLIER  # How long until soldiers quit
 
 # should be able to make easily: campfire, post (requires rope), wooden sword, fishing rod, torch
 # swinging a wooden sword forever would get you to be a better swordsman - up to a point. then you need real experience or a trainer
+
+# =============================================================================
+# UI COLOR SCHEME (shared across all menus)
+# =============================================================================
+# These are RGBA tuples - convert to rl.Color in each file that uses them
+# Example: rl.Color(*UI_COLOR_BOX_BG)
+
+# Panel/box backgrounds
+UI_COLOR_BOX_BG = (15, 12, 10, 230)           # Dark brown, high opacity
+UI_COLOR_BOX_BG_MEDIUM = (15, 12, 10, 200)    # Dark brown, medium opacity  
+UI_COLOR_BOX_BG_LIGHT = (15, 12, 10, 180)     # Dark brown, lower opacity
+
+# Borders
+UI_COLOR_BORDER = (90, 75, 60, 255)           # Light brown border
+UI_COLOR_BORDER_INNER = (60, 50, 40, 255)     # Darker inner border
+
+# Text
+UI_COLOR_TEXT = (240, 230, 210, 255)          # Warm white text
+UI_COLOR_TEXT_DIM = (180, 170, 150, 255)      # Dimmed text
+UI_COLOR_TEXT_FAINT = (120, 115, 100, 128)    # Very faint text
+
+# Interactive elements
+UI_COLOR_OPTION_SELECTED = (255, 255, 255, 30)   # Selection highlight
+UI_COLOR_OPTION_HOVER = (255, 255, 255, 15)      # Hover highlight
+
+# Slot backgrounds (for inventory)
+UI_COLOR_SLOT_BG = (255, 255, 255, 20)        # Empty slot
+UI_COLOR_SLOT_ACTIVE = (255, 255, 255, 50)    # Slot with item
+UI_COLOR_SLOT_SELECTED = (140, 180, 120, 100) # Selected slot (green tint)
+UI_COLOR_SLOT_BORDER = (255, 255, 255, 60)    # Slot border
+UI_COLOR_SLOT_BORDER_SELECTED = (140, 180, 120, 255)  # Selected slot border (green)
+
+# Accent colors
+UI_COLOR_CURSOR = (220, 180, 100, 255)        # Gold cursor/highlight
+UI_COLOR_HEADER_GREEN = (140, 180, 120, 255)  # Green header text
