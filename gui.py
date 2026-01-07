@@ -21,7 +21,7 @@ import math
 import os
 from constants import (
     CELL_SIZE, UPDATE_INTERVAL,
-    FARM_CELL_COLORS, JOB_TIERS,
+    FARM_CELL_COLORS, JOB_TIERS, ITEMS,
     BG_COLOR, GRID_COLOR, ROAD_COLOR,
     TICKS_PER_DAY, TICKS_PER_YEAR, SLEEP_START_FRACTION,
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
@@ -399,6 +399,17 @@ class BoardGUI:
                         frames.append(rl.Rectangle(i * frame_w, 0, frame_w, frame_h))
                     self.occluder_frames[occluder_type] = frames
         
+        # Load item sprites for ground items (from ITEMS constant)
+        self.item_textures = {}
+        for item_type, item_info in ITEMS.items():
+            sprite_name = item_info.get('sprite')
+            if sprite_name:
+                filepath = os.path.join(self.script_dir, 'sprites', 'items', sprite_name)
+                if os.path.exists(filepath):
+                    self.item_textures[item_type] = rl.load_texture(filepath)
+                else:
+                    self.item_textures[item_type] = None
+        
         # Load fonts
         self.font_default = rl.get_font_default()
     
@@ -470,6 +481,11 @@ class BoardGUI:
         
         # Unload textures
         for tex in self.world_textures.values():
+            if tex:
+                rl.unload_texture(tex)
+        
+        # Unload item textures
+        for tex in self.item_textures.values():
             if tex:
                 rl.unload_texture(tex)
         
@@ -1057,8 +1073,34 @@ class BoardGUI:
         
         # Tab switching in inventory (gamepad bumpers only)
         if self.inventory_menu.is_open:
+            # Check if confirmation popup is open - it takes highest priority
+            if self.inventory_menu._confirm_popup_open:
+                nav_left = False
+                nav_right = False
+                select = False
+                cancel = rl.is_key_pressed(rl.KEY_ESCAPE)
+                
+                # Keyboard left/right
+                if rl.is_key_pressed(rl.KEY_LEFT) or rl.is_key_pressed(rl.KEY_A):
+                    nav_left = True
+                if rl.is_key_pressed(rl.KEY_RIGHT) or rl.is_key_pressed(rl.KEY_D):
+                    nav_right = True
+                if rl.is_key_pressed(rl.KEY_ENTER) or rl.is_key_pressed(rl.KEY_SPACE):
+                    select = True
+                
+                # Gamepad popup input
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_FACE_LEFT):
+                    nav_left = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_FACE_RIGHT):
+                    nav_right = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_DOWN):  # A
+                    select = True
+                if rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_RIGHT):  # B
+                    cancel = True
+                
+                self.inventory_menu.handle_confirm_popup_input(nav_left, nav_right, select, cancel)
             # Check if context menu is open - it takes priority
-            if self.inventory_menu.context_menu_open:
+            elif self.inventory_menu.context_menu_open:
                 # Context menu input - gamepad only for navigation
                 nav_up = False
                 nav_down = False
@@ -1098,6 +1140,7 @@ class BoardGUI:
                 a_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_DOWN)
                 x_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_LEFT)
                 y_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP)
+                lb_held = rl.is_gamepad_button_down(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1)
                 
                 # Shift+Click opens context menu (mouse)
                 if self.input.mouse_left_click and rl.is_key_down(rl.KEY_LEFT_SHIFT):
@@ -1105,7 +1148,13 @@ class BoardGUI:
                     if clicked_slot and clicked_slot[0] == 'inventory':
                         self.inventory_menu.open_context_menu(clicked_slot[1])
                 elif a_pressed or x_pressed:
-                    self.inventory_menu.handle_item_interaction(full_interact=a_pressed, single_interact=x_pressed)
+                    # LB + A = quick move, otherwise normal interact
+                    quick_move = lb_held and a_pressed
+                    self.inventory_menu.handle_item_interaction(
+                        full_interact=a_pressed and not lb_held, 
+                        single_interact=x_pressed,
+                        quick_move=quick_move
+                    )
                 
                 # Y button opens context menu (gamepad)
                 if y_pressed:
@@ -1716,6 +1765,14 @@ class BoardGUI:
                 sort_y = char.y
             drawables.append(('character', sort_y, char, None, None))
         
+        # Add ground items - only those in the same zone we're rendering
+        if hasattr(self.state, 'ground_items'):
+            for ground_item in self.state.ground_items.get_items_in_zone(rendering_zone):
+                # Sort ground items slightly behind things at the same Y
+                # by subtracting a small amount from sort_y
+                sort_y = ground_item.y - 0.1
+                drawables.append(('ground_item', sort_y, ground_item, None, None))
+        
         # Sort by Y position (smaller Y drawn first = behind)
         drawables.sort(key=lambda d: d[1])
         
@@ -1744,6 +1801,8 @@ class BoardGUI:
         for dtype, sort_y, entity, pos, data in drawables:
             if dtype == 'occluder':
                 self._draw_single_occluder(entity, pos, data)
+            elif dtype == 'ground_item':
+                self._draw_ground_item(entity)
             elif dtype == 'character':
                 self._draw_single_character_sprite(entity)
                 ui_info = self._character_ui_cache[-1]
@@ -2702,6 +2761,58 @@ void main() {
         g = int(0 + t * 216)
         b = int(139 + t * (230 - 139))
         return f"#{r:02x}{g:02x}{b:02x}"
+    
+    def _draw_ground_item(self, ground_item):
+        """Draw a ground item in the world with its sprite and amount."""
+        cell_size = self._cam_cell_size
+        
+        # Get position with visual offset
+        item_x = ground_item.x + ground_item.visual_offset_x
+        item_y = ground_item.y + ground_item.visual_offset_y
+        
+        # Convert to screen position
+        screen_x, screen_y = self._world_to_screen(item_x, item_y)
+        
+        # Item sprite size (smaller than a full cell)
+        sprite_size = int(cell_size * 0.5)
+        if sprite_size < 8:
+            sprite_size = 8  # Minimum size for visibility
+        
+        # Center the sprite on the position
+        draw_x = int(screen_x - sprite_size / 2)
+        draw_y = int(screen_y - sprite_size / 2)
+        
+        # Get texture for this item type
+        texture = self.item_textures.get(ground_item.item_type)
+        
+        if texture and texture.id > 0:
+            # Draw the sprite scaled to fit
+            source_rect = rl.Rectangle(0, 0, texture.width, texture.height)
+            dest_rect = rl.Rectangle(draw_x, draw_y, sprite_size, sprite_size)
+            rl.draw_texture_pro(texture, source_rect, dest_rect, rl.Vector2(0, 0), 0, rl.WHITE)
+        else:
+            # Fallback: draw a colored square with icon
+            item_info = ITEMS.get(ground_item.item_type, {})
+            color = item_info.get('color', (128, 128, 128, 200))
+            icon = item_info.get('icon', '?')
+            
+            rl.draw_rectangle(draw_x, draw_y, sprite_size, sprite_size, rl.Color(*color))
+            
+            icon_size = max(8, sprite_size // 2)
+            icon_x = draw_x + (sprite_size - rl.measure_text(icon, icon_size)) // 2
+            icon_y = draw_y + (sprite_size - icon_size) // 2
+            rl.draw_text(icon, icon_x, icon_y, icon_size, rl.WHITE)
+        
+        # Draw amount below sprite (only if more than 1)
+        if ground_item.amount > 1:
+            amount_str = str(ground_item.amount)
+            amount_size = max(8, int(cell_size * 0.2))
+            amount_x = draw_x + (sprite_size - rl.measure_text(amount_str, amount_size)) // 2
+            amount_y = draw_y + sprite_size + 1
+            
+            # Dark outline for readability
+            rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
+            rl.draw_text(amount_str, amount_x, amount_y, amount_size, rl.WHITE)
     
     def _draw_single_character_sprite(self, char):
         """Draw a single character's sprite only (UI drawn separately on top)"""

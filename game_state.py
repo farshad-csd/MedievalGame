@@ -20,6 +20,7 @@ from scenario_characters import CHARACTER_TEMPLATES
 from character import Character, create_character
 from static_interactables import InteractableManager
 from interiors import InteriorManager
+from ground_items import GroundItemManager
 
 
 class GameState:
@@ -49,6 +50,9 @@ class GameState:
         
         # Interior spaces for buildings
         self.interiors = InteriorManager()
+        
+        # Ground items (dropped items in the world)
+        self.ground_items = GroundItemManager()
         
         # Character data
         self.characters = []  # List of Character instances

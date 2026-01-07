@@ -20,6 +20,7 @@ from constants import (
     UI_COLOR_SLOT_BORDER, UI_COLOR_SLOT_BORDER_SELECTED,
     UI_COLOR_OPTION_SELECTED
 )
+from ground_items import GroundItem, find_valid_drop_position
 
 
 # =============================================================================
@@ -112,7 +113,7 @@ class InventoryMenu:
         self.gamepad_connected = False
         
         # Navigation state for inventory slots
-        # Sections: 'equipment_head', 'equipment_body', 'accessories', 'inventory'
+        # Sections: 'equipment_head', 'equipment_body', 'accessories', 'inventory', 'ground'
         self.selected_section = 'inventory'  # Start in inventory section
         self.selected_slot = 0  # Index within current section
         
@@ -122,12 +123,24 @@ class InventoryMenu:
         # Slot geometry cache (populated during render for hit detection)
         self._slot_rects = {}  # {('section', index): (x, y, w, h)}
         
+        # Ground items state - cached nearby items for current frame
+        self._nearby_ground_items = []  # List of GroundItem objects within range
+        self._ground_pickup_radius = 1.0  # How close player must be to pick up
+        
         # Context menu state
         self.context_menu_open = False
         self.context_menu_slot = None  # Index of slot the menu is for
         self.context_menu_options = []  # List of available options
         self.context_menu_selected = 0  # Currently highlighted option
         self.context_menu_rect = (0, 0, 0, 0)  # x, y, w, h for rendering
+        
+        # Confirmation popup state (for destructive actions like Burn)
+        self._confirm_popup_open = False
+        self._confirm_popup_action = None  # 'burn', etc.
+        self._confirm_popup_slot = None  # Slot index for the action
+        self._confirm_popup_selected = 1  # 0=Yes, 1=No (default to No for safety)
+        self._confirm_popup_item_type = None
+        self._confirm_popup_item_amount = 0
         
         # Input repeat delay for smooth navigation
         self._input_delay = 0.0
@@ -184,6 +197,8 @@ class InventoryMenu:
         """Close the inventory menu."""
         # Close context menu if open
         self.close_context_menu()
+        # Close confirmation popup if open
+        self._close_confirm_popup()
         # Return held item to inventory if any
         if self.held_item and self.state.player:
             self._return_held_item_to_inventory()
@@ -191,7 +206,7 @@ class InventoryMenu:
         self.is_open = False
     
     def _return_held_item_to_inventory(self):
-        """Return held item to first available inventory slot."""
+        """Return held item to first available inventory slot, or drop to ground if full."""
         if not self.held_item or not self.state.player:
             return
         
@@ -225,7 +240,9 @@ class InventoryMenu:
                 self.held_item = None
                 return
         
-        # If still holding item, it's lost (inventory full) - shouldn't happen normally
+        # If still holding item, drop to ground (inventory full)
+        if self.held_item:
+            self._drop_held_item_to_ground(player)
     
     def toggle(self):
         """Toggle the inventory menu open/closed."""
@@ -256,8 +273,18 @@ class InventoryMenu:
         self.mouse_right_click = mouse_right_click
         self.gamepad_connected = gamepad_connected
         
-        # Handle mouse clicks on inventory slots (but not if shift is held - that opens context menu)
-        if self.is_open and not self.context_menu_open and (mouse_left_click or mouse_right_click) and not shift_held:
+        # Handle shift+click for quick-move from ground to inventory (Minecraft style)
+        if self.is_open and not self.context_menu_open and not self._confirm_popup_open and mouse_left_click and shift_held:
+            clicked_slot = self._get_slot_at_mouse()
+            if clicked_slot:
+                section, index = clicked_slot
+                if section == 'ground':
+                    self._quick_move_ground_to_inventory(index)
+                    return  # Don't process normal click
+                # Note: inventory shift+click handled in gui.py (opens context menu)
+        
+        # Handle mouse clicks on inventory slots (but not if shift is held or popup is open)
+        if self.is_open and not self.context_menu_open and not self._confirm_popup_open and (mouse_left_click or mouse_right_click) and not shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
                 section, index = clicked_slot
@@ -266,6 +293,11 @@ class InventoryMenu:
                         self._interact_slot_full(index)
                     elif mouse_right_click:
                         self._interact_slot_single(index)
+                elif section == 'ground':
+                    if mouse_left_click:
+                        self._interact_ground_slot_full(index)
+                    elif mouse_right_click:
+                        self._interact_ground_slot_single(index)
     
     def update_scroll(self):
         """Handle scroll input - call this every frame when menu is open.
@@ -488,23 +520,38 @@ class InventoryMenu:
                         self.held_item = None
             # Different type - do nothing (can't place)
     
-    def handle_item_interaction(self, full_interact=False, single_interact=False):
+    def handle_item_interaction(self, full_interact=False, single_interact=False, quick_move=False):
         """
         Handle gamepad item interactions on the currently selected slot.
         
         Args:
             full_interact: A button pressed - pick up/place full stack
             single_interact: X button pressed - pick up half/place single
+            quick_move: LB + A pressed - quick move to other container
         """
         if not self.is_open:
             return
         
-        # Only interact with inventory slots for now
+        # Handle quick move (LB + A)
+        if quick_move:
+            if self.selected_section == 'inventory':
+                self._quick_move_inventory_to_ground(self.selected_slot)
+            elif self.selected_section == 'ground':
+                self._quick_move_ground_to_inventory(self.selected_slot)
+            return
+        
+        # Handle inventory slots
         if self.selected_section == 'inventory':
             if full_interact:
                 self._interact_slot_full(self.selected_slot)
             elif single_interact:
                 self._interact_slot_single(self.selected_slot)
+        # Handle ground slots
+        elif self.selected_section == 'ground':
+            if full_interact:
+                self._interact_ground_slot_full(self.selected_slot)
+            elif single_interact:
+                self._interact_ground_slot_single(self.selected_slot)
     
     # =========================================================================
     # CONTEXT MENU METHODS
@@ -570,11 +617,34 @@ class InventoryMenu:
         if item_type == 'bread':
             options.append('Use')
         
-        # Only show menu if there are options
-        if options:
-            options.append('Cancel')
+        # All items can be dropped
+        options.append('Drop')
+        
+        # Burn option if adjacent to usable stove or campfire
+        if self._can_burn_items():
+            options.append('Burn')
+        
+        options.append('Cancel')
         
         return options
+    
+    def _can_burn_items(self):
+        """Check if player is adjacent to a usable stove or campfire."""
+        player = self.state.player
+        if not player:
+            return False
+        
+        # Check for adjacent stove that player can use
+        stove = self.state.interactables.get_adjacent_stove(player)
+        if stove and stove.can_use(player):
+            return True
+        
+        # Check for adjacent campfire (anyone can use)
+        campfire = self.state.interactables.get_adjacent_campfire(player)
+        if campfire:
+            return True
+        
+        return False
     
     def handle_context_menu_input(self, nav_up=False, nav_down=False, select=False, cancel=False):
         """
@@ -639,6 +709,12 @@ class InventoryMenu:
         
         if action == 'Use':
             self._use_item(slot_index, item)
+        elif action == 'Drop':
+            self._quick_move_inventory_to_ground(slot_index)
+        elif action == 'Burn':
+            # Open confirmation popup instead of immediately burning
+            self._open_burn_confirmation(slot_index, item)
+            return  # Don't close context menu yet - popup handles it
         
         self.close_context_menu()
     
@@ -661,6 +737,186 @@ class InventoryMenu:
                 if result.get('recovered_from_starvation'):
                     msg = f"{player.get_display_name()} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}"
                 self.state.log_action(msg)
+    
+    # =========================================================================
+    # CONFIRMATION POPUP METHODS
+    # =========================================================================
+    
+    def _open_burn_confirmation(self, slot_index, item):
+        """Open the burn confirmation popup."""
+        self.close_context_menu()
+        
+        self._confirm_popup_open = True
+        self._confirm_popup_action = 'burn'
+        self._confirm_popup_slot = slot_index
+        self._confirm_popup_selected = 1  # Default to No for safety
+        self._confirm_popup_item_type = item.get('type', 'item')
+        self._confirm_popup_item_amount = item.get('amount', 1)
+    
+    def _close_confirm_popup(self):
+        """Close the confirmation popup."""
+        self._confirm_popup_open = False
+        self._confirm_popup_action = None
+        self._confirm_popup_slot = None
+        self._confirm_popup_selected = 1
+        self._confirm_popup_item_type = None
+        self._confirm_popup_item_amount = 0
+    
+    def handle_confirm_popup_input(self, nav_left=False, nav_right=False, select=False, cancel=False):
+        """
+        Handle input for the confirmation popup.
+        
+        Args:
+            nav_left: Navigate left pressed
+            nav_right: Navigate right pressed
+            select: Select/confirm pressed
+            cancel: Cancel/back pressed
+            
+        Returns:
+            True if input was consumed
+        """
+        if not self._confirm_popup_open:
+            return False
+        
+        if cancel:
+            self._close_confirm_popup()
+            return True
+        
+        if nav_left or nav_right:
+            # Toggle between Yes (0) and No (1)
+            self._confirm_popup_selected = 1 - self._confirm_popup_selected
+            return True
+        
+        if select:
+            if self._confirm_popup_selected == 0:  # Yes
+                self._execute_confirm_action()
+            self._close_confirm_popup()
+            return True
+        
+        return False
+    
+    def _execute_confirm_action(self):
+        """Execute the confirmed action."""
+        if self._confirm_popup_action == 'burn':
+            self._burn_item(self._confirm_popup_slot)
+    
+    def _burn_item(self, slot_index):
+        """Burn/destroy an item from inventory."""
+        if not self.state.player:
+            return
+        
+        player = self.state.player
+        inventory = player.inventory
+        
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+        
+        item = inventory[slot_index]
+        if item is None:
+            return
+        
+        item_type = item.get('type', 'item')
+        amount = item.get('amount', 1)
+        
+        # Get display name from ITEMS constant
+        item_info = ITEMS.get(item_type, {})
+        display_name = item_info.get('name', item_type.capitalize())
+        
+        # Remove the item
+        inventory[slot_index] = None
+        
+        # Log the action
+        self.state.log_action(f"{player.get_display_name()} burned {amount} {display_name}")
+    
+    def _draw_confirm_popup(self):
+        """Draw the confirmation popup if open."""
+        if not self._confirm_popup_open:
+            return
+        
+        # Get item display name
+        item_info = ITEMS.get(self._confirm_popup_item_type, {})
+        display_name = item_info.get('name', self._confirm_popup_item_type.capitalize())
+        
+        # Popup dimensions - mobile friendly (larger touch targets)
+        popup_width = min(280, self.canvas_width - 40)
+        popup_height = 120
+        
+        # Center on screen
+        popup_x = (self.canvas_width - popup_width) // 2
+        popup_y = (self.canvas_height - popup_height) // 2
+        
+        # Draw darkened background overlay
+        rl.draw_rectangle(0, 0, self.canvas_width, self.canvas_height, rl.Color(0, 0, 0, 150))
+        
+        # Draw popup background
+        rl.draw_rectangle(popup_x, popup_y, popup_width, popup_height, COLOR_BOX_BG)
+        rl.draw_rectangle_lines(popup_x, popup_y, popup_width, popup_height, rl.Color(200, 100, 100, 255))
+        rl.draw_rectangle_lines(popup_x + 1, popup_y + 1, popup_width - 2, popup_height - 2, rl.Color(150, 75, 75, 255))
+        
+        # Title
+        title = "Burn Item?"
+        title_width = rl.measure_text(title, 14)
+        rl.draw_text(title, popup_x + (popup_width - title_width) // 2, popup_y + 12, 14, rl.Color(255, 150, 150, 255))
+        
+        # Message
+        msg = f"Destroy {self._confirm_popup_item_amount} {display_name}?"
+        msg_width = rl.measure_text(msg, 11)
+        rl.draw_text(msg, popup_x + (popup_width - msg_width) // 2, popup_y + 38, 11, COLOR_TEXT_BRIGHT)
+        
+        # Warning
+        warning = "This cannot be undone!"
+        warning_width = rl.measure_text(warning, 10)
+        rl.draw_text(warning, popup_x + (popup_width - warning_width) // 2, popup_y + 55, 10, rl.Color(255, 100, 100, 200))
+        
+        # Buttons - large touch targets
+        button_width = 80
+        button_height = 32
+        button_gap = 20
+        buttons_y = popup_y + popup_height - button_height - 15
+        
+        # Center the two buttons
+        total_buttons_width = button_width * 2 + button_gap
+        buttons_start_x = popup_x + (popup_width - total_buttons_width) // 2
+        
+        yes_x = buttons_start_x
+        no_x = buttons_start_x + button_width + button_gap
+        
+        # Yes button
+        yes_selected = self._confirm_popup_selected == 0
+        yes_bg = rl.Color(150, 60, 60, 255) if yes_selected else rl.Color(80, 40, 40, 200)
+        yes_border = rl.Color(255, 100, 100, 255) if yes_selected else rl.Color(120, 80, 80, 200)
+        rl.draw_rectangle(yes_x, buttons_y, button_width, button_height, yes_bg)
+        rl.draw_rectangle_lines(yes_x, buttons_y, button_width, button_height, yes_border)
+        yes_text = "Yes"
+        yes_text_width = rl.measure_text(yes_text, 12)
+        rl.draw_text(yes_text, yes_x + (button_width - yes_text_width) // 2, buttons_y + 10, 12, 
+                    COLOR_TEXT_BRIGHT if yes_selected else COLOR_TEXT_DIM)
+        
+        # No button
+        no_selected = self._confirm_popup_selected == 1
+        no_bg = rl.Color(60, 80, 60, 255) if no_selected else rl.Color(40, 50, 40, 200)
+        no_border = rl.Color(100, 180, 100, 255) if no_selected else rl.Color(80, 100, 80, 200)
+        rl.draw_rectangle(no_x, buttons_y, button_width, button_height, no_bg)
+        rl.draw_rectangle_lines(no_x, buttons_y, button_width, button_height, no_border)
+        no_text = "No"
+        no_text_width = rl.measure_text(no_text, 12)
+        rl.draw_text(no_text, no_x + (button_width - no_text_width) // 2, buttons_y + 10, 12,
+                    COLOR_TEXT_BRIGHT if no_selected else COLOR_TEXT_DIM)
+        
+        # Handle mouse hover/click on buttons
+        if self.mouse_left_click:
+            if yes_x <= self.mouse_x < yes_x + button_width and buttons_y <= self.mouse_y < buttons_y + button_height:
+                self._confirm_popup_selected = 0
+                self._execute_confirm_action()
+                self._close_confirm_popup()
+            elif no_x <= self.mouse_x < no_x + button_width and buttons_y <= self.mouse_y < buttons_y + button_height:
+                self._close_confirm_popup()
+        else:
+            # Update hover state
+            if yes_x <= self.mouse_x < yes_x + button_width and buttons_y <= self.mouse_y < buttons_y + button_height:
+                self._confirm_popup_selected = 0
+            elif no_x <= self.mouse_x < no_x + button_width and buttons_y <= self.mouse_y < buttons_y + button_height:
+                self._confirm_popup_selected = 1
     
     def handle_input(self, dt=None):
         """
@@ -753,13 +1009,40 @@ class InventoryMenu:
         # - equipment (Head and Body side by side)
         # - accessories (2 rows of 4)
         # - inventory (5 slots in 1 row)
+        # - ground (dynamic rows of 5)
         
-        if section == 'inventory':
+        if section == 'ground':
+            ground_rows = self._calculate_ground_rows()
+            total_ground_slots = ground_rows * 5
+            row = slot // 5
+            col = slot % 5
+            
+            if dx != 0:
+                col = (col + dx) % 5
+                slot = row * 5 + col
+            
+            if dy > 0:  # Down within ground
+                new_row = row + 1
+                if new_row < ground_rows:
+                    slot = new_row * 5 + col
+                # Else stay at bottom
+            elif dy < 0:  # Up
+                if row > 0:
+                    slot = (row - 1) * 5 + col
+                else:
+                    # Go up to inventory
+                    section = 'inventory'
+                    slot = min(col, 4)
+        
+        elif section == 'inventory':
             if dx != 0:
                 slot = (slot + dx) % 5
             if dy < 0:  # Up to accessories
                 section = 'accessories'
                 slot = min(4 + min(slot, 3), 7)
+            elif dy > 0:  # Down to ground
+                section = 'ground'
+                slot = min(slot, 4)
         
         elif section == 'accessories':
             row = slot // 4
@@ -860,9 +1143,12 @@ class InventoryMenu:
         
         # Draw context menu on top of everything
         self._draw_context_menu()
+        
+        # Draw confirmation popup on top of everything (including context menu)
+        self._draw_confirm_popup()
     
     def _draw_left_panel(self, player, x, y, width):
-        """Draw the left inventory panel with equipment and storage."""
+        """Draw the left inventory panel with equipment, storage, and ground."""
         padding = 8
         inner_x = x + padding
         inner_width = width - padding * 2
@@ -880,12 +1166,19 @@ class InventoryMenu:
         calculated_slot_size = available_for_slots // 5
         slot_size = max(min_slot_size, min(max_slot_size, calculated_slot_size))
         
+        # Update nearby ground items cache
+        self._update_nearby_ground_items(player)
+        
+        # Calculate ground section height (dynamic rows)
+        ground_rows = self._calculate_ground_rows()
+        ground_section_height = 24 + ground_rows * (slot_size + slot_gap)
+        
         # Calculate total content height to determine if scrolling is needed
-        # Status bar: ~50-70px, Equipment area: ~100-140px, Inventory: ~60px
+        # Status bar: ~50-70px, Equipment area: ~100-140px, Inventory: ~60px, Ground: dynamic
         status_height = 70 if compact_mode else 50
         equip_height = 140 if compact_mode else 100
         inventory_height = slot_size + 24
-        total_content_height = padding + status_height + 8 + equip_height + 8 + inventory_height + padding
+        total_content_height = padding + status_height + 8 + equip_height + 8 + inventory_height + 8 + ground_section_height + padding
         self._left_panel_content_height = total_content_height
         
         # Available height for content
@@ -916,6 +1209,10 @@ class InventoryMenu:
         
         # === BASE INVENTORY (5 slots) ===
         self._draw_storage_section(player, inner_x, inner_y, inner_width, "Base Inventory", 5, slot_size)
+        inner_y += inventory_height + 8
+        
+        # === GROUND (nearby dropped items) ===
+        self._draw_ground_section(player, inner_x, inner_y, inner_width, slot_size, ground_rows)
         
         # End scissor mode
         rl.end_scissor_mode()
@@ -1188,6 +1485,358 @@ class InventoryMenu:
                 # Dark outline for readability
                 rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
                 rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
+    
+    def _update_nearby_ground_items(self, player):
+        """Update the cache of ground items near the player."""
+        if not player or not hasattr(self.state, 'ground_items'):
+            self._nearby_ground_items = []
+            return
+        
+        # Get player position and zone
+        if player.zone:
+            # Inside an interior - use prevailing coords
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            # Exterior - use world coords
+            px, py = player.x, player.y
+        
+        # Get nearby items
+        self._nearby_ground_items = self.state.ground_items.get_items_near(
+            px, py, self._ground_pickup_radius, player.zone
+        )
+    
+    def _calculate_ground_rows(self):
+        """Calculate how many rows the ground section needs.
+        
+        Starts with 2 rows minimum, adds rows as needed to have spare space.
+        """
+        num_items = len(self._nearby_ground_items)
+        slots_per_row = 5
+        
+        # Minimum 2 rows
+        min_rows = 2
+        
+        # Calculate rows needed (always keep at least one spare row)
+        items_rows = (num_items + slots_per_row - 1) // slots_per_row  # Ceiling division
+        needed_rows = max(min_rows, items_rows + 1)  # +1 for spare row
+        
+        return needed_rows
+    
+    def _draw_ground_section(self, player, x, y, width, slot_size, num_rows):
+        """Draw the Ground section showing nearby dropped items."""
+        slot_gap = 4
+        left_padding = 6
+        slots_per_row = 5
+        
+        # Section height
+        section_height = 24 + num_rows * (slot_size + slot_gap)
+        
+        # Section background with distinct border
+        rl.draw_rectangle(x, y, width, section_height, rl.Color(60, 50, 40, 100))
+        rl.draw_rectangle_lines(x, y, width, section_height, rl.Color(139, 119, 101, 200))
+        
+        # Label
+        rl.draw_text("Ground", x + 4, y + 4, 9, rl.Color(180, 160, 140, 255))
+        
+        # Slots
+        slots_x = x + left_padding
+        slots_y = y + 18
+        
+        # Adapt text sizes based on slot size
+        amount_size = 10 if slot_size >= 32 else 8
+        
+        # Calculate total slots to draw
+        total_slots = num_rows * slots_per_row
+        
+        for i in range(total_slots):
+            row = i // slots_per_row
+            col = i % slots_per_row
+            
+            slot_x = slots_x + col * (slot_size + slot_gap)
+            slot_y = slots_y + row * (slot_size + slot_gap)
+            
+            # Store slot rect for hit detection
+            self._slot_rects[('ground', i)] = (slot_x, slot_y, slot_size, slot_size)
+            
+            # Check if this slot is selected (only show on gamepad)
+            is_selected = (self.gamepad_connected and 
+                          self.selected_section == 'ground' and 
+                          self.selected_slot == i)
+            
+            # Draw slot background
+            bg_color = COLOR_BG_SLOT_SELECTED if is_selected else rl.Color(40, 35, 30, 150)
+            border_color = COLOR_BORDER_SELECTED if is_selected else rl.Color(100, 90, 80, 150)
+            
+            rl.draw_rectangle(slot_x, slot_y, slot_size, slot_size, bg_color)
+            rl.draw_rectangle_lines(slot_x, slot_y, slot_size, slot_size, border_color)
+            
+            # Draw thicker border if selected
+            if is_selected:
+                rl.draw_rectangle_lines(slot_x - 1, slot_y - 1, slot_size + 2, slot_size + 2, border_color)
+            
+            # Draw item if present in this slot
+            if i < len(self._nearby_ground_items):
+                ground_item = self._nearby_ground_items[i]
+                item_type = ground_item.item_type
+                amount = ground_item.amount
+                
+                # Draw item sprite (centered in slot)
+                inset = 3 if slot_size < 32 else 4
+                sprite_area_size = slot_size - inset * 2
+                self._draw_item_sprite(item_type, slot_x + inset, slot_y + inset, sprite_area_size)
+                
+                # Draw amount at bottom of slot
+                amount_str = str(amount)
+                amount_x = slot_x + (slot_size - rl.measure_text(amount_str, amount_size)) // 2
+                amount_y = slot_y + slot_size - amount_size - 2
+                # Dark outline for readability
+                rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
+                rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
+    
+    def _interact_ground_slot_full(self, slot_index):
+        """Handle left-click on a ground slot - pick up / place / swap full stack."""
+        if not self.state.player:
+            return
+        
+        player = self.state.player
+        
+        # Get the ground item at this slot (if any)
+        ground_item = None
+        if slot_index < len(self._nearby_ground_items):
+            ground_item = self._nearby_ground_items[slot_index]
+        
+        if self.held_item is None:
+            # Pick up item from ground
+            if ground_item:
+                self.held_item = {'type': ground_item.item_type, 'amount': ground_item.amount}
+                self.state.ground_items.remove_item(ground_item)
+                self._update_nearby_ground_items(player)
+        else:
+            # We're holding something
+            if ground_item is None:
+                # Drop held item to ground
+                self._drop_held_item_to_ground(player)
+            elif ground_item.item_type == self.held_item.get('type'):
+                # Same type - try to stack
+                stack_limit = get_stack_limit(ground_item.item_type)
+                if stack_limit is None:
+                    # Unlimited stacking
+                    ground_item.amount += self.held_item['amount']
+                    self.held_item = None
+                else:
+                    space = stack_limit - ground_item.amount
+                    if space > 0:
+                        transfer = min(space, self.held_item['amount'])
+                        ground_item.amount += transfer
+                        self.held_item['amount'] -= transfer
+                        if self.held_item['amount'] <= 0:
+                            self.held_item = None
+                    else:
+                        # Stack full - swap
+                        old_type = ground_item.item_type
+                        old_amount = ground_item.amount
+                        ground_item.item_type = self.held_item['type']
+                        ground_item.amount = self.held_item['amount']
+                        self.held_item = {'type': old_type, 'amount': old_amount}
+            else:
+                # Different type - swap
+                old_type = ground_item.item_type
+                old_amount = ground_item.amount
+                ground_item.item_type = self.held_item['type']
+                ground_item.amount = self.held_item['amount']
+                self.held_item = {'type': old_type, 'amount': old_amount}
+    
+    def _interact_ground_slot_single(self, slot_index):
+        """Handle right-click on a ground slot - pick up half / place single."""
+        if not self.state.player:
+            return
+        
+        player = self.state.player
+        
+        # Get the ground item at this slot (if any)
+        ground_item = None
+        if slot_index < len(self._nearby_ground_items):
+            ground_item = self._nearby_ground_items[slot_index]
+        
+        if self.held_item is None:
+            # Pick up half of stack from ground
+            if ground_item:
+                total = ground_item.amount
+                take = (total + 1) // 2  # Ceiling division - take the larger half
+                leave = total - take
+                
+                self.held_item = {'type': ground_item.item_type, 'amount': take}
+                
+                if leave > 0:
+                    ground_item.amount = leave
+                else:
+                    self.state.ground_items.remove_item(ground_item)
+                    self._update_nearby_ground_items(player)
+        else:
+            # We're holding something - place single item
+            if ground_item is None:
+                # Drop 1 item to ground
+                self._drop_single_item_to_ground(player)
+            elif ground_item.item_type == self.held_item.get('type'):
+                # Same type - place 1 if room
+                stack_limit = get_stack_limit(ground_item.item_type)
+                if stack_limit is None or ground_item.amount < stack_limit:
+                    ground_item.amount += 1
+                    self.held_item['amount'] -= 1
+                    if self.held_item['amount'] <= 0:
+                        self.held_item = None
+            # Different type - do nothing
+    
+    def _drop_held_item_to_ground(self, player):
+        """Drop the entire held item stack to the ground."""
+        if not self.held_item:
+            return
+        
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+        
+        # Create blocking check function
+        def is_blocked(x, y, zone):
+            return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
+        
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
+        if drop_pos:
+            self.state.ground_items.add_item(
+                self.held_item['type'],
+                self.held_item['amount'],
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+            self.held_item = None
+            self._update_nearby_ground_items(player)
+    
+    def _drop_single_item_to_ground(self, player):
+        """Drop a single item from the held stack to the ground."""
+        if not self.held_item or self.held_item['amount'] < 1:
+            return
+        
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+        
+        # Create blocking check function
+        def is_blocked(x, y, zone):
+            return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
+        
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
+        if drop_pos:
+            self.state.ground_items.add_item(
+                self.held_item['type'],
+                1,
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+            self.held_item['amount'] -= 1
+            if self.held_item['amount'] <= 0:
+                self.held_item = None
+            self._update_nearby_ground_items(player)
+    
+    def _quick_move_ground_to_inventory(self, slot_index):
+        """Shift+click: Quick-move item from ground to inventory (Minecraft style)."""
+        if not self.state.player:
+            return
+        
+        player = self.state.player
+        inventory = player.inventory
+        
+        # Get the ground item at this slot
+        if slot_index >= len(self._nearby_ground_items):
+            return
+        
+        ground_item = self._nearby_ground_items[slot_index]
+        item_type = ground_item.item_type
+        amount_to_move = ground_item.amount
+        stack_limit = get_stack_limit(item_type)
+        
+        # First, try to stack with existing items of same type
+        for i, slot in enumerate(inventory):
+            if slot and slot.get('type') == item_type:
+                if stack_limit is None:
+                    # Unlimited stacking
+                    slot['amount'] = slot.get('amount', 0) + amount_to_move
+                    amount_to_move = 0
+                    break
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, amount_to_move)
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Then try empty slots
+        if amount_to_move > 0:
+            for i, slot in enumerate(inventory):
+                if slot is None:
+                    if stack_limit is None:
+                        inventory[i] = {'type': item_type, 'amount': amount_to_move}
+                        amount_to_move = 0
+                        break
+                    else:
+                        transfer = min(stack_limit, amount_to_move)
+                        inventory[i] = {'type': item_type, 'amount': transfer}
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Update or remove the ground item based on what was moved
+        if amount_to_move <= 0:
+            # All moved - remove ground item
+            self.state.ground_items.remove_item(ground_item)
+        else:
+            # Some left on ground
+            ground_item.amount = amount_to_move
+        
+        self._update_nearby_ground_items(player)
+    
+    def _quick_move_inventory_to_ground(self, slot_index):
+        """Shift+click: Quick-move item from inventory to ground."""
+        if not self.state.player:
+            return
+        
+        player = self.state.player
+        inventory = player.inventory
+        
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+        
+        slot_item = inventory[slot_index]
+        if slot_item is None:
+            return
+        
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+        
+        def is_blocked(x, y, zone):
+            return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
+        
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
+        if drop_pos:
+            self.state.ground_items.add_item(
+                slot_item['type'],
+                slot_item['amount'],
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+            inventory[slot_index] = None
+            self._update_nearby_ground_items(player)
     
     def _load_item_sprites(self):
         """Load all item sprites defined in constants.ITEMS."""
