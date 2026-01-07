@@ -10,7 +10,9 @@ Controls:
 - E or A button: Select option
 - Mouse: Hover to highlight, click to select
 
-Options (context-sensitive):
+Options (context-sensitive, in priority order):
+- Pick Up Barrel: When near a barrel (same zone)
+- Chop Tree: When near a tree (exterior only)
 - Harvest: When on green/ready farm cell
 - Plant: When on brown/harvested farm cell  
 - Build Campfire: When outside village and not in interior
@@ -58,6 +60,8 @@ CURSOR_BLINK_RATE = 0.5
 # =============================================================================
 
 # All possible options - shown/hidden based on context
+OPTION_PICK_UP_BARREL = "Pick Up Barrel"
+OPTION_CHOP_TREE = "Chop Tree"
 OPTION_HARVEST = "Harvest"
 OPTION_PLANT = "Plant"
 OPTION_BUILD_CAMPFIRE = "Build Campfire"
@@ -66,6 +70,9 @@ OPTION_EXIT = "Exit"
 
 # Base options always shown
 BASE_OPTIONS = [OPTION_BUILD, OPTION_EXIT]
+
+# Proximity threshold for interacting with objects
+INTERACT_DISTANCE = 1.5
 
 
 class EnvironmentMenu:
@@ -146,6 +153,16 @@ class EnvironmentMenu:
             self._options = [OPTION_EXIT]
             return
         
+        # Check for nearby barrel (same zone, within distance)
+        nearby_barrel = self._get_nearby_barrel()
+        if nearby_barrel:
+            self._options.append(OPTION_PICK_UP_BARREL)
+        
+        # Check for nearby tree (exterior only, within distance)
+        nearby_tree = self._get_nearby_tree()
+        if nearby_tree:
+            self._options.append(OPTION_CHOP_TREE)
+        
         # Check farm cell state at player position
         cell_x = int(player.x)
         cell_y = int(player.y)
@@ -164,6 +181,65 @@ class EnvironmentMenu:
         
         # Always add base options
         self._options.extend(BASE_OPTIONS)
+    
+    def _get_nearby_barrel(self):
+        """Find a barrel near the player in the same zone.
+        
+        Returns:
+            Barrel object if one is nearby, None otherwise
+        """
+        player = self.state.player
+        if not player:
+            return None
+        
+        import math
+        player_zone = player.zone
+        
+        for barrel in self.state.interactables.barrels.values():
+            # Must be in same zone
+            if barrel.zone != player_zone:
+                continue
+            
+            # Calculate distance using appropriate coordinates
+            if player_zone is not None:
+                # Interior - use prevailing (local) coords
+                dx = player.prevailing_x - (barrel.x + 0.5)
+                dy = player.prevailing_y - (barrel.y + 0.5)
+            else:
+                # Exterior - use world coords
+                dx = player.x - (barrel.x + 0.5)
+                dy = player.y - (barrel.y + 0.5)
+            
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= INTERACT_DISTANCE:
+                return barrel
+        
+        return None
+    
+    def _get_nearby_tree(self):
+        """Find a tree near the player (exterior only).
+        
+        Returns:
+            Tree object if one is nearby, None otherwise
+        """
+        player = self.state.player
+        if not player:
+            return None
+        
+        # Trees only exist in exterior
+        if player.zone is not None:
+            return None
+        
+        import math
+        
+        for tree in self.state.interactables.trees.values():
+            dx = player.x - (tree.x + 0.5)
+            dy = player.y - (tree.y + 0.5)
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= INTERACT_DISTANCE:
+                return tree
+        
+        return None
     
     def _can_build_campfire(self):
         """Check if player can build a campfire at current location."""
@@ -269,6 +345,23 @@ class EnvironmentMenu:
         if option == OPTION_EXIT:
             self.close()
             return "closed"
+        
+        # Handle new options with debug logging
+        if option == OPTION_PICK_UP_BARREL:
+            barrel = self._get_nearby_barrel()
+            if barrel:
+                player_name = self.state.player.get_display_name() if self.state.player else "Player"
+                self.state.log_action(f"{player_name} picked up {barrel.name} (not yet implemented)")
+            self.close()
+            return option
+        
+        if option == OPTION_CHOP_TREE:
+            tree = self._get_nearby_tree()
+            if tree:
+                player_name = self.state.player.get_display_name() if self.state.player else "Player"
+                self.state.log_action(f"{player_name} chopped tree at ({tree.x}, {tree.y}) (not yet implemented)")
+            self.close()
+            return option
         
         # Return the action to be handled by GUI
         self.close()

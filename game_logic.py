@@ -1893,10 +1893,10 @@ class GameLogic:
     
     def find_richest_target(self, robber):
         """Find the best target to rob"""
-        targets = [c for c in self.state.characters if c != robber and (c.get_item('money') > 0 or c.get_item('wheat') > 0)]
+        targets = [c for c in self.state.characters if c != robber and (c.get_item('gold') > 0 or c.get_item('wheat') > 0)]
         if not targets:
             return None
-        return max(targets, key=lambda c: (c.get_item('wheat'), c.get_item('money')))
+        return max(targets, key=lambda c: (c.get_item('wheat'), c.get_item('gold')))
     
     def try_murder(self, attacker):
         """Character decides to attack someone with intent to kill - sets intent and starts pursuit.

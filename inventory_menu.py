@@ -6,11 +6,13 @@ Handles the inventory screen overlay with three tabs:
 - Map: World map (placeholder)
 
 Extracted from gui.py to reduce file size and improve organization.
+All item properties (sprites, colors, stack limits) come from constants.ITEMS.
 """
 
+import os
 import pyray as rl
 from constants import (
-    SKILLS,
+    SKILLS, ITEMS,
     UI_COLOR_BOX_BG, UI_COLOR_BOX_BG_MEDIUM, UI_COLOR_BOX_BG_LIGHT,
     UI_COLOR_BORDER, UI_COLOR_BORDER_INNER,
     UI_COLOR_TEXT, UI_COLOR_TEXT_DIM, UI_COLOR_TEXT_FAINT,
@@ -18,6 +20,39 @@ from constants import (
     UI_COLOR_SLOT_BORDER, UI_COLOR_SLOT_BORDER_SELECTED,
     UI_COLOR_OPTION_SELECTED
 )
+
+
+# =============================================================================
+# ITEM HELPER FUNCTIONS - All read from constants.ITEMS
+# =============================================================================
+
+def get_item_info(item_type):
+    """Get item info dict from ITEMS constant."""
+    return ITEMS.get(item_type, {})
+
+def get_stack_limit(item_type):
+    """Get stack limit for an item type. Returns None for unlimited."""
+    info = get_item_info(item_type)
+    return info.get('stack_size', 99)  # Default to 99 if not defined
+
+def get_item_sprite_path(item_type):
+    """Get the sprite file path for an item type."""
+    info = get_item_info(item_type)
+    sprite_name = info.get('sprite')
+    if sprite_name:
+        return os.path.join('sprites', 'items', sprite_name)
+    return None
+
+def get_item_color(item_type):
+    """Get the fallback color for an item type as rl.Color."""
+    info = get_item_info(item_type)
+    color_tuple = info.get('color', (128, 128, 128, 200))  # Gray default
+    return rl.Color(*color_tuple)
+
+def get_item_icon(item_type):
+    """Get the fallback text icon for an item type."""
+    info = get_item_info(item_type)
+    return info.get('icon', '?')
 
 # =============================================================================
 # HUD STYLING CONSTANTS (shared with gui.py)
@@ -106,6 +141,27 @@ class InventoryMenu:
         
         # Layout mode (updated during render)
         self._compact_mode = False
+        
+        # Item sprites - loaded lazily on first use
+        self._item_textures = {}  # {item_type: Texture2D}
+        self._sprites_loaded = False
+        
+        # Scroll state for panels
+        self._left_panel_scroll = 0.0  # Scroll offset for left inventory panel
+        self._status_tab_scroll = 0.0  # Scroll offset for status/skills tab
+        self._left_panel_content_height = 300  # Total content height (default, calculated during render)
+        self._status_tab_content_height = 400  # Total content height for status tab (default)
+        self._scroll_speed = 40  # Pixels per scroll tick
+        
+        # Scroll bar geometry (for click/drag detection)
+        self._left_scroll_bar_rect = None  # (x, y, w, h) of left panel scroll bar
+        self._status_scroll_bar_rect = None  # (x, y, w, h) of status tab scroll bar
+        
+        # Scroll bar dragging state
+        self._dragging_left_scroll = False
+        self._dragging_status_scroll = False
+        self._drag_start_y = 0
+        self._drag_start_scroll = 0
     
     def open(self):
         """Open the inventory menu."""
@@ -115,6 +171,14 @@ class InventoryMenu:
         self.selected_slot = 0
         self._input_delay = 0.0
         self._last_input_dir = None
+        # Reset scroll positions
+        self._left_panel_scroll = 0.0
+        self._status_tab_scroll = 0.0
+        # Reset scroll bar state
+        self._left_scroll_bar_rect = None
+        self._status_scroll_bar_rect = None
+        self._dragging_left_scroll = False
+        self._dragging_status_scroll = False
     
     def close(self):
         """Close the inventory menu."""
@@ -133,20 +197,26 @@ class InventoryMenu:
         
         player = self.state.player
         inventory = player.inventory
+        held_type = self.held_item['type']
+        stack_limit = get_stack_limit(held_type)
         
         # First try to stack with existing items of same type
         for i, slot in enumerate(inventory):
-            if slot and slot.get('type') == self.held_item['type']:
-                # Stack limit check (default 99)
-                stack_limit = 99
-                space = stack_limit - slot.get('amount', 0)
-                if space > 0:
-                    transfer = min(space, self.held_item['amount'])
-                    slot['amount'] = slot.get('amount', 0) + transfer
-                    self.held_item['amount'] -= transfer
-                    if self.held_item['amount'] <= 0:
-                        self.held_item = None
-                        return
+            if slot and slot.get('type') == held_type:
+                if stack_limit is None:
+                    # Unlimited stacking - combine everything
+                    slot['amount'] = slot.get('amount', 0) + self.held_item['amount']
+                    self.held_item = None
+                    return
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, self.held_item['amount'])
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        self.held_item['amount'] -= transfer
+                        if self.held_item['amount'] <= 0:
+                            self.held_item = None
+                            return
         
         # Then try empty slots
         for i, slot in enumerate(inventory):
@@ -167,10 +237,16 @@ class InventoryMenu:
     def next_tab(self):
         """Switch to the next tab."""
         self.current_tab = (self.current_tab + 1) % 3
+        # Reset scroll for the new tab
+        if self.current_tab == 1:
+            self._status_tab_scroll = 0.0
     
     def prev_tab(self):
         """Switch to the previous tab."""
         self.current_tab = (self.current_tab - 1) % 3
+        # Reset scroll for the new tab
+        if self.current_tab == 1:
+            self._status_tab_scroll = 0.0
     
     def update_input(self, mouse_x, mouse_y, mouse_left_click, gamepad_connected, mouse_right_click=False, shift_held=False):
         """Update input state from GUI."""
@@ -190,6 +266,121 @@ class InventoryMenu:
                         self._interact_slot_full(index)
                     elif mouse_right_click:
                         self._interact_slot_single(index)
+    
+    def update_scroll(self):
+        """Handle scroll input - call this every frame when menu is open.
+        
+        Handles:
+        - Mouse wheel scrolling
+        - Scroll bar dragging
+        - Gamepad right stick scrolling
+        - Keyboard Page Up/Down
+        """
+        if not self.is_open:
+            return
+        
+        # Calculate panel boundaries
+        min_width = 200
+        max_width = min(320, int(self.canvas_width * 0.4))
+        left_width = max(min_width, min(max_width, self.canvas_width // 3))
+        
+        # Determine which panel mouse is over
+        mouse_over_left = self.mouse_x < left_width
+        mouse_over_right = self.mouse_x >= left_width
+        
+        # === MOUSE WHEEL SCROLLING ===
+        wheel_move = rl.get_mouse_wheel_move()
+        if wheel_move != 0:
+            scroll_amount = wheel_move * self._scroll_speed
+            if mouse_over_left:
+                self._apply_left_panel_scroll(-scroll_amount)
+            elif mouse_over_right and self.current_tab == 1:
+                self._apply_status_tab_scroll(-scroll_amount)
+        
+        # === SCROLL BAR DRAGGING ===
+        mouse_down = rl.is_mouse_button_down(rl.MOUSE_BUTTON_LEFT)
+        mouse_pressed = rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT)
+        
+        # Check for scroll bar interaction
+        if mouse_pressed:
+            # Check if clicking on left panel scroll bar
+            if self._left_scroll_bar_rect:
+                bx, by, bw, bh = self._left_scroll_bar_rect
+                if bx <= self.mouse_x <= bx + bw and by <= self.mouse_y <= by + bh:
+                    self._dragging_left_scroll = True
+                    self._drag_start_y = self.mouse_y
+                    self._drag_start_scroll = self._left_panel_scroll
+            
+            # Check if clicking on status tab scroll bar
+            if self._status_scroll_bar_rect and self.current_tab == 1:
+                bx, by, bw, bh = self._status_scroll_bar_rect
+                if bx <= self.mouse_x <= bx + bw and by <= self.mouse_y <= by + bh:
+                    self._dragging_status_scroll = True
+                    self._drag_start_y = self.mouse_y
+                    self._drag_start_scroll = self._status_tab_scroll
+        
+        if not mouse_down:
+            self._dragging_left_scroll = False
+            self._dragging_status_scroll = False
+        
+        # Handle active dragging
+        if self._dragging_left_scroll and self._left_panel_content_height > 0:
+            available_height = self.canvas_height
+            max_scroll = max(0, self._left_panel_content_height - available_height)
+            if max_scroll > 0:
+                drag_delta = self.mouse_y - self._drag_start_y
+                # Convert pixel drag to scroll amount (scroll bar track is ~canvas_height)
+                scroll_ratio = drag_delta / (available_height - 40)  # 40 = approximate thumb height
+                new_scroll = self._drag_start_scroll + scroll_ratio * max_scroll
+                self._left_panel_scroll = max(0, min(max_scroll, new_scroll))
+        
+        if self._dragging_status_scroll and self._status_tab_content_height > 0:
+            tab_height = 40
+            content_height = self.canvas_height - tab_height - 48
+            max_scroll = max(0, self._status_tab_content_height - content_height)
+            if max_scroll > 0:
+                drag_delta = self.mouse_y - self._drag_start_y
+                scroll_ratio = drag_delta / (content_height - 40)
+                new_scroll = self._drag_start_scroll + scroll_ratio * max_scroll
+                self._status_tab_scroll = max(0, min(max_scroll, new_scroll))
+        
+        # === KEYBOARD SCROLLING ===
+        if rl.is_key_pressed(rl.KEY_PAGE_DOWN) or rl.is_key_pressed(rl.KEY_PAGE_UP):
+            scroll_amount = self._scroll_speed * 5  # Page = 5x normal scroll
+            if rl.is_key_pressed(rl.KEY_PAGE_UP):
+                scroll_amount = -scroll_amount
+            
+            if self.current_tab == 1:
+                self._apply_status_tab_scroll(scroll_amount)
+            else:
+                self._apply_left_panel_scroll(scroll_amount)
+        
+        # === GAMEPAD SCROLLING (Right Stick) ===
+        if self.gamepad_connected:
+            for i in range(4):
+                if rl.is_gamepad_available(i):
+                    # Right stick Y axis for scrolling
+                    right_y = rl.get_gamepad_axis_movement(i, rl.GAMEPAD_AXIS_RIGHT_Y)
+                    if abs(right_y) > 0.2:  # Deadzone
+                        scroll_amount = right_y * self._scroll_speed * 0.8
+                        if self.current_tab == 1:
+                            self._apply_status_tab_scroll(scroll_amount)
+                        else:
+                            self._apply_left_panel_scroll(scroll_amount)
+                    break
+    
+    def _apply_left_panel_scroll(self, delta):
+        """Apply scroll delta to left panel with bounds checking."""
+        available_height = self.canvas_height - 16
+        max_scroll = max(0, self._left_panel_content_height - available_height)
+        self._left_panel_scroll = max(0, min(max_scroll, self._left_panel_scroll + delta))
+    
+    def _apply_status_tab_scroll(self, delta):
+        """Apply scroll delta to status tab with bounds checking."""
+        tab_height = 40
+        content_height = self.canvas_height - tab_height - 48
+        max_scroll = max(0, self._status_tab_content_height - content_height)
+        self._status_tab_scroll = max(0, min(max_scroll, self._status_tab_scroll + delta))
     
     def _get_slot_at_mouse(self):
         """Get the slot (section, index) under the mouse cursor, or None."""
@@ -227,18 +418,23 @@ class InventoryMenu:
                 self.held_item = None
             elif slot_item.get('type') == self.held_item.get('type'):
                 # Same type - try to stack
-                stack_limit = 99
-                space = stack_limit - slot_item.get('amount', 0)
-                if space > 0:
-                    transfer = min(space, self.held_item['amount'])
-                    slot_item['amount'] = slot_item.get('amount', 0) + transfer
-                    self.held_item['amount'] -= transfer
-                    if self.held_item['amount'] <= 0:
-                        self.held_item = None
+                stack_limit = get_stack_limit(slot_item.get('type'))
+                if stack_limit is None:
+                    # Unlimited stacking - combine everything
+                    slot_item['amount'] = slot_item.get('amount', 0) + self.held_item['amount']
+                    self.held_item = None
                 else:
-                    # Stack full - swap
-                    inventory[slot_index] = self.held_item.copy()
-                    self.held_item = slot_item.copy()
+                    space = stack_limit - slot_item.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, self.held_item['amount'])
+                        slot_item['amount'] = slot_item.get('amount', 0) + transfer
+                        self.held_item['amount'] -= transfer
+                        if self.held_item['amount'] <= 0:
+                            self.held_item = None
+                    else:
+                        # Stack full - swap
+                        inventory[slot_index] = self.held_item.copy()
+                        self.held_item = slot_item.copy()
             else:
                 # Different type - swap
                 inventory[slot_index] = self.held_item.copy()
@@ -283,8 +479,9 @@ class InventoryMenu:
                     self.held_item = None
             elif slot_item.get('type') == self.held_item.get('type'):
                 # Same type - place 1 if room
-                stack_limit = 99
-                if slot_item.get('amount', 0) < stack_limit:
+                stack_limit = get_stack_limit(slot_item.get('type'))
+                # None means unlimited, so always allow; otherwise check limit
+                if stack_limit is None or slot_item.get('amount', 0) < stack_limit:
                     slot_item['amount'] = slot_item.get('amount', 0) + 1
                     self.held_item['amount'] -= 1
                     if self.held_item['amount'] <= 0:
@@ -459,10 +656,11 @@ class InventoryMenu:
         # For bread, call the character's eat() method
         if item_type == 'bread':
             result = player.eat()
-            if result.get('success'):
-                self.state.log_action(f"{player.name} ate bread")
+            if result['success']:
+                msg = f"{player.get_display_name()} ate bread, hunger now {player.hunger:.0f}"
                 if result.get('recovered_from_starvation'):
-                    self.state.log_action(f"{player.name} recovered from starvation!")
+                    msg = f"{player.get_display_name()} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}"
+                self.state.log_action(msg)
     
     def handle_input(self, dt=None):
         """
@@ -656,8 +854,9 @@ class InventoryMenu:
         # Draw held item at cursor/center
         self._draw_held_item()
         
-        # Draw control hints in bottom right of right panel
-        self._draw_control_hints(left_width, right_width)
+        # Draw control hints in bottom right of right panel (only on World tab)
+        if self.current_tab == 0:
+            self._draw_control_hints(left_width, right_width)
         
         # Draw context menu on top of everything
         self._draw_context_menu()
@@ -666,7 +865,6 @@ class InventoryMenu:
         """Draw the left inventory panel with equipment and storage."""
         padding = 8
         inner_x = x + padding
-        inner_y = y + padding
         inner_width = width - padding * 2
         
         # Determine layout mode based on available width
@@ -675,7 +873,6 @@ class InventoryMenu:
         self._compact_mode = compact_mode  # Store for navigation
         
         # Calculate slot size to fit 5 inventory slots
-        # slot_size * 5 + gap * 4 + padding * 2 <= inner_width
         max_slot_size = 36
         min_slot_size = 28
         slot_gap = 4
@@ -683,16 +880,50 @@ class InventoryMenu:
         calculated_slot_size = available_for_slots // 5
         slot_size = max(min_slot_size, min(max_slot_size, calculated_slot_size))
         
+        # Calculate total content height to determine if scrolling is needed
+        # Status bar: ~50-70px, Equipment area: ~100-140px, Inventory: ~60px
+        status_height = 70 if compact_mode else 50
+        equip_height = 140 if compact_mode else 100
+        inventory_height = slot_size + 24
+        total_content_height = padding + status_height + 8 + equip_height + 8 + inventory_height + padding
+        self._left_panel_content_height = total_content_height
+        
+        # Available height for content
+        available_height = self.canvas_height
+        needs_scroll = total_content_height > available_height
+        
+        # Clamp scroll offset
+        if needs_scroll:
+            max_scroll = total_content_height - available_height
+            self._left_panel_scroll = max(0, min(max_scroll, self._left_panel_scroll))
+        else:
+            self._left_panel_scroll = 0
+        
+        # Apply scroll offset
+        scroll_y = -int(self._left_panel_scroll)
+        inner_y = y + padding + scroll_y
+        
+        # Enable scissor mode for clipping
+        rl.begin_scissor_mode(x, y, width, self.canvas_height)
+        
         # === STATUS BAR (Health, Hunger, Weight, Gold) ===
-        status_height = self._draw_status_bar(player, inner_x, inner_y, inner_width, compact_mode)
-        inner_y += status_height + 8
+        actual_status_height = self._draw_status_bar(player, inner_x, inner_y, inner_width, compact_mode)
+        inner_y += actual_status_height + 8
         
         # === EQUIPMENT AREA (Head/Body + Accessories) ===
-        equip_height = self._draw_equipment_area(player, inner_x, inner_y, inner_width, slot_size, compact_mode)
-        inner_y += equip_height + 8
+        actual_equip_height = self._draw_equipment_area(player, inner_x, inner_y, inner_width, slot_size, compact_mode)
+        inner_y += actual_equip_height + 8
         
         # === BASE INVENTORY (5 slots) ===
         self._draw_storage_section(player, inner_x, inner_y, inner_width, "Base Inventory", 5, slot_size)
+        
+        # End scissor mode
+        rl.end_scissor_mode()
+        
+        # Draw scroll indicator if needed
+        if needs_scroll:
+            self._draw_scroll_indicator(x + width - 12, y, 10, self.canvas_height, 
+                                       self._left_panel_scroll, total_content_height, available_height)
     
     def _draw_status_bar(self, player, x, y, width, compact_mode=False):
         """Draw compact status bar with health, hunger, stamina, fatigue, encumbrance, gold.
@@ -750,7 +981,7 @@ class InventoryMenu:
             rl.draw_text("Wt", x + 8, bottom_y, 9, COLOR_TEXT_DIM)
             rl.draw_text("0/100", x + 24, bottom_y, 9, COLOR_TEXT_FAINT)
             
-            gold = player.get_item('money')
+            gold = player.get_item('gold')
             gold_str = f"${gold:,}"
             gold_width = rl.measure_text(gold_str, 11)
             rl.draw_text(gold_str, x + width - gold_width - 8, bottom_y, 11, 
@@ -800,7 +1031,7 @@ class InventoryMenu:
             rl.draw_text("0/100", x + 24, enc_y, 9, COLOR_TEXT_FAINT)
             
             # Gold - align with encumbrance row
-            gold = player.get_item('money')
+            gold = player.get_item('gold')
             gold_str = f"${gold:,}"
             gold_width = rl.measure_text(gold_str, 11)
             rl.draw_text(gold_str, x + width - gold_width - 8, enc_y, 11, 
@@ -896,6 +1127,7 @@ class InventoryMenu:
     def _draw_storage_section(self, player, x, y, width, label, num_slots, slot_size=36):
         """Draw a storage section with label and slots showing actual inventory."""
         slot_gap = 4
+        left_padding = 6  # Padding from left edge
         
         # Section background
         section_height = slot_size + 24
@@ -905,8 +1137,8 @@ class InventoryMenu:
         # Label
         rl.draw_text(label, x + 4, y + 4, 9, COLOR_TEXT_FAINT)
         
-        # Slots - align left to match equipment slots
-        slots_x = x
+        # Slots - with left padding
+        slots_x = x + left_padding
         slots_y = y + 18
         
         # Get player inventory
@@ -944,25 +1176,10 @@ class InventoryMenu:
                 item_type = item.get('type', '')
                 amount = item.get('amount', 0)
                 
-                # Get item color based on type
-                item_color = self._get_item_color(item_type)
-                
-                # Draw item rectangle (inset from slot border)
+                # Draw item sprite (centered in slot)
                 inset = 3 if slot_size < 32 else 4
-                item_rect_size = slot_size - inset * 2
-                rl.draw_rectangle(
-                    slot_x + inset, 
-                    slots_y + inset, 
-                    item_rect_size, 
-                    item_rect_size, 
-                    item_color
-                )
-                
-                # Draw item icon/letter
-                icon = self._get_item_icon(item_type)
-                icon_x = slot_x + (slot_size - rl.measure_text(icon, icon_size)) // 2
-                icon_y = slots_y + (slot_size // 4)
-                rl.draw_text(icon, icon_x, icon_y, icon_size, COLOR_TEXT_BRIGHT)
+                sprite_area_size = slot_size - inset * 2
+                self._draw_item_sprite(item_type, slot_x + inset, slots_y + inset, sprite_area_size)
                 
                 # Draw amount at bottom of slot
                 amount_str = str(amount)
@@ -972,23 +1189,71 @@ class InventoryMenu:
                 rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
                 rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
     
-    def _get_item_color(self, item_type):
-        """Get the display color for an item type."""
-        colors = {
-            'money': rl.Color(218, 165, 32, 200),   # Gold
-            'wheat': rl.Color(245, 222, 130, 200),  # Tan/wheat color
-            'bread': rl.Color(160, 82, 45, 200),    # Sienna/brown
-        }
-        return colors.get(item_type, rl.Color(128, 128, 128, 200))  # Gray default
+    def _load_item_sprites(self):
+        """Load all item sprites defined in constants.ITEMS."""
+        if self._sprites_loaded:
+            return
+        
+        for item_type, item_info in ITEMS.items():
+            sprite_path = get_item_sprite_path(item_type)
+            if sprite_path and os.path.exists(sprite_path):
+                texture = rl.load_texture(sprite_path)
+                self._item_textures[item_type] = texture
+        
+        self._sprites_loaded = True
     
-    def _get_item_icon(self, item_type):
-        """Get the display icon/letter for an item type."""
-        icons = {
-            'money': '$',
-            'wheat': 'W',
-            'bread': 'B',
-        }
-        return icons.get(item_type, '?')
+    def _get_item_texture(self, item_type):
+        """Get the texture for an item type, loading if necessary.
+        
+        Returns:
+            Texture2D or None if no sprite available
+        """
+        if not self._sprites_loaded:
+            self._load_item_sprites()
+        return self._item_textures.get(item_type)
+    
+    def _draw_item_sprite(self, item_type, x, y, size):
+        """Draw an item sprite scaled to fit within the given size.
+        
+        Args:
+            item_type: Type of item (e.g., 'wheat', 'bread', 'gold')
+            x: X position to draw at
+            y: Y position to draw at
+            size: Size of the area to draw in (square)
+        """
+        texture = self._get_item_texture(item_type)
+        
+        if texture and texture.id > 0:
+            # Calculate scale to fit the sprite in the slot with some padding
+            padding = 2
+            target_size = size - padding * 2
+            scale = min(target_size / texture.width, target_size / texture.height)
+            
+            # Center the sprite in the slot
+            draw_width = int(texture.width * scale)
+            draw_height = int(texture.height * scale)
+            draw_x = x + (size - draw_width) // 2
+            draw_y = y + (size - draw_height) // 2
+            
+            # Draw the scaled texture
+            source_rect = rl.Rectangle(0, 0, texture.width, texture.height)
+            dest_rect = rl.Rectangle(draw_x, draw_y, draw_width, draw_height)
+            rl.draw_texture_pro(texture, source_rect, dest_rect, rl.Vector2(0, 0), 0, rl.WHITE)
+        else:
+            # Fallback to text icon if no sprite
+            icon = get_item_icon(item_type)
+            icon_size = 14 if size >= 32 else 11
+            icon_x = x + (size - rl.measure_text(icon, icon_size)) // 2
+            icon_y = y + (size - icon_size) // 2
+            rl.draw_text(icon, icon_x, icon_y, icon_size, COLOR_TEXT_BRIGHT)
+    
+    def unload_sprites(self):
+        """Unload all item sprites. Call when closing the game."""
+        for texture in self._item_textures.values():
+            if texture and texture.id > 0:
+                rl.unload_texture(texture)
+        self._item_textures = {}
+        self._sprites_loaded = False
     
     def _draw_right_panel(self, player, x, y, width):
         """Draw the right panel with tabs: World, Status, Map."""
@@ -1048,12 +1313,14 @@ class InventoryMenu:
         pass
     
     def _draw_status_tab(self, player, x, y, width, height):
-        """Draw the Status tab - shows skills."""
-        # Section header
+        """Draw the Status tab - shows skills with scrolling support."""
+        # Header (fixed, not scrolled)
         rl.draw_text("SKILLS", x, y, 11, COLOR_TEXT_DIM)
         rl.draw_line(x, y + 16, x + width, y + 16, COLOR_BORDER)
         
-        skill_y = y + 28
+        # Content area starts after header
+        content_y = y + 28
+        content_height = height - 28
         
         # Group skills by category
         combat_skills = []
@@ -1078,31 +1345,68 @@ class InventoryMenu:
         benign_skills.sort(key=lambda x: -x[1])
         both_skills.sort(key=lambda x: -x[1])
         
-        # Draw combat skills
+        # Calculate total content height (show ALL skills now)
+        total_content_height = 0
+        if combat_skills:
+            total_content_height += 14 + len(combat_skills) * 18 + 10  # Header + skills + padding
+        if benign_skills:
+            total_content_height += 14 + len(benign_skills) * 18 + 10
+        if both_skills:
+            total_content_height += 14 + len(both_skills) * 18 + 10
+        
+        self._status_tab_content_height = total_content_height
+        
+        # Determine if scrolling is needed
+        needs_scroll = total_content_height > content_height
+        
+        # Clamp scroll offset
+        if needs_scroll:
+            max_scroll = total_content_height - content_height
+            self._status_tab_scroll = max(0, min(max_scroll, self._status_tab_scroll))
+        else:
+            self._status_tab_scroll = 0
+        
+        # Apply scroll offset
+        scroll_y = -int(self._status_tab_scroll)
+        skill_y = content_y + scroll_y
+        
+        # Enable scissor mode for clipping
+        rl.begin_scissor_mode(x - 4, content_y, width + 8, content_height)
+        
+        # Draw combat skills (all of them)
         if combat_skills:
             rl.draw_text("Combat", x, skill_y, 9, COLOR_HEALTH)
             skill_y += 14
-            for name, value, _ in combat_skills[:6]:
+            for name, value, _ in combat_skills:
                 self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_HEALTH)
                 skill_y += 18
             skill_y += 10
         
-        # Draw benign skills
+        # Draw benign skills (all of them)
         if benign_skills:
             rl.draw_text("Trade", x, skill_y, 9, COLOR_FATIGUE)
             skill_y += 14
-            for name, value, _ in benign_skills[:8]:
+            for name, value, _ in benign_skills:
                 self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_FATIGUE)
                 skill_y += 18
             skill_y += 10
         
-        # Draw hybrid skills
+        # Draw hybrid skills (all of them)
         if both_skills:
             rl.draw_text("Hybrid", x, skill_y, 9, COLOR_STAMINA)
             skill_y += 14
-            for name, value, _ in both_skills[:4]:
+            for name, value, _ in both_skills:
                 self._draw_skill_bar(x, skill_y, width - 20, name, value, COLOR_STAMINA)
                 skill_y += 18
+        
+        # End scissor mode
+        rl.end_scissor_mode()
+        
+        # Draw scroll indicator if needed
+        if needs_scroll:
+            self._draw_scroll_indicator(x + width - 8, content_y, 10, content_height,
+                                       self._status_tab_scroll, total_content_height, content_height,
+                                       is_left_panel=False)
     
     def _draw_skill_bar(self, x, y, width, name, value, color):
         """Draw a single skill bar."""
@@ -1124,6 +1428,70 @@ class InventoryMenu:
         # Value text
         value_str = str(int(value))
         rl.draw_text(value_str, bar_x + bar_width + 6, y, 10, COLOR_TEXT_FAINT)
+    
+    def _draw_scroll_indicator(self, x, y, width, height, scroll_offset, content_height, visible_height, is_left_panel=True):
+        """Draw a scroll bar/indicator showing current scroll position.
+        
+        Args:
+            x: X position for the scroll bar
+            y: Y position (top of scroll area)
+            width: Width of the scroll bar
+            height: Height of the scroll area
+            scroll_offset: Current scroll position
+            content_height: Total height of scrollable content
+            visible_height: Height of visible area
+            is_left_panel: True if this is the left panel scroll bar (for rect storage)
+        """
+        if content_height <= visible_height:
+            # No scrolling needed - clear the rect
+            if is_left_panel:
+                self._left_scroll_bar_rect = None
+            else:
+                self._status_scroll_bar_rect = None
+            return
+        
+        # Draw track background
+        track_color = rl.Color(255, 255, 255, 30)
+        rl.draw_rectangle(x, y, width, height, track_color)
+        rl.draw_rectangle_lines(x, y, width, height, rl.Color(255, 255, 255, 50))
+        
+        # Calculate thumb size and position
+        thumb_height = max(30, int(height * (visible_height / content_height)))
+        max_scroll = content_height - visible_height
+        scroll_ratio = scroll_offset / max_scroll if max_scroll > 0 else 0
+        thumb_y = y + int((height - thumb_height) * scroll_ratio)
+        
+        # Store the scroll bar rect for hit detection (entire track area)
+        bar_rect = (x, y, width, height)
+        if is_left_panel:
+            self._left_scroll_bar_rect = bar_rect
+        else:
+            self._status_scroll_bar_rect = bar_rect
+        
+        # Determine if mouse is hovering over scroll bar
+        is_hovered = (x <= self.mouse_x <= x + width and y <= self.mouse_y <= y + height)
+        is_dragging = (self._dragging_left_scroll if is_left_panel else self._dragging_status_scroll)
+        
+        # Draw thumb with hover/drag highlight
+        if is_dragging:
+            thumb_color = rl.Color(255, 255, 255, 180)
+        elif is_hovered:
+            thumb_color = rl.Color(255, 255, 255, 140)
+        else:
+            thumb_color = rl.Color(255, 255, 255, 100)
+        
+        rl.draw_rectangle(x, thumb_y, width, thumb_height, thumb_color)
+        
+        # Draw thumb border
+        rl.draw_rectangle_lines(x, thumb_y, width, thumb_height, rl.Color(255, 255, 255, 180))
+        
+        # Draw scroll position indicator text
+        if is_hovered or is_dragging:
+            pct = int(scroll_ratio * 100)
+            pct_text = f"{pct}%"
+            text_x = x - rl.measure_text(pct_text, 9) - 4
+            text_y = thumb_y + thumb_height // 2 - 4
+            rl.draw_text(pct_text, text_x, text_y, 9, rl.Color(255, 255, 255, 150))
     
     def _draw_map_tab(self, player, x, y, width, height):
         """Draw the Map tab - shows world map (placeholder)."""
@@ -1168,17 +1536,14 @@ class InventoryMenu:
         
         # Draw item
         slot_size = 32
-        item_color = self._get_item_color(item_type)
         
         # Background with border
-        rl.draw_rectangle(draw_x, draw_y, slot_size, slot_size, item_color)
+        bg_color = rl.Color(40, 40, 40, 220)
+        rl.draw_rectangle(draw_x, draw_y, slot_size, slot_size, bg_color)
         rl.draw_rectangle_lines(draw_x, draw_y, slot_size, slot_size, rl.Color(255, 255, 255, 200))
         
-        # Icon
-        icon = self._get_item_icon(item_type)
-        icon_x = draw_x + (slot_size - rl.measure_text(icon, 12)) // 2
-        icon_y = draw_y + 6
-        rl.draw_text(icon, icon_x, icon_y, 12, COLOR_TEXT_BRIGHT)
+        # Draw sprite
+        self._draw_item_sprite(item_type, draw_x, draw_y, slot_size)
         
         # Amount
         amount_str = str(amount)

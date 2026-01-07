@@ -281,22 +281,32 @@ SKILLS = {
 # INVENTORY SETTINGS
 # =============================================================================
 # Central item registry - all items and their properties
+# All item display info is here - inventory_menu.py reads from this
 ITEMS = {
     "wheat": {
         "name": "Wheat",
         "price": 5,
         "stack_size": 15,
+        "sprite": "Wheat.png",  # In sprites/items/
+        "color": (245, 222, 130, 200),  # RGBA fallback color
+        "icon": "W",  # Fallback text icon
     },
     "gold": {
         "name": "Gold",
         "price": 1,
         "stack_size": None,  # Infinite stacking
+        "sprite": "Gold.png",
+        "color": (218, 165, 32, 200),
+        "icon": "$",
     },
     "bread": {
         "name": "Bread",
         "price": 7,
         "stack_size": 15,
         "hunger_value": 33,  # How much hunger restored per unit
+        "sprite": "Bread.png",
+        "color": (160, 82, 45, 200),
+        "icon": "B",
     },
 }
 

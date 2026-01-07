@@ -236,78 +236,7 @@ class PlayerController:
         targets_hit = self.logic.resolve_attack(player, attack_dir)
         
         return True
-    
-    def handle_eat_input(self):
-        """Handle eat key press.
-        
-        Returns:
-            True if ate successfully
-        """
-        player = self.player
-        if not player:
-            return False
-        
-        # Use character's eat method
-        result = player.eat()
-        
-        if result['success']:
-            msg = f"{player.get_display_name()} ate bread, hunger now {player.hunger:.0f}"
-            if result.get('recovered_from_starvation'):
-                msg = f"{player.get_display_name()} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}"
-            self.state.log_action(msg)
-        
-        return result['success']
-    
-    def handle_trade_input(self):
-        """Handle trade key press.
-        
-        Returns:
-            True if traded successfully
-        """
-        player = self.player
-        if not player:
-            return False
-        
-        name = player.get_display_name()
-        
-        # Find adjacent vendor - this requires world knowledge
-        vendor = self.logic.find_adjacent_vendor(player, 'wheat')
-        
-        if not vendor:
-            return False
-        
-        if not player.can_add_item('wheat', 1):
-            self.state.log_action(f"{name}'s inventory is full")
-            return False
-        
-        if not self.logic.can_afford_goods(player, 'wheat'):
-            self.state.log_action(f"{name} can't afford any wheat")
-            return False
-        
-        vendor_name = vendor.get_display_name()
-        
-        if not self.logic.vendor_willing_to_trade(vendor, player, 'wheat'):
-            self.state.log_action(f"{name} tried to trade but {vendor_name} refused")
-            return False
-        
-        # Execute trade through game logic
-        amount = self.logic.get_max_vendor_trade_amount(vendor, player, 'wheat')
-        if amount > 0:
-            price = self.logic.get_goods_price('wheat', amount)
-            self.logic.execute_vendor_trade(vendor, player, 'wheat', amount)
-            self.state.log_action(f"{name} bought {amount} wheat for ${price} from {vendor_name}")
-            
-            # Auto-eat if starving and have bread
-            if player.is_starving or player.is_frozen:
-                if player.get_item('bread') >= BREAD_PER_BITE:
-                    result = player.eat()
-                    if result.get('recovered_from_starvation'):
-                        self.state.log_action(f"{name} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}")
-            
-            return True
-        
-        return False
-    
+
     def handle_bake_input(self):
         """Handle bake key press.
         

@@ -158,7 +158,7 @@ class DebugWindowProcess:
         if self.state.player:
             p = self.state.player
             player_food = p.get_item('wheat')
-            player_money = p.get_item('money')
+            player_money = p.get_item('gold')
             if p.zone:
                 # Show both local (interior) and world coords when inside
                 player_status = f"Local:({p.prevailing_x:.1f},{p.prevailing_y:.1f}) World:({p.x:.1f},{p.y:.1f}) Zone:{p.zone} Wheat:{player_food} ${player_money} HP:{p.health}"
@@ -571,7 +571,7 @@ class _DebugWindowInternal:
             for slot in char['inventory']:
                 if slot is None:
                     inv_parts.append('-')
-                elif slot['type'] == 'money':
+                elif slot['type'] == 'gold':
                     inv_parts.append(f"${slot['amount']}")
                 else:
                     inv_parts.append(f"{slot['type'][:3]}{slot['amount']}")
@@ -629,7 +629,7 @@ class _DebugWindowInternal:
                     used_slots += 1
                     if slot['type'] == 'wheat':
                         barrel_wheat += slot['amount']
-                    elif slot['type'] == 'money':
+                    elif slot['type'] == 'gold':
                         barrel_money += slot['amount']
             total_slots = len(barrel['inventory'])
             

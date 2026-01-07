@@ -435,7 +435,7 @@ class BoardGUI:
                 player = self.state.player
                 if player:
                     player_food = player.get_item('wheat')
-                    player_money = player.get_item('money')
+                    player_money = player.get_item('gold')
                     status = f"Pos:({player.x:.1f},{player.y:.1f}) Wheat:{player_food} ${player_money} HP:{player.health} | Zoom:{self.zoom:.1f}x | {'Follow' if self.camera_following_player else 'Free'}"
                 else:
                     status = f"No player | Zoom:{self.zoom:.1f}x"
@@ -1331,6 +1331,8 @@ class BoardGUI:
                 self.input.mouse_right_click,
                 rl.is_key_down(rl.KEY_LEFT_SHIFT) or rl.is_key_down(rl.KEY_RIGHT_SHIFT)
             )
+            # Handle scrolling (mouse wheel, scroll bar drag, gamepad stick)
+            self.inventory_menu.update_scroll()
             self.inventory_menu.render()
         else:
             self._draw_hud()
@@ -2836,14 +2838,23 @@ void main() {
         
         # Determine if we should show bars
         show_bars_timer = self._char_show_bars_until.get(char_name, 0)
-        should_show_bars = (
-            is_sprinting or 
-            current_time < show_bars_timer or
-            health < 100
-        )
+        is_player = (char is self.state.player)
+        in_combat_mode = self.state.player.get('combat_mode', False) if self.state.player else False
+        
+        # For player: only show bars in combat mode (HUD shows full stats)
+        # For NPCs: show bars when damaged, sprinting, or recently changed
+        if is_player:
+            should_show_bars = in_combat_mode
+        else:
+            should_show_bars = (
+                is_sprinting or 
+                current_time < show_bars_timer or
+                health < 100
+            )
         
         if should_show_bars:
-            bar_width = sprite_width
+            # Make bars narrower than sprite (70% of sprite width)
+            bar_width = int(sprite_width * 0.7)
             bar_height = max(3, int(4 * self.zoom))
             bar_x = int(pixel_cx - bar_width / 2)
             bar_gap = max(1, int(2 * self.zoom))

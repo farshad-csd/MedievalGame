@@ -505,7 +505,7 @@ class Character:
         
         # Add money slot if any
         if money > 0 and slot_idx < INVENTORY_SLOTS:
-            inventory[slot_idx] = {'type': 'money', 'amount': money}
+            inventory[slot_idx] = {'type': 'gold', 'amount': money}
             slot_idx += 1
         
         # Add wheat slots (stacks of ITEMS["wheat"]["stack_size"])
@@ -537,15 +537,15 @@ class Character:
             return 0
         
         # Money handling - unlimited stacking
-        if item_type == 'money':
+        if item_type == 'gold':
             for slot in self.inventory:
-                if slot and slot['type'] == 'money':
+                if slot and slot['type'] == 'gold':
                     slot['amount'] += amount
                     return amount
             # No money slot exists, create one
             for i, slot in enumerate(self.inventory):
                 if slot is None:
-                    self.inventory[i] = {'type': 'money', 'amount': amount}
+                    self.inventory[i] = {'type': 'gold', 'amount': amount}
                     return amount
             return 0  # No space
         
@@ -605,9 +605,9 @@ class Character:
     def get_item_space(self, item_type):
         """Get remaining capacity for an item type."""
         # Money has unlimited space if there's any slot
-        if item_type == 'money':
+        if item_type == 'gold':
             for slot in self.inventory:
-                if slot is None or slot['type'] == 'money':
+                if slot is None or slot['type'] == 'gold':
                     return 999999
             return 0
         
@@ -631,7 +631,7 @@ class Character:
             if slot is None:
                 return False
             item_type = slot['type']
-            if item_type == 'money':
+            if item_type == 'gold':
                 continue  # Money slots are never "full"
             stack_size = ITEMS.get(item_type, {}).get("stack_size", 1)
             if slot['amount'] < stack_size:
@@ -640,7 +640,7 @@ class Character:
     
     def transfer_all_items_from(self, other):
         """Transfer all items from another character to self (for looting)."""
-        for item_type in ['money', 'wheat', 'bread']:
+        for item_type in ['gold', 'wheat', 'bread']:
             amount = other.get_item(item_type)
             if amount > 0:
                 other.remove_item(item_type, amount)
