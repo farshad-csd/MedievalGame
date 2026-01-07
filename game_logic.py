@@ -295,9 +295,6 @@ class GameLogic:
             target.health -= damage
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
-            # Apply knockback - push target away from attacker
-            self._apply_knockback(attacker, target)
-            
             # Set hit flash for visual feedback
             target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
             
@@ -394,9 +391,6 @@ class GameLogic:
         target.health -= damage
         self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
         
-        # Apply knockback - push target away from attacker
-        self._apply_knockback(attacker, target)
-        
         # Set hit flash for visual feedback
         target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
         
@@ -451,61 +445,6 @@ class GameLogic:
             self.broadcast_violence(attacker, target)
         
         return result
-    
-    def _apply_knockback(self, attacker, target, knockback_dist=0.3):
-        """Apply knockback to target, pushing them away from attacker.
-        
-        Args:
-            attacker: Character doing the attacking
-            target: Character being hit
-            knockback_dist: Distance to push (default 0.3 cells)
-        """
-        # Calculate direction from attacker to target using prevailing coords
-        # (works correctly for both interior and exterior)
-        dx = target.prevailing_x - attacker.prevailing_x
-        dy = target.prevailing_y - attacker.prevailing_y
-        
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist < 0.01:
-            return  # On top of each other, can't determine direction
-        
-        # Normalize direction
-        dx /= dist
-        dy /= dist
-        
-        # Check bounds based on zone
-        if target.zone:
-            interior = self.state.interiors.get_interior(target.zone)
-            if interior:
-                # Apply knockback in local coords
-                new_x = target.prevailing_x + dx * knockback_dist
-                new_y = target.prevailing_y + dy * knockback_dist
-                
-                # Clamp to interior bounds
-                new_x = max(0.3, min(interior.width - 0.3, new_x))
-                new_y = max(0.3, min(interior.height - 0.3, new_y))
-                
-                # Check if blocked by furniture
-                if interior.is_position_blocked(int(new_x), int(new_y)):
-                    return  # Don't apply knockback into furniture
-                
-                # Set local coords directly (x/y setters store to _prevailing which is local)
-                target['x'] = new_x
-                target['y'] = new_y
-        else:
-            # Exterior - apply knockback in world coords
-            new_x = target.x + dx * knockback_dist
-            new_y = target.y + dy * knockback_dist
-            
-            # Clamp to map bounds
-            new_x = max(0.3, min(SIZE - 0.3, new_x))
-            new_y = max(0.3, min(SIZE - 0.3, new_y))
-            
-            # Check if blocked (trees, houses, etc)
-            if self.state.is_position_blocked(new_x, new_y, exclude_char=target, zone=None):
-                return  # Don't knockback into obstacles
-            target['x'] = new_x
-            target['y'] = new_y
     
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
