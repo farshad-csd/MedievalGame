@@ -160,7 +160,6 @@ class InputState:
         
         # Actions
         self.attack = False
-        self.eat = False
         self.combat_mode_toggle = False
         self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
@@ -541,7 +540,6 @@ class BoardGUI:
         """Handle all input sources (keyboard, mouse, gamepad)"""
         # Reset per-frame input state
         self.input.attack = False
-        self.input.eat = False
         self.input.combat_mode_toggle = False
         self.input.pause = False
         self.input.inventory_toggle = False
@@ -640,8 +638,6 @@ class BoardGUI:
         # Actions (key pressed, not held)
         if rl.is_key_pressed(rl.KEY_E):
             self.input.interact = True  # E for unified interact (NPC, door, window, stove)
-        if rl.is_key_pressed(rl.KEY_Q):
-            self.input.eat = True       # Q for eat
         if rl.is_key_pressed(rl.KEY_R):
             self.input.combat_mode_toggle = True  # R for combat mode toggle
         if rl.is_key_pressed(rl.KEY_ESCAPE):
@@ -734,9 +730,7 @@ class BoardGUI:
         if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_LEFT):
             self.input.environment_menu_toggle = True
         
-        # Y/Triangle - Eat
-        if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP):
-            self.input.eat = True
+        # Y/Triangle - (unused, reserved for inventory context menu)
         
         # Bumpers
         # Left bumper - (unused)
@@ -832,9 +826,6 @@ class BoardGUI:
             player = self.state.player
             if player and player.get('combat_mode', False):
                 self.player_controller.handle_attack_input()
-        
-        if self.input.eat:
-            self.player_controller.handle_eat_input()
     
     def _handle_unified_interact(self):
         """Handle unified interact (E key / A button).
@@ -910,7 +901,11 @@ class BoardGUI:
                 else:
                     target_x, target_y = barrel.world_x, barrel.world_y
                 if self._is_facing_position(player, target_x, target_y, barrel.zone):
-                    self.player_controller.handle_barrel_input()
+                    # Check if player can use this barrel
+                    if barrel.can_use(player):
+                        self.inventory_menu.open(barrel=barrel)
+                    else:
+                        self.state.log_action("Not your barrel")
                     return
         
         # Priority 7: Check for bed (must be facing) - not implemented
@@ -1125,6 +1120,8 @@ class BoardGUI:
                         select = True
                     else:
                         cancel = True  # Click outside closes menu
+                    # Consume the click so it doesn't propagate to slot interaction
+                    self.input.mouse_left_click = False
                 
                 self.inventory_menu.handle_context_menu_input(nav_up, nav_down, select, cancel)
             else:
@@ -1142,7 +1139,7 @@ class BoardGUI:
                 y_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP)
                 lb_held = rl.is_gamepad_button_down(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1)
                 
-                # Shift+Click opens context menu (mouse)
+                # Shift+Click on inventory always opens context menu (mouse)
                 if self.input.mouse_left_click and rl.is_key_down(rl.KEY_LEFT_SHIFT):
                     clicked_slot = self.inventory_menu._get_slot_at_mouse()
                     if clicked_slot and clicked_slot[0] == 'inventory':
@@ -3894,24 +3891,16 @@ void main() {
                     target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
                 if self._is_facing_position(player, target_x, target_y, barrel.zone):
                     if barrel.can_use(player):
-                        wheat_count = barrel.get_wheat()
-                        if wheat_count > 0:
-                            return {
-                                'type': 'Barrel',
-                                'name': barrel.name,
-                                'actions': [{'key': 'E', 'label': f'Take Wheat ({wheat_count})'}]
-                            }
-                        else:
-                            return {
-                                'type': 'Barrel',
-                                'name': barrel.name,
-                                'actions': [{'key': '-', 'label': 'Empty'}]
-                            }
+                        return {
+                            'type': 'Barrel',
+                            'name': barrel.name,
+                            'actions': [{'key': 'E', 'label': 'Open'}]
+                        }
                     else:
                         return {
                             'type': 'Barrel',
                             'name': barrel.name,
-                            'actions': [{'key': '-', 'label': 'Not your barrel'}]
+                            'actions': [{'key': '-', 'label': 'Not yours'}]
                         }
         
         # Check for adjacent bed (must be facing it)

@@ -127,6 +127,9 @@ class InventoryMenu:
         self._nearby_ground_items = []  # List of GroundItem objects within range
         self._ground_pickup_radius = 1.0  # How close player must be to pick up
         
+        # Barrel viewing state - when player interacts with a barrel
+        self._viewing_barrel = None  # Barrel object being viewed, or None
+        
         # Context menu state
         self.context_menu_open = False
         self.context_menu_slot = None  # Index of slot the menu is for
@@ -176,9 +179,15 @@ class InventoryMenu:
         self._drag_start_y = 0
         self._drag_start_scroll = 0
     
-    def open(self):
-        """Open the inventory menu."""
+    def open(self, barrel=None):
+        """Open the inventory menu.
+        
+        Args:
+            barrel: Optional Barrel object to view. If provided, barrel inventory
+                   is shown instead of Ground section.
+        """
         self.is_open = True
+        self._viewing_barrel = barrel
         # Reset selection to inventory section
         self.selected_section = 'inventory'
         self.selected_slot = 0
@@ -203,6 +212,7 @@ class InventoryMenu:
         if self.held_item and self.state.player:
             self._return_held_item_to_inventory()
         self.held_item = None
+        self._viewing_barrel = None
         self.is_open = False
     
     def _return_held_item_to_inventory(self):
@@ -273,7 +283,7 @@ class InventoryMenu:
         self.mouse_right_click = mouse_right_click
         self.gamepad_connected = gamepad_connected
         
-        # Handle shift+click for quick-move from ground to inventory (Minecraft style)
+        # Handle shift+click for quick-move (Minecraft style)
         if self.is_open and not self.context_menu_open and not self._confirm_popup_open and mouse_left_click and shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
@@ -281,7 +291,10 @@ class InventoryMenu:
                 if section == 'ground':
                     self._quick_move_ground_to_inventory(index)
                     return  # Don't process normal click
-                # Note: inventory shift+click handled in gui.py (opens context menu)
+                elif section == 'barrel':
+                    self._quick_move_barrel_to_inventory(index)
+                    return  # Don't process normal click
+                # Note: inventory shift+click opens context menu (handled in gui.py)
         
         # Handle mouse clicks on inventory slots (but not if shift is held or popup is open)
         if self.is_open and not self.context_menu_open and not self._confirm_popup_open and (mouse_left_click or mouse_right_click) and not shift_held:
@@ -298,6 +311,11 @@ class InventoryMenu:
                         self._interact_ground_slot_full(index)
                     elif mouse_right_click:
                         self._interact_ground_slot_single(index)
+                elif section == 'barrel':
+                    if mouse_left_click:
+                        self._interact_barrel_slot_full(index)
+                    elif mouse_right_click:
+                        self._interact_barrel_slot_single(index)
     
     def update_scroll(self):
         """Handle scroll input - call this every frame when menu is open.
@@ -535,9 +553,12 @@ class InventoryMenu:
         # Handle quick move (LB + A)
         if quick_move:
             if self.selected_section == 'inventory':
+                # Always drop to ground (use context menu for Move to Barrel)
                 self._quick_move_inventory_to_ground(self.selected_slot)
             elif self.selected_section == 'ground':
                 self._quick_move_ground_to_inventory(self.selected_slot)
+            elif self.selected_section == 'barrel':
+                self._quick_move_barrel_to_inventory(self.selected_slot)
             return
         
         # Handle inventory slots
@@ -552,6 +573,12 @@ class InventoryMenu:
                 self._interact_ground_slot_full(self.selected_slot)
             elif single_interact:
                 self._interact_ground_slot_single(self.selected_slot)
+        # Handle barrel slots
+        elif self.selected_section == 'barrel':
+            if full_interact:
+                self._interact_barrel_slot_full(self.selected_slot)
+            elif single_interact:
+                self._interact_barrel_slot_single(self.selected_slot)
     
     # =========================================================================
     # CONTEXT MENU METHODS
@@ -617,6 +644,10 @@ class InventoryMenu:
         if item_type == 'bread':
             options.append('Use')
         
+        # Move to Barrel option when viewing a barrel
+        if self._viewing_barrel:
+            options.append('Move to Barrel')
+        
         # All items can be dropped
         options.append('Drop')
         
@@ -639,10 +670,18 @@ class InventoryMenu:
         if stove and stove.can_use(player):
             return True
         
-        # Check for adjacent campfire (anyone can use)
-        campfire = self.state.interactables.get_adjacent_campfire(player)
-        if campfire:
-            return True
+        # Check for adjacent campfire (stored as camp_position on characters)
+        # Campfires are exterior only, player must be in exterior
+        if player.zone is None:
+            px, py = player.x, player.y
+            for char in self.state.characters:
+                camp_pos = char.get('camp_position')
+                if camp_pos:
+                    cx, cy = camp_pos
+                    # Check adjacency (within 1.5 cells)
+                    dist = ((px - (cx + 0.5)) ** 2 + (py - (cy + 0.5)) ** 2) ** 0.5
+                    if dist <= 1.5:
+                        return True
         
         return False
     
@@ -709,6 +748,8 @@ class InventoryMenu:
         
         if action == 'Use':
             self._use_item(slot_index, item)
+        elif action == 'Move to Barrel':
+            self._quick_move_inventory_to_barrel(slot_index)
         elif action == 'Drop':
             self._quick_move_inventory_to_ground(slot_index)
         elif action == 'Burn':
@@ -1009,9 +1050,40 @@ class InventoryMenu:
         # - equipment (Head and Body side by side)
         # - accessories (2 rows of 4)
         # - inventory (5 slots in 1 row)
-        # - ground (dynamic rows of 5)
+        # - barrel OR ground (dynamic rows of 5)
         
-        if section == 'ground':
+        # Determine bottom section name
+        bottom_section = 'barrel' if self._viewing_barrel else 'ground'
+        
+        if section == 'barrel':
+            # Barrel navigation
+            barrel_slots = len(self._viewing_barrel.inventory) if self._viewing_barrel else 0
+            barrel_rows = (barrel_slots + 4) // 5
+            row = slot // 5
+            col = slot % 5
+            
+            if dx != 0:
+                col = (col + dx) % 5
+                slot = row * 5 + col
+                # Clamp to valid slot
+                slot = min(slot, barrel_slots - 1)
+            
+            if dy > 0:  # Down within barrel
+                new_row = row + 1
+                if new_row < barrel_rows:
+                    new_slot = new_row * 5 + col
+                    if new_slot < barrel_slots:
+                        slot = new_slot
+                # Else stay at current position
+            elif dy < 0:  # Up
+                if row > 0:
+                    slot = (row - 1) * 5 + col
+                else:
+                    # Go up to inventory
+                    section = 'inventory'
+                    slot = min(col, 4)
+        
+        elif section == 'ground':
             ground_rows = self._calculate_ground_rows()
             total_ground_slots = ground_rows * 5
             row = slot // 5
@@ -1040,8 +1112,8 @@ class InventoryMenu:
             if dy < 0:  # Up to accessories
                 section = 'accessories'
                 slot = min(4 + min(slot, 3), 7)
-            elif dy > 0:  # Down to ground
-                section = 'ground'
+            elif dy > 0:  # Down to barrel or ground
+                section = bottom_section
                 slot = min(slot, 4)
         
         elif section == 'accessories':
@@ -1166,19 +1238,25 @@ class InventoryMenu:
         calculated_slot_size = available_for_slots // 5
         slot_size = max(min_slot_size, min(max_slot_size, calculated_slot_size))
         
-        # Update nearby ground items cache
-        self._update_nearby_ground_items(player)
-        
-        # Calculate ground section height (dynamic rows)
-        ground_rows = self._calculate_ground_rows()
-        ground_section_height = 24 + ground_rows * (slot_size + slot_gap)
+        # Calculate bottom section height (barrel or ground)
+        if self._viewing_barrel:
+            # Barrel has fixed slots (typically 30 = 6 rows of 5)
+            barrel_slots = len(self._viewing_barrel.inventory)
+            barrel_rows = (barrel_slots + 4) // 5  # Ceiling division
+            bottom_section_height = 24 + barrel_rows * (slot_size + slot_gap)
+        else:
+            # Update nearby ground items cache
+            self._update_nearby_ground_items(player)
+            # Calculate ground section height (dynamic rows)
+            ground_rows = self._calculate_ground_rows()
+            bottom_section_height = 24 + ground_rows * (slot_size + slot_gap)
         
         # Calculate total content height to determine if scrolling is needed
-        # Status bar: ~50-70px, Equipment area: ~100-140px, Inventory: ~60px, Ground: dynamic
+        # Status bar: ~50-70px, Equipment area: ~100-140px, Inventory: ~60px, Bottom: dynamic
         status_height = 70 if compact_mode else 50
         equip_height = 140 if compact_mode else 100
         inventory_height = slot_size + 24
-        total_content_height = padding + status_height + 8 + equip_height + 8 + inventory_height + 8 + ground_section_height + padding
+        total_content_height = padding + status_height + 8 + equip_height + 8 + inventory_height + 8 + bottom_section_height + padding
         self._left_panel_content_height = total_content_height
         
         # Available height for content
@@ -1211,8 +1289,11 @@ class InventoryMenu:
         self._draw_storage_section(player, inner_x, inner_y, inner_width, "Base Inventory", 5, slot_size)
         inner_y += inventory_height + 8
         
-        # === GROUND (nearby dropped items) ===
-        self._draw_ground_section(player, inner_x, inner_y, inner_width, slot_size, ground_rows)
+        # === BARREL or GROUND (bottom section) ===
+        if self._viewing_barrel:
+            self._draw_barrel_section(player, inner_x, inner_y, inner_width, slot_size, barrel_rows)
+        else:
+            self._draw_ground_section(player, inner_x, inner_y, inner_width, slot_size, ground_rows)
         
         # End scissor mode
         rl.end_scissor_mode()
@@ -1593,6 +1674,82 @@ class InventoryMenu:
                 rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
                 rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
     
+    def _draw_barrel_section(self, player, x, y, width, slot_size, num_rows):
+        """Draw the Barrel section showing barrel inventory."""
+        if not self._viewing_barrel:
+            return
+        
+        slot_gap = 4
+        left_padding = 6
+        slots_per_row = 5
+        
+        # Section height
+        section_height = 24 + num_rows * (slot_size + slot_gap)
+        
+        # Section background with wooden barrel color
+        rl.draw_rectangle(x, y, width, section_height, rl.Color(80, 60, 40, 120))
+        rl.draw_rectangle_lines(x, y, width, section_height, rl.Color(160, 120, 80, 200))
+        
+        # Label with barrel name
+        label = self._viewing_barrel.name
+        rl.draw_text(label, x + 4, y + 4, 9, rl.Color(200, 180, 140, 255))
+        
+        # Slots
+        slots_x = x + left_padding
+        slots_y = y + 18
+        
+        # Adapt text sizes based on slot size
+        amount_size = 10 if slot_size >= 32 else 8
+        
+        # Get barrel inventory
+        barrel_inventory = self._viewing_barrel.inventory
+        total_slots = len(barrel_inventory)
+        
+        for i in range(total_slots):
+            row = i // slots_per_row
+            col = i % slots_per_row
+            
+            slot_x = slots_x + col * (slot_size + slot_gap)
+            slot_y = slots_y + row * (slot_size + slot_gap)
+            
+            # Store slot rect for hit detection
+            self._slot_rects[('barrel', i)] = (slot_x, slot_y, slot_size, slot_size)
+            
+            # Check if this slot is selected (only show on gamepad)
+            is_selected = (self.gamepad_connected and 
+                          self.selected_section == 'barrel' and 
+                          self.selected_slot == i)
+            
+            # Draw slot background
+            bg_color = COLOR_BG_SLOT_SELECTED if is_selected else rl.Color(50, 40, 30, 150)
+            border_color = COLOR_BORDER_SELECTED if is_selected else rl.Color(120, 100, 70, 150)
+            
+            rl.draw_rectangle(slot_x, slot_y, slot_size, slot_size, bg_color)
+            rl.draw_rectangle_lines(slot_x, slot_y, slot_size, slot_size, border_color)
+            
+            # Draw thicker border if selected
+            if is_selected:
+                rl.draw_rectangle_lines(slot_x - 1, slot_y - 1, slot_size + 2, slot_size + 2, border_color)
+            
+            # Draw item if present in this slot
+            if barrel_inventory[i] is not None:
+                item = barrel_inventory[i]
+                item_type = item.get('type', '')
+                amount = item.get('amount', 0)
+                
+                # Draw item sprite (centered in slot)
+                inset = 3 if slot_size < 32 else 4
+                sprite_area_size = slot_size - inset * 2
+                self._draw_item_sprite(item_type, slot_x + inset, slot_y + inset, sprite_area_size)
+                
+                # Draw amount at bottom of slot
+                amount_str = str(amount)
+                amount_x = slot_x + (slot_size - rl.measure_text(amount_str, amount_size)) // 2
+                amount_y = slot_y + slot_size - amount_size - 2
+                # Dark outline for readability
+                rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
+                rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
+    
     def _interact_ground_slot_full(self, slot_index):
         """Handle left-click on a ground slot - pick up / place / swap full stack."""
         if not self.state.player:
@@ -1837,6 +1994,225 @@ class InventoryMenu:
             )
             inventory[slot_index] = None
             self._update_nearby_ground_items(player)
+    
+    # =========================================================================
+    # BARREL SLOT INTERACTION METHODS
+    # =========================================================================
+    
+    def _interact_barrel_slot_full(self, slot_index):
+        """Handle left-click on a barrel slot - pick up / place / swap full stack."""
+        if not self.state.player or not self._viewing_barrel:
+            return
+        
+        barrel = self._viewing_barrel
+        barrel_inventory = barrel.inventory
+        
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return
+        
+        barrel_item = barrel_inventory[slot_index]
+        
+        if self.held_item is None:
+            # Pick up item from barrel
+            if barrel_item:
+                self.held_item = {'type': barrel_item['type'], 'amount': barrel_item['amount']}
+                barrel_inventory[slot_index] = None
+        else:
+            # We're holding something
+            if barrel_item is None:
+                # Place held item in barrel
+                barrel_inventory[slot_index] = {'type': self.held_item['type'], 'amount': self.held_item['amount']}
+                self.held_item = None
+            elif barrel_item['type'] == self.held_item.get('type'):
+                # Same type - try to stack
+                stack_limit = get_stack_limit(barrel_item['type'])
+                if stack_limit is None:
+                    # Unlimited stacking
+                    barrel_item['amount'] += self.held_item['amount']
+                    self.held_item = None
+                else:
+                    space = stack_limit - barrel_item['amount']
+                    if space > 0:
+                        transfer = min(space, self.held_item['amount'])
+                        barrel_item['amount'] += transfer
+                        self.held_item['amount'] -= transfer
+                        if self.held_item['amount'] <= 0:
+                            self.held_item = None
+                    else:
+                        # Stack full - swap
+                        old_type = barrel_item['type']
+                        old_amount = barrel_item['amount']
+                        barrel_item['type'] = self.held_item['type']
+                        barrel_item['amount'] = self.held_item['amount']
+                        self.held_item = {'type': old_type, 'amount': old_amount}
+            else:
+                # Different type - swap
+                old_type = barrel_item['type']
+                old_amount = barrel_item['amount']
+                barrel_item['type'] = self.held_item['type']
+                barrel_item['amount'] = self.held_item['amount']
+                self.held_item = {'type': old_type, 'amount': old_amount}
+    
+    def _interact_barrel_slot_single(self, slot_index):
+        """Handle right-click on a barrel slot - pick up half / place single."""
+        if not self.state.player or not self._viewing_barrel:
+            return
+        
+        barrel = self._viewing_barrel
+        barrel_inventory = barrel.inventory
+        
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return
+        
+        barrel_item = barrel_inventory[slot_index]
+        
+        if self.held_item is None:
+            # Pick up half of stack from barrel
+            if barrel_item:
+                total = barrel_item['amount']
+                take = (total + 1) // 2  # Ceiling division - take the larger half
+                leave = total - take
+                
+                self.held_item = {'type': barrel_item['type'], 'amount': take}
+                
+                if leave > 0:
+                    barrel_item['amount'] = leave
+                else:
+                    barrel_inventory[slot_index] = None
+        else:
+            # We're holding something - place single item
+            if barrel_item is None:
+                # Place 1 item in barrel
+                barrel_inventory[slot_index] = {'type': self.held_item['type'], 'amount': 1}
+                self.held_item['amount'] -= 1
+                if self.held_item['amount'] <= 0:
+                    self.held_item = None
+            elif barrel_item['type'] == self.held_item.get('type'):
+                # Same type - place 1 if room
+                stack_limit = get_stack_limit(barrel_item['type'])
+                if stack_limit is None or barrel_item['amount'] < stack_limit:
+                    barrel_item['amount'] += 1
+                    self.held_item['amount'] -= 1
+                    if self.held_item['amount'] <= 0:
+                        self.held_item = None
+            # Different type - do nothing
+    
+    def _quick_move_barrel_to_inventory(self, slot_index):
+        """Shift+click: Quick-move item from barrel to player inventory."""
+        if not self.state.player or not self._viewing_barrel:
+            return
+        
+        player = self.state.player
+        inventory = player.inventory
+        barrel = self._viewing_barrel
+        barrel_inventory = barrel.inventory
+        
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return
+        
+        barrel_item = barrel_inventory[slot_index]
+        if barrel_item is None:
+            return
+        
+        item_type = barrel_item['type']
+        amount_to_move = barrel_item['amount']
+        stack_limit = get_stack_limit(item_type)
+        
+        # First, try to stack with existing items of same type
+        for i, slot in enumerate(inventory):
+            if slot and slot.get('type') == item_type:
+                if stack_limit is None:
+                    # Unlimited stacking
+                    slot['amount'] = slot.get('amount', 0) + amount_to_move
+                    amount_to_move = 0
+                    break
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, amount_to_move)
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Then try empty slots
+        if amount_to_move > 0:
+            for i, slot in enumerate(inventory):
+                if slot is None:
+                    if stack_limit is None:
+                        inventory[i] = {'type': item_type, 'amount': amount_to_move}
+                        amount_to_move = 0
+                        break
+                    else:
+                        transfer = min(stack_limit, amount_to_move)
+                        inventory[i] = {'type': item_type, 'amount': transfer}
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Update barrel based on what was moved
+        if amount_to_move <= 0:
+            barrel_inventory[slot_index] = None
+        else:
+            barrel_item['amount'] = amount_to_move
+    
+    def _quick_move_inventory_to_barrel(self, slot_index):
+        """Shift+click: Quick-move item from player inventory to barrel."""
+        if not self.state.player or not self._viewing_barrel:
+            return
+        
+        player = self.state.player
+        inventory = player.inventory
+        barrel = self._viewing_barrel
+        barrel_inventory = barrel.inventory
+        
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+        
+        slot_item = inventory[slot_index]
+        if slot_item is None:
+            return
+        
+        item_type = slot_item['type']
+        amount_to_move = slot_item['amount']
+        stack_limit = get_stack_limit(item_type)
+        
+        # First, try to stack with existing items of same type in barrel
+        for i, barrel_slot in enumerate(barrel_inventory):
+            if barrel_slot and barrel_slot.get('type') == item_type:
+                if stack_limit is None:
+                    barrel_slot['amount'] = barrel_slot.get('amount', 0) + amount_to_move
+                    amount_to_move = 0
+                    break
+                else:
+                    space = stack_limit - barrel_slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, amount_to_move)
+                        barrel_slot['amount'] = barrel_slot.get('amount', 0) + transfer
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Then try empty barrel slots
+        if amount_to_move > 0:
+            for i, barrel_slot in enumerate(barrel_inventory):
+                if barrel_slot is None:
+                    if stack_limit is None:
+                        barrel_inventory[i] = {'type': item_type, 'amount': amount_to_move}
+                        amount_to_move = 0
+                        break
+                    else:
+                        transfer = min(stack_limit, amount_to_move)
+                        barrel_inventory[i] = {'type': item_type, 'amount': transfer}
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+        
+        # Update player inventory based on what was moved
+        if amount_to_move <= 0:
+            inventory[slot_index] = None
+        else:
+            slot_item['amount'] = amount_to_move
     
     def _load_item_sprites(self):
         """Load all item sprites defined in constants.ITEMS."""

@@ -9,7 +9,7 @@ Each class:
 """
 
 import math
-from constants import ITEMS, ADJACENCY_DISTANCE, INVENTORY_SLOTS
+from constants import ITEMS, ADJACENCY_DISTANCE, INVENTORY_SLOTS, BARREL_SLOTS
 
 
 class Interactable:
@@ -110,7 +110,7 @@ class Barrel(Interactable):
     Can be owned by a character and associated with a home area.
     """
     
-    def __init__(self, name, x, y, home=None, owner=None, slots=INVENTORY_SLOTS, zone=None):
+    def __init__(self, name, x, y, home=None, owner=None, slots=BARREL_SLOTS, zone=None):
         super().__init__(name, x, y, home, zone=zone)
         self.owner = owner
         self.inventory = [None] * slots
@@ -138,6 +138,15 @@ class Barrel(Interactable):
     def can_add_item(self, item_type, amount):
         """Check if barrel can add this much of an item."""
         stack_size = ITEMS[item_type]["stack_size"]
+        
+        # None means unlimited stacking
+        if stack_size is None:
+            # Check for any same-type slot or empty slot
+            for slot in self.inventory:
+                if slot is None or slot['type'] == item_type:
+                    return True
+            return False
+        
         space = 0
         for slot in self.inventory:
             if slot is None:
@@ -151,6 +160,23 @@ class Barrel(Interactable):
         stack_size = ITEMS[item_type]["stack_size"]
         remaining = amount
         
+        # Handle unlimited stacking (None)
+        if stack_size is None:
+            # First, try to add to existing stack of same type
+            for slot in self.inventory:
+                if slot and slot['type'] == item_type:
+                    slot['amount'] += remaining
+                    return amount
+            
+            # Then, use first empty slot
+            for i, slot in enumerate(self.inventory):
+                if slot is None:
+                    self.inventory[i] = {'type': item_type, 'amount': remaining}
+                    return amount
+            
+            return 0  # No space
+        
+        # Normal stacking with limit
         # First, fill existing stacks
         for slot in self.inventory:
             if slot and slot['type'] == item_type and slot['amount'] < stack_size:

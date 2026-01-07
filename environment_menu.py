@@ -11,13 +11,15 @@ Controls:
 - Mouse: Hover to highlight, click to select
 
 Options (context-sensitive, in priority order):
-- Pick Up Barrel: When near a barrel (same zone)
+- Pick Up Barrel: When near a barrel (same zone) - pick up to carry
 - Chop Tree: When near a tree (exterior only)
 - Harvest: When on green/ready farm cell
 - Plant: When on brown/harvested farm cell  
 - Build Campfire: When outside village and not in interior
 - Build: Always shown
 - Exit: Always shown
+
+Note: E key opens barrel inventory directly; Pick Up Barrel is for carrying.
 """
 
 import pyray as rl
