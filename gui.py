@@ -1827,6 +1827,11 @@ class BoardGUI:
         # Draw outlines for perceived occluded characters
         self._draw_perceived_outlines()
         
+        # Draw red outlines for characters in player's attack cone (when in combat mode)
+        chars_in_attack_cone = self._get_chars_in_attack_cone()
+        if chars_in_attack_cone:
+            self._draw_combat_target_outlines(chars_in_attack_cone)
+        
         # Draw deferred UI on top of everything
         for ui_info in self._deferred_ui_cache:
             self._draw_character_ui(ui_info)
@@ -2637,6 +2642,149 @@ void main() {
         
         return self._outline_shader
     
+    def _init_red_outline_shader(self):
+        """Initialize the red outline shader for combat targets."""
+        if hasattr(self, '_red_outline_shader'):
+            return self._red_outline_shader
+        
+        # Fragment shader that draws red outline around opaque pixels
+        fragment_shader = """
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec2 textureSize;
+uniform float outlineWidth;
+out vec4 finalColor;
+
+void main() {
+    vec4 texel = texture(texture0, fragTexCoord);
+    
+    // If this pixel is transparent, check if neighbors are opaque
+    if (texel.a < 0.1) {
+        vec2 pixelSize = vec2(1.0 / textureSize.x, 1.0 / textureSize.y) * outlineWidth;
+        
+        // Sample in 8 directions
+        float neighborAlpha = 0.0;
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, 0)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, 0)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, pixelSize.y)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, -pixelSize.y)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, pixelSize.y)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, pixelSize.y)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, -pixelSize.y)).a);
+        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, -pixelSize.y)).a);
+        
+        // If any neighbor is opaque, draw red outline
+        if (neighborAlpha > 0.5) {
+            finalColor = vec4(1.0, 0.0, 0.0, 0.9);  // Bright red outline
+        } else {
+            finalColor = vec4(0.0, 0.0, 0.0, 0.0);
+        }
+    } else {
+        // Opaque pixel - discard (we only want the outline)
+        finalColor = vec4(0.0, 0.0, 0.0, 0.0);
+    }
+}
+"""
+        
+        # Default vertex shader
+        vertex_shader = """
+#version 330
+in vec3 vertexPosition;
+in vec2 vertexTexCoord;
+in vec4 vertexColor;
+uniform mat4 mvp;
+out vec2 fragTexCoord;
+out vec4 fragColor;
+
+void main() {
+    fragTexCoord = vertexTexCoord;
+    fragColor = vertexColor;
+    gl_Position = mvp * vec4(vertexPosition, 1.0);
+}
+"""
+        
+        self._red_outline_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
+        self._red_outline_texture_size_loc = rl.get_shader_location(self._red_outline_shader, "textureSize")
+        self._red_outline_width_loc = rl.get_shader_location(self._red_outline_shader, "outlineWidth")
+        
+        return self._red_outline_shader
+    
+    def _draw_combat_target_outlines(self, chars_in_attack_cone):
+        """Draw red outlines around characters in the player's attack cone.
+        
+        Args:
+            chars_in_attack_cone: Set of character ids that are in the attack cone
+        """
+        if not chars_in_attack_cone:
+            return
+        
+        cell_size = self._cam_cell_size
+        current_time = time.time()
+        
+        # Get the red outline shader
+        shader = self._init_red_outline_shader()
+        
+        for char in self.state.characters:
+            if id(char) not in chars_in_attack_cone:
+                continue
+            
+            # Get visual coordinates
+            if char.zone:
+                if not self.window_viewing:
+                    vis_x = char.prevailing_x
+                    vis_y = char.prevailing_y
+                elif self.window_viewing_interior and char.zone == self.window_viewing_interior.name:
+                    vis_x = char.prevailing_x
+                    vis_y = char.prevailing_y
+                else:
+                    vis_x = char.x
+                    vis_y = char.y
+            else:
+                vis_x = char.x
+                vis_y = char.y
+            
+            pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
+            
+            sprite_height = int(CHARACTER_HEIGHT * cell_size)
+            sprite_width = int(CHARACTER_WIDTH * cell_size)
+            
+            # Get sprite frame info
+            frame_info, should_flip = self.sprite_manager.get_frame(char, current_time)
+            
+            if not frame_info:
+                continue
+            
+            # Get recolored texture
+            char_color = self._get_character_color(char)
+            recolored_texture = self.sprite_manager.recolor_red_to_color(frame_info, char_color)
+            
+            if not recolored_texture:
+                continue
+            
+            blit_x = pixel_cx - sprite_width / 2
+            blit_y = pixel_cy - sprite_height / 2
+            
+            # Source rectangle
+            if should_flip:
+                source = rl.Rectangle(recolored_texture.width, 0, -recolored_texture.width, recolored_texture.height)
+            else:
+                source = rl.Rectangle(0, 0, recolored_texture.width, recolored_texture.height)
+            
+            dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
+            
+            # Set shader uniforms
+            texture_size = rl.ffi.new("float[2]", [recolored_texture.width, recolored_texture.height])
+            outline_width = rl.ffi.new("float *", 1.0)  # Slightly thicker than perceived outlines
+            rl.set_shader_value(shader, self._red_outline_texture_size_loc, texture_size, rl.SHADER_UNIFORM_VEC2)
+            rl.set_shader_value(shader, self._red_outline_width_loc, outline_width, rl.SHADER_UNIFORM_FLOAT)
+            
+            # Draw the red outline
+            rl.begin_shader_mode(shader)
+            rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+            rl.end_shader_mode()
+    
     def _draw_single_tree(self, tree, pos):
         """Draw a single tree (legacy - now use _draw_single_occluder)"""
         self._draw_single_occluder('tree', pos, tree)
@@ -3043,6 +3191,80 @@ void main() {
             if SHOW_ATTACK_CONE and char.is_player:
                 self._draw_player_attack_cone(char, pixel_cx, pixel_cy, cell_size)
 
+    def _is_char_in_player_attack_cone(self, char):
+        """Check if a character is in the player's attack cone.
+        
+        Uses the same logic as resolve_attack() in game_logic.py to determine
+        if a character would be hit by the player's attack.
+        
+        Args:
+            char: Character to check
+            
+        Returns:
+            True if character is in the attack cone
+        """
+        player = self.state.player
+        if not player or char is player:
+            return False
+        
+        # Skip dead characters
+        if char.get('health', 100) <= 0:
+            return False
+        
+        # Must be in same zone
+        if char.zone != player.zone:
+            return False
+        
+        # Get facing direction vector
+        facing = player.get('facing', 'down')
+        facing_vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        dx, dy = facing_vectors.get(facing, (0, 1))
+        
+        # Calculate relative position using prevailing coords (local when in interior)
+        rel_x = char.prevailing_x - player.prevailing_x
+        rel_y = char.prevailing_y - player.prevailing_y
+        
+        # Project onto attack direction
+        if dx != 0 or dy != 0:
+            proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
+            perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
+            
+            # Hit if within weapon reach in attack direction and within swing width
+            if 0 < proj_dist <= WEAPON_REACH and perp_dist < ATTACK_CONE_HALF_WIDTH:
+                return True
+        
+        return False
+    
+    def _get_chars_in_attack_cone(self):
+        """Get all characters currently in the player's attack cone.
+        
+        Returns:
+            Set of character ids that are in the attack cone
+        """
+        player = self.state.player
+        if not player:
+            return set()
+        
+        # Only check when player is in combat mode
+        if not player.get('combat_mode', False):
+            return set()
+        
+        targets = set()
+        for char in self.state.characters:
+            if self._is_char_in_player_attack_cone(char):
+                targets.add(id(char))
+        
+        return targets
+    
     def _draw_player_attack_cone(self, player, pixel_cx, pixel_cy, cell_size):
         """Draw the player's directional attack hitbox.
         
