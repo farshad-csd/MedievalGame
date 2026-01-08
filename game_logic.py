@@ -2552,11 +2552,18 @@ class GameLogic:
         Args:
             dt: Delta time in seconds
         """
-        from constants import ARROW_SPEED, ARROW_MAX_RANGE
+        import time
+        from constants import ARROW_SPEED, ARROW_MAX_RANGE, ARROW_STUCK_DURATION
         
         arrows_to_remove = []
         
         for arrow in self.state.arrows:
+            # Handle stuck arrows (waiting to disappear)
+            if arrow.get('stuck'):
+                if time.time() - arrow['stuck_time'] >= ARROW_STUCK_DURATION:
+                    arrows_to_remove.append(arrow)
+                continue
+            
             # Get per-arrow speed and range (with fallback to constants)
             arrow_speed = arrow.get('speed', ARROW_SPEED)
             arrow_max_range = arrow.get('max_range', ARROW_MAX_RANGE)
@@ -2566,9 +2573,10 @@ class GameLogic:
             arrow['y'] += arrow['dy'] * arrow_speed * dt
             arrow['distance'] += arrow_speed * dt
             
-            # Check if exceeded max range
+            # Check if exceeded max range - mark as stuck instead of removing
             if arrow['distance'] >= arrow_max_range:
-                arrows_to_remove.append(arrow)
+                arrow['stuck'] = True
+                arrow['stuck_time'] = time.time()
                 continue
             
             # Check for hits on characters

@@ -3366,9 +3366,10 @@ void main() {
             rl.draw_circle(int(pixel_cx), int(pixel_cy), 4, shield_color)
     
     def _draw_arrows(self, rendering_zone):
-        """Draw all arrow projectiles using arrow sprite."""
+        """Draw all arrow projectiles using arrow sprite with realistic drop."""
         import math
-        from constants import ARROW_SPRITE_SCALE
+        from constants import (ARROW_SPRITE_SCALE, ARROW_MAX_RANGE, 
+                               ARROW_DROP_START, ARROW_DROP_MAX_ANGLE)
         
         arrow_tex = self.world_textures.get('arrow')
         cell_size = self._cam_cell_size
@@ -3382,11 +3383,35 @@ void main() {
             screen_x, screen_y = self._world_to_screen(arrow['x'], arrow['y'])
             
             if arrow_tex:
-                # Calculate rotation angle from direction vector (in degrees)
-                # atan2 gives angle in radians, convert to degrees
-                # Sprite faces top-left (-135°), so add 135° offset to align with travel direction
+                # Calculate base rotation angle from direction vector
+                # Sprite faces top-left (-135°), so add 135° offset
                 angle_rad = math.atan2(arrow['dy'], arrow['dx'])
                 angle_deg = math.degrees(angle_rad) + 135
+                
+                # Calculate drop rotation based on flight progress
+                arrow_max_range = arrow.get('max_range', ARROW_MAX_RANGE)
+                
+                if arrow.get('stuck'):
+                    # Stuck arrow: use maximum drop
+                    drop_progress = 1.0
+                else:
+                    # Flying arrow: calculate progress through flight
+                    progress = arrow['distance'] / arrow_max_range if arrow_max_range > 0 else 0
+                    
+                    if progress < ARROW_DROP_START:
+                        drop_progress = 0.0
+                    else:
+                        # Map remaining flight (DROP_START to 1.0) to drop_progress (0 to 1)
+                        drop_progress = (progress - ARROW_DROP_START) / (1.0 - ARROW_DROP_START)
+                        # Apply easing (squared) for dramatic drop at end
+                        drop_progress = drop_progress ** 2
+                
+                # Drop rotation: scaled by dx (horizontal component)
+                # - Flying right (dx > 0): rotates clockwise (positive) to tip down-right
+                # - Flying left (dx < 0): rotates counter-clockwise (negative) to tip down-left
+                # - Flying up/down (dx = 0): no visible drop
+                drop_rotation = ARROW_DROP_MAX_ANGLE * drop_progress * arrow['dx']
+                angle_deg += drop_rotation
                 
                 # Scale arrow based on zoom and ARROW_SPRITE_SCALE constant
                 scale = (cell_size / arrow_tex.width) * ARROW_SPRITE_SCALE

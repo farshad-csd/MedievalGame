@@ -152,16 +152,19 @@ BLOCK_MOVEMENT_SPEED = 0.4            # Movement speed while blocking (cells/sec
 SHIELD_COLOR = (80, 160, 255, 180)    # Light blue, semi-transparent
 
 # Arrow/projectile settings
-ARROW_SPEED = 6.0                    # cells per second (max, at full draw)
-ARROW_MAX_RANGE = 13.0                # cells before disappearing (max, at full draw)
+ARROW_SPEED = 6.5                    # cells per second (max, at full draw)
+ARROW_MAX_RANGE = 15.0                # cells before disappearing (max, at full draw)
 ARROW_LENGTH = 0.8                    # visual length in cells
 ARROW_THICKNESS = .8                   # pixels
 
 # Bow draw settings (player only)
 BOW_DRAW_CHARGE_TICKS = 10            # Ticks to reach full draw (~1.0 sec at 10 ticks/sec)
-ARROW_MIN_SPEED = 2.0                 # cells per second (at minimum draw)
-ARROW_MIN_RANGE = 2.0                 # cells before disappearing (at minimum draw)
+ARROW_MIN_SPEED = 1                 # cells per second (at minimum draw)
+ARROW_MIN_RANGE = 0.1                 # cells before disappearing (at minimum draw)
 ARROW_SPRITE_SCALE = 0.5              # Scale multiplier for arrow sprite (1.0 = one cell wide)
+ARROW_STUCK_DURATION = 5.0            # Seconds arrow stays stuck in ground before disappearing
+ARROW_DROP_START = 0.6                # Progress (0-1) when arrow starts dropping (0.6 = last 40% of flight)
+ARROW_DROP_MAX_ANGLE = 20             # Maximum drop angle in degrees (toward ground)
 
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
