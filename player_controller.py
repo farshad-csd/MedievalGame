@@ -21,7 +21,8 @@ from constants import (
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     ATTACK_ANIMATION_DURATION, WEAPON_REACH,
     BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
-    WHEAT_TO_BREAD_RATIO
+    WHEAT_TO_BREAD_RATIO,
+    ARROW_SPEED, ARROW_MAX_RANGE, ARROW_MIN_SPEED, ARROW_MIN_RANGE
 )
 from scenario_world import SIZE
 
@@ -309,6 +310,70 @@ class PlayerController:
         attack_dir = player.start_attack(angle=attack_angle, damage_multiplier=multiplier)
         
         return True
+
+    # =========================================================================
+    # BOW DRAW (Ranged Attack)
+    # =========================================================================
+    
+    def handle_shoot_button_down(self, current_tick):
+        """Handle shoot button being pressed down (start bow draw).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if bow draw started
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        # Can't draw bow if already drawing or charging heavy attack
+        if player.is_drawing_bow() or player.is_charging_heavy_attack():
+            return False
+        
+        # Start drawing
+        player.start_bow_draw(current_tick)
+        return True
+    
+    def handle_shoot_button_held(self, current_tick):
+        """Handle shoot button being held down (update bow draw).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if currently drawing
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        return player.update_bow_draw(current_tick)
+    
+    def handle_shoot_button_release(self, current_tick):
+        """Handle shoot button being released (fire arrow).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Tuple of (arrow_speed, arrow_max_range) based on draw progress,
+            or None if no arrow should be fired
+        """
+        player = self.player
+        if not player:
+            return None
+        
+        # Get draw progress and release
+        progress = player.release_bow_draw(current_tick)
+        
+        # Calculate speed and range based on draw progress
+        # Linear interpolation from min to max
+        arrow_speed = ARROW_MIN_SPEED + progress * (ARROW_SPEED - ARROW_MIN_SPEED)
+        arrow_range = ARROW_MIN_RANGE + progress * (ARROW_MAX_RANGE - ARROW_MIN_RANGE)
+        
+        return (arrow_speed, arrow_range)
 
     def handle_bake_input(self):
         """Handle bake key press.

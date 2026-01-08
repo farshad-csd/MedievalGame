@@ -178,7 +178,9 @@ class InputState:
         self.attack_released = False  # True on frame attack button is released
         self.combat_mode_toggle = False
         self.block = False  # Held while spacebar is down
-        self.shoot = False  # F key to shoot arrow
+        self.shoot = False  # F key pressed this frame (start draw)
+        self.shoot_held = False  # True while F key is held down
+        self.shoot_released = False  # True on frame F key is released
         self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
@@ -380,6 +382,8 @@ class BoardGUI:
             # Object sprites
             'bed': 'sprites/Bed.png',
             'stove': 'sprites/Stove.png',
+            # Projectile sprites
+            'arrow': 'sprites/Arrow.png',
             # UI sprites
             'shield': 'sprites/shield.png',
         }
@@ -635,6 +639,7 @@ class BoardGUI:
         self.input.attack_released = False  # Reset release flag each frame
         self.input.combat_mode_toggle = False
         self.input.shoot = False
+        self.input.shoot_released = False  # Reset release flag each frame
         self.input.pause = False
         self.input.inventory_toggle = False
         self.input.environment_menu_toggle = False
@@ -786,9 +791,12 @@ class BoardGUI:
         # Block (held while spacebar is down)
         self.input.block = rl.is_key_down(rl.KEY_SPACE)
         
-        # Shoot arrow (F key)
+        # Shoot arrow (F key) - track pressed/held/released like attack
         if rl.is_key_pressed(rl.KEY_F):
             self.input.shoot = True
+        self.input.shoot_held = rl.is_key_down(rl.KEY_F)
+        if rl.is_key_released(rl.KEY_F):
+            self.input.shoot_released = True
     
     def _handle_mouse_input(self):
         """Handle mouse input"""
@@ -931,6 +939,16 @@ class BoardGUI:
                 self._update_player_facing_to_mouse()
             return
         
+        # Block movement while drawing bow
+        if player.is_drawing_bow():
+            if self.player_moving:
+                self.player_controller.stop_movement()
+                self.player_moving = False
+            # Still allow facing updates while drawing
+            if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
+                self._update_player_facing_to_mouse()
+            return
+        
         # Update player facing based on mouse (when using keyboard/mouse)
         if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
             self._update_player_facing_to_mouse()
@@ -972,35 +990,65 @@ class BoardGUI:
         if self.input.interact:
             self._handle_unified_interact()
         
-        # Heavy attack system (combat mode required)
         player = self.state.player
-        if player and player.get('combat_mode', False):
-            current_tick = self.state.ticks
+        if not player:
+            return
+        
+        in_combat_mode = player.get('combat_mode', False)
+        current_tick = self.state.ticks
+        
+        # Bow draw system (combat mode required)
+        if in_combat_mode:
+            # Can't start bow draw if charging heavy attack
+            if not player.is_charging_heavy_attack():
+                # On shoot button press, start drawing
+                if self.input.shoot:
+                    self.player_controller.handle_shoot_button_down(current_tick)
+                
+                # While shoot button is held, update draw
+                if self.input.shoot_held:
+                    self.player_controller.handle_shoot_button_held(current_tick)
             
-            # On attack button press, start tracking
-            if self.input.attack:
-                self.player_controller.handle_attack_button_down(current_tick)
-            
-            # While attack button is held, update charge
-            if self.input.attack_held:
-                self.player_controller.handle_attack_button_held(current_tick)
-            
-            # On attack button release, execute attack
-            if self.input.attack_released:
-                self.player_controller.handle_attack_button_release(current_tick)
+            # On shoot button release, fire arrow (even if was interrupted)
+            if self.input.shoot_released:
+                if player.is_drawing_bow():
+                    result = self.player_controller.handle_shoot_button_release(current_tick)
+                    if result:
+                        arrow_speed, arrow_range = result
+                        self._shoot_arrow(player, arrow_speed, arrow_range)
+        else:
+            # Not in combat mode - cancel any drawing
+            if player.is_drawing_bow():
+                player.cancel_bow_draw()
+        
+        # Heavy attack system (combat mode required)
+        if in_combat_mode:
+            # Can't melee attack while drawing bow
+            if not player.is_drawing_bow():
+                # On attack button press, start tracking
+                if self.input.attack:
+                    self.player_controller.handle_attack_button_down(current_tick)
+                
+                # While attack button is held, update charge
+                if self.input.attack_held:
+                    self.player_controller.handle_attack_button_held(current_tick)
+                
+                # On attack button release, execute attack
+                if self.input.attack_released:
+                    self.player_controller.handle_attack_button_release(current_tick)
         else:
             # Not in combat mode - cancel any charging
-            if player and player.is_charging_heavy_attack():
+            if player.is_charging_heavy_attack():
                 player.cancel_heavy_attack()
-        
-        # Shoot arrow requires combat mode
-        if self.input.shoot:
-            player = self.state.player
-            if player and player.get('combat_mode', False):
-                self._shoot_arrow(player)
     
-    def _shoot_arrow(self, player):
-        """Spawn an arrow projectile in the direction player is aiming."""
+    def _shoot_arrow(self, player, arrow_speed, arrow_range):
+        """Spawn an arrow projectile in the direction player is aiming.
+        
+        Args:
+            player: Player character
+            arrow_speed: Speed of the arrow in cells/second
+            arrow_range: Maximum range before arrow disappears
+        """
         import math
         
         attack_angle = player.get('attack_angle')
@@ -1019,7 +1067,7 @@ class BoardGUI:
         dx = math.cos(attack_angle)
         dy = math.sin(attack_angle)
         
-        # Create arrow
+        # Create arrow with speed and range from draw power
         arrow = {
             'x': start_x,
             'y': start_y,
@@ -1028,6 +1076,8 @@ class BoardGUI:
             'distance': 0.0,
             'owner': player,
             'zone': player.zone,
+            'speed': arrow_speed,
+            'max_range': arrow_range,
         }
         self.state.arrows.append(arrow)
     
@@ -3316,9 +3366,11 @@ void main() {
             rl.draw_circle(int(pixel_cx), int(pixel_cy), 4, shield_color)
     
     def _draw_arrows(self, rendering_zone):
-        """Draw all arrow projectiles as thin black lines."""
-        from constants import ARROW_LENGTH, ARROW_THICKNESS
+        """Draw all arrow projectiles using arrow sprite."""
+        import math
+        from constants import ARROW_SPRITE_SCALE
         
+        arrow_tex = self.world_textures.get('arrow')
         cell_size = self._cam_cell_size
         
         for arrow in self.state.arrows:
@@ -3329,18 +3381,47 @@ void main() {
             # Get arrow position in screen coords
             screen_x, screen_y = self._world_to_screen(arrow['x'], arrow['y'])
             
-            # Calculate end point based on direction and length
-            end_x = arrow['x'] - arrow['dx'] * ARROW_LENGTH
-            end_y = arrow['y'] - arrow['dy'] * ARROW_LENGTH
-            screen_end_x, screen_end_y = self._world_to_screen(end_x, end_y)
-            
-            # Draw thin black line
-            rl.draw_line_ex(
-                rl.Vector2(int(screen_x), int(screen_y)),
-                rl.Vector2(int(screen_end_x), int(screen_end_y)),
-                ARROW_THICKNESS,
-                rl.BLACK
-            )
+            if arrow_tex:
+                # Calculate rotation angle from direction vector (in degrees)
+                # atan2 gives angle in radians, convert to degrees
+                # Sprite faces top-left (-135°), so add 135° offset to align with travel direction
+                angle_rad = math.atan2(arrow['dy'], arrow['dx'])
+                angle_deg = math.degrees(angle_rad) + 135
+                
+                # Scale arrow based on zoom and ARROW_SPRITE_SCALE constant
+                scale = (cell_size / arrow_tex.width) * ARROW_SPRITE_SCALE
+                
+                # Draw rotated sprite centered on arrow position
+                source_rect = rl.Rectangle(0, 0, arrow_tex.width, arrow_tex.height)
+                dest_rect = rl.Rectangle(
+                    screen_x,
+                    screen_y,
+                    arrow_tex.width * scale,
+                    arrow_tex.height * scale
+                )
+                origin = rl.Vector2(arrow_tex.width * scale / 2, arrow_tex.height * scale / 2)
+                
+                rl.draw_texture_pro(
+                    arrow_tex,
+                    source_rect,
+                    dest_rect,
+                    origin,
+                    angle_deg,
+                    rl.WHITE
+                )
+            else:
+                # Fallback to line if texture not loaded
+                from constants import ARROW_LENGTH, ARROW_THICKNESS
+                end_x = arrow['x'] - arrow['dx'] * ARROW_LENGTH
+                end_y = arrow['y'] - arrow['dy'] * ARROW_LENGTH
+                screen_end_x, screen_end_y = self._world_to_screen(end_x, end_y)
+                
+                rl.draw_line_ex(
+                    rl.Vector2(int(screen_x), int(screen_y)),
+                    rl.Vector2(int(screen_end_x), int(screen_end_y)),
+                    ARROW_THICKNESS,
+                    rl.BLACK
+                )
     
     def _draw_character_hitboxes(self):
         """Draw debug visualization of character hitboxes and collision radii.
@@ -3934,6 +4015,33 @@ void main() {
                 rl.draw_rectangle(bar_x, charge_bar_y, bar_width, bar_height, rl.Color(255, 255, 255, 25))
                 
                 # Foreground (blue charge bar - same as ongoing action)
+                charge_fill_width = int(bar_width * progress)
+                if charge_fill_width > 0:
+                    rl.draw_rectangle(bar_x, charge_bar_y, charge_fill_width, bar_height, 
+                                     rl.Color(70, 130, 220, 220))
+        
+        # Draw bow draw charge bar (player only, when drawing)
+        if is_player and char.is_drawing_bow():
+            progress = char.get_bow_draw_progress(self.state.ticks)
+            if progress is not None and progress >= 0:
+                # Make bars narrower than sprite (70% of sprite width)
+                bar_width = int(sprite_width * 0.7)
+                bar_height = max(3, int(4 * self.zoom))
+                bar_x = int(pixel_cx - bar_width / 2)
+                bar_gap = max(1, int(2 * self.zoom))
+                
+                # Position below stamina bar (after HP and stamina bars)
+                if should_show_bars:
+                    # After HP and stamina bars
+                    charge_bar_y = text_y + 12 + (bar_height + bar_gap) * 2
+                else:
+                    # Just below name
+                    charge_bar_y = text_y + 12
+                
+                # Background
+                rl.draw_rectangle(bar_x, charge_bar_y, bar_width, bar_height, rl.Color(255, 255, 255, 25))
+                
+                # Foreground (blue charge bar - same as heavy attack)
                 charge_fill_width = int(bar_width * progress)
                 if charge_fill_width > 0:
                     rl.draw_rectangle(bar_x, charge_bar_y, charge_fill_width, bar_height, 

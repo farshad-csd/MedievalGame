@@ -2557,13 +2557,17 @@ class GameLogic:
         arrows_to_remove = []
         
         for arrow in self.state.arrows:
+            # Get per-arrow speed and range (with fallback to constants)
+            arrow_speed = arrow.get('speed', ARROW_SPEED)
+            arrow_max_range = arrow.get('max_range', ARROW_MAX_RANGE)
+            
             # Move arrow
-            arrow['x'] += arrow['dx'] * ARROW_SPEED * dt
-            arrow['y'] += arrow['dy'] * ARROW_SPEED * dt
-            arrow['distance'] += ARROW_SPEED * dt
+            arrow['x'] += arrow['dx'] * arrow_speed * dt
+            arrow['y'] += arrow['dy'] * arrow_speed * dt
+            arrow['distance'] += arrow_speed * dt
             
             # Check if exceeded max range
-            if arrow['distance'] >= ARROW_MAX_RANGE:
+            if arrow['distance'] >= arrow_max_range:
                 arrows_to_remove.append(arrow)
                 continue
             

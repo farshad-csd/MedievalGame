@@ -34,7 +34,8 @@ from constants import (
     STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD,
     DEBUG_TRIPLE_PLAYER_HEALTH,
     HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
-    HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER
+    HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER,
+    BOW_DRAW_CHARGE_TICKS
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -103,6 +104,10 @@ class Character:
         # Heavy attack state (player only)
         self.heavy_attack_start_tick = None  # Tick when attack button was pressed
         self.heavy_attack_charging = False   # True when past threshold, actively charging
+
+        # Bow draw state (player only)
+        self.bow_draw_start_tick = None  # Tick when shoot button was pressed
+        self.bow_drawing = False          # True while drawing bow
 
         # Pending attack state (for delayed damage at animation end)
         # All attacks store their info here, damage is dealt when animation completes
@@ -992,6 +997,90 @@ class Character:
             True if charging (past threshold)
         """
         return self.heavy_attack_charging
+    
+    # =========================================================================
+    # BOW DRAW (Player ranged attack)
+    # =========================================================================
+    
+    def start_bow_draw(self, current_tick):
+        """Called when shoot button is first pressed. Records the tick.
+        
+        Args:
+            current_tick: Current game tick
+        """
+        if self.bow_draw_start_tick is None:
+            self.bow_draw_start_tick = current_tick
+            self.bow_drawing = True
+    
+    def update_bow_draw(self, current_tick):
+        """Update bow draw state (called each frame while button held).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if currently drawing
+        """
+        return self.bow_drawing
+    
+    def get_bow_draw_progress(self, current_tick):
+        """Get the draw progress as a fraction (0.0 to 1.0).
+        
+        Unlike heavy attack, bow draw starts filling immediately (no threshold).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Float from 0.0 to 1.0, or None if not drawing
+        """
+        if not self.bow_drawing or self.bow_draw_start_tick is None:
+            return None
+        
+        ticks_held = current_tick - self.bow_draw_start_tick
+        progress = ticks_held / BOW_DRAW_CHARGE_TICKS
+        return min(1.0, max(0.0, progress))
+    
+    def release_bow_draw(self, current_tick):
+        """Called when shoot button is released.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Draw progress (0.0 to 1.0) at time of release
+        """
+        if self.bow_draw_start_tick is None:
+            return 0.0
+        
+        progress = self.get_bow_draw_progress(current_tick)
+        if progress is None:
+            progress = 0.0
+        
+        # Reset state
+        self.bow_draw_start_tick = None
+        self.bow_drawing = False
+        
+        return progress
+    
+    def cancel_bow_draw(self):
+        """Cancel bow draw without firing.
+        
+        Returns:
+            True if there was a draw to cancel
+        """
+        was_drawing = self.bow_draw_start_tick is not None
+        self.bow_draw_start_tick = None
+        self.bow_drawing = False
+        return was_drawing
+    
+    def is_drawing_bow(self):
+        """Check if currently drawing bow.
+        
+        Returns:
+            True if drawing
+        """
+        return self.bow_drawing
     
     # =========================================================================
     # ONGOING ACTIONS (Player timed actions)
