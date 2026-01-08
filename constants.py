@@ -87,10 +87,10 @@ DOOR_THRESHOLD = 0.5
 # COMBAT SETTINGS
 # =============================================================================
 # Weapon reach - actual hit detection range for attacks
-WEAPON_REACH = 1.7  # How far a sword swing can hit
+WEAPON_REACH = 1.4  # How far a sword swing can hit
 
 # NPC combat behavior distances
-MELEE_ATTACK_DISTANCE = 1.7  # NPCs attack when this close to target
+MELEE_ATTACK_DISTANCE = 1.4  # NPCs attack when this close to target
 COMBAT_SPACE = 1.0  # NPCs backpedal if target gets closer than this
 COMBAT_SPRINT_DISTANCE = .5  # NPCs sprint if target is this far beyond attack range
 
@@ -121,7 +121,7 @@ SHOW_CHARACTER_HITBOXES = False       # Master toggle for all character hitbox v
 SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
 SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)
 SHOW_INTERACTION_RADIUS = False       # Circle showing ADJACENCY_DISTANCE (green)
-SHOW_ATTACK_RANGE = True             # Circle showing WEAPON_REACH (orange)
+SHOW_ATTACK_RANGE = False             # Circle showing WEAPON_REACH (orange)
 SHOW_ATTACK_CONE = True               # Player's directional attack hitbox (yellow) - the actual hit zone
 SHOW_CHARACTER_POSITION = True        # Small dot at exact x,y position (white)
 
@@ -135,7 +135,7 @@ DEBUG_COLOR_POSITION = (255, 255, 255, 255)     # White - center position dot
 
 # Attack cone geometry (matches resolve_attack hit detection)
 ATTACK_CONE_HALF_WIDTH = 0.7          # Perpendicular distance for hit detection (NPCs only)
-ATTACK_CONE_ANGLE = 45                # Total cone angle in degrees at max range (360° aiming)
+ATTACK_CONE_ANGLE = 50                # Total cone angle in degrees at max range (360° aiming)
 ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player position (minimum width)
 
 # =============================================================================
@@ -509,3 +509,8 @@ UI_COLOR_SLOT_BORDER_SELECTED = (140, 180, 120, 255)  # Selected slot border (gr
 # Accent colors
 UI_COLOR_CURSOR = (220, 180, 100, 255)        # Gold cursor/highlight
 UI_COLOR_HEADER_GREEN = (140, 180, 120, 255)  # Green header text
+
+
+# Aiming chevron visual settings
+AIM_CHEVRON_FEET_OFFSET = 10          # Pixels to offset chevron downward (toward feet)
+AIM_CHEVRON_THICKNESS = 2

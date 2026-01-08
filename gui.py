@@ -32,6 +32,7 @@ from constants import (
     SHOW_CHARACTER_HITBOXES, SHOW_COLLISION_RADIUS, SHOW_SPRITE_BOUNDS,
     SHOW_INTERACTION_RADIUS, SHOW_ATTACK_RANGE, SHOW_CHARACTER_POSITION,
     SHOW_ATTACK_CONE, ATTACK_CONE_HALF_WIDTH, ATTACK_CONE_ANGLE, ATTACK_CONE_BASE_ANGLE,
+    AIM_CHEVRON_FEET_OFFSET, AIM_CHEVRON_THICKNESS,
     DEBUG_COLOR_COLLISION, DEBUG_COLOR_SPRITE, DEBUG_COLOR_INTERACT,
     DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
     CHARACTER_COLLISION_RADIUS, WEAPON_REACH
@@ -1499,6 +1500,9 @@ class BoardGUI:
         if SHOW_PERCEPTION_DEBUG:
             self._draw_perception_debug()
         
+        # Draw aiming arc under player (before characters so it appears underneath)
+        self._draw_player_aiming_arc()
+        
         # Draw all occluders (trees, houses, barrels, beds, stoves) and characters together, Y-sorted for proper depth
         self._draw_trees_and_characters()
         _cp_t4 = time.time()
@@ -1629,6 +1633,9 @@ class BoardGUI:
             for x in range(interior.width):
                 screen_x, screen_y = self._world_to_screen(x, y)
                 draw_tile(screen_x, screen_y, floor_tex, floor_color)
+        
+        # Draw aiming arc under player (before characters so it appears underneath)
+        self._draw_player_aiming_arc()
         
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
@@ -3419,6 +3426,161 @@ void main() {
                 rl.Vector2(x2, y2),
                 2, outline_color
             )
+
+    def _draw_player_aiming_arc(self):
+        """Draw a curved aiming arc under the player matching the inner cone angle.
+        
+        Called before character sprites so it appears underneath.
+        Has a chevron tip pointing in the aim direction.
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        # Only show in combat mode
+        if not player.get('combat_mode', False):
+            return
+        
+        # Get the precise attack angle
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return
+        
+        cell_size = self._cam_cell_size
+        
+        # Get player screen position
+        if player.zone:
+            vis_x = player.prevailing_x
+            vis_y = player.prevailing_y
+        else:
+            vis_x = player.x
+            vis_y = player.y
+        
+        pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
+        
+        # Arc centered on player, offset down by configurable amount
+        arc_cx = pixel_cx
+        arc_cy = pixel_cy + AIM_CHEVRON_FEET_OFFSET
+        
+        # Small arc just beyond player center
+        arc_radius = 0.35 * cell_size + 8
+        
+        # Arc angle - narrower than inner cone for cleaner visual
+        half_angle = math.radians(ATTACK_CONE_BASE_ANGLE / 2) * 0.5
+        
+        # Chevron tip extends further
+        tip_extra = 4  # pixels beyond arc
+        
+        # Colors - pure white fill and outline
+        fill_color = rl.Color(255, 255, 255, 255)
+        outline_color = rl.Color(255, 255, 255, 255)
+        
+        # Arc thickness
+        half_thickness = AIM_CHEVRON_THICKNESS / 2
+        arc_inner_radius = arc_radius - half_thickness
+        arc_outer_radius = arc_radius + half_thickness
+        
+        # Number of segments for smooth arc
+        num_segments = 10
+        
+        # Draw filled arc (thick arc shape)
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            angle1 = attack_angle - half_angle + t1 * (2 * half_angle)
+            angle2 = attack_angle - half_angle + t2 * (2 * half_angle)
+            
+            # Inner edge points
+            in_x1 = arc_cx + math.cos(angle1) * arc_inner_radius
+            in_y1 = arc_cy + math.sin(angle1) * arc_inner_radius
+            in_x2 = arc_cx + math.cos(angle2) * arc_inner_radius
+            in_y2 = arc_cy + math.sin(angle2) * arc_inner_radius
+            
+            # Outer edge points
+            out_x1 = arc_cx + math.cos(angle1) * arc_outer_radius
+            out_y1 = arc_cy + math.sin(angle1) * arc_outer_radius
+            out_x2 = arc_cx + math.cos(angle2) * arc_outer_radius
+            out_y2 = arc_cy + math.sin(angle2) * arc_outer_radius
+            
+            # Draw quad as two triangles (counter-clockwise winding)
+            rl.draw_triangle(
+                rl.Vector2(in_x1, in_y1),
+                rl.Vector2(out_x2, out_y2),
+                rl.Vector2(out_x1, out_y1),
+                fill_color
+            )
+            rl.draw_triangle(
+                rl.Vector2(in_x1, in_y1),
+                rl.Vector2(in_x2, in_y2),
+                rl.Vector2(out_x2, out_y2),
+                fill_color
+            )
+        
+        # Draw chevron tip at the center of the arc (pointing outward)
+        tip_base_radius = arc_outer_radius
+        tip_point_radius = arc_outer_radius + tip_extra
+        tip_half_angle = half_angle * 0.3  # Tip is narrower than full arc
+        
+        # Tip triangle points
+        tip_x = arc_cx + math.cos(attack_angle) * tip_point_radius
+        tip_y = arc_cy + math.sin(attack_angle) * tip_point_radius
+        tip_left_x = arc_cx + math.cos(attack_angle - tip_half_angle) * tip_base_radius
+        tip_left_y = arc_cy + math.sin(attack_angle - tip_half_angle) * tip_base_radius
+        tip_right_x = arc_cx + math.cos(attack_angle + tip_half_angle) * tip_base_radius
+        tip_right_y = arc_cy + math.sin(attack_angle + tip_half_angle) * tip_base_radius
+        
+        rl.draw_triangle(
+            rl.Vector2(tip_x, tip_y),
+            rl.Vector2(tip_left_x, tip_left_y),
+            rl.Vector2(tip_right_x, tip_right_y),
+            fill_color
+        )
+        
+        # Draw outlines
+        # Outer arc
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            angle1 = attack_angle - half_angle + t1 * (2 * half_angle)
+            angle2 = attack_angle - half_angle + t2 * (2 * half_angle)
+            
+            x1 = arc_cx + math.cos(angle1) * arc_outer_radius
+            y1 = arc_cy + math.sin(angle1) * arc_outer_radius
+            x2 = arc_cx + math.cos(angle2) * arc_outer_radius
+            y2 = arc_cy + math.sin(angle2) * arc_outer_radius
+            
+            rl.draw_line_ex(rl.Vector2(x1, y1), rl.Vector2(x2, y2), 1.5, outline_color)
+        
+        # Inner arc
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            angle1 = attack_angle - half_angle + t1 * (2 * half_angle)
+            angle2 = attack_angle - half_angle + t2 * (2 * half_angle)
+            
+            x1 = arc_cx + math.cos(angle1) * arc_inner_radius
+            y1 = arc_cy + math.sin(angle1) * arc_inner_radius
+            x2 = arc_cx + math.cos(angle2) * arc_inner_radius
+            y2 = arc_cy + math.sin(angle2) * arc_inner_radius
+            
+            rl.draw_line_ex(rl.Vector2(x1, y1), rl.Vector2(x2, y2), 1.5, outline_color)
+        
+        # End caps (connect inner to outer at edges)
+        left_in_x = arc_cx + math.cos(attack_angle - half_angle) * arc_inner_radius
+        left_in_y = arc_cy + math.sin(attack_angle - half_angle) * arc_inner_radius
+        left_out_x = arc_cx + math.cos(attack_angle - half_angle) * arc_outer_radius
+        left_out_y = arc_cy + math.sin(attack_angle - half_angle) * arc_outer_radius
+        rl.draw_line_ex(rl.Vector2(left_in_x, left_in_y), rl.Vector2(left_out_x, left_out_y), 1.5, outline_color)
+        
+        right_in_x = arc_cx + math.cos(attack_angle + half_angle) * arc_inner_radius
+        right_in_y = arc_cy + math.sin(attack_angle + half_angle) * arc_inner_radius
+        right_out_x = arc_cx + math.cos(attack_angle + half_angle) * arc_outer_radius
+        right_out_y = arc_cy + math.sin(attack_angle + half_angle) * arc_outer_radius
+        rl.draw_line_ex(rl.Vector2(right_in_x, right_in_y), rl.Vector2(right_out_x, right_out_y), 1.5, outline_color)
+        
+        # Chevron tip outline
+        rl.draw_line_ex(rl.Vector2(tip_left_x, tip_left_y), rl.Vector2(tip_x, tip_y), 1.5, outline_color)
+        rl.draw_line_ex(rl.Vector2(tip_x, tip_y), rl.Vector2(tip_right_x, tip_right_y), 1.5, outline_color)
 
     def _draw_character_ui(self, ui_info):
         """Draw character name and health/stamina bars (on top of everything)"""
