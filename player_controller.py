@@ -247,6 +247,74 @@ class PlayerController:
         
         return True
 
+    def handle_attack_button_down(self, current_tick):
+        """Handle attack button being pressed down (start of potential heavy attack).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if heavy attack tracking started
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        # Can't start heavy attack if already animating an attack
+        if not player.can_attack():
+            return False
+        
+        # Start tracking the hold
+        player.start_heavy_attack_hold(current_tick)
+        return True
+    
+    def handle_attack_button_held(self, current_tick):
+        """Handle attack button being held down (update heavy attack charge).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if now in charging state (past threshold)
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        return player.update_heavy_attack(current_tick)
+    
+    def handle_attack_button_release(self, current_tick):
+        """Handle attack button being released (execute attack).
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if attack was executed
+        """
+        player = self.player
+        if not player:
+            return False
+        
+        # Check if can attack (not already animating)
+        if not player.can_attack():
+            player.cancel_heavy_attack()
+            return False
+        
+        # Get heavy attack result
+        was_heavy, multiplier = player.release_heavy_attack(current_tick)
+        
+        # Get the precise attack angle for 360° aiming
+        attack_angle = player.get('attack_angle')
+        
+        # Start attack animation
+        attack_dir = player.start_attack(angle=attack_angle)
+        
+        # Resolve attack with damage multiplier
+        targets_hit = self.logic.resolve_attack(player, attack_dir, damage_multiplier=multiplier)
+        
+        return True
+
     def handle_bake_input(self):
         """Handle bake key press.
         

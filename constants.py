@@ -98,6 +98,14 @@ COMBAT_SPRINT_DISTANCE = .5  # NPCs sprint if target is this far beyond attack r
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
 ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 
+# Heavy attack settings (player only)
+# Player must hold attack button for THRESHOLD time before charge begins
+# Then charge fills over CHARGE_TIME seconds (total hold = THRESHOLD + CHARGE_TIME for max)
+HEAVY_ATTACK_THRESHOLD_TICKS = 3  # ~0.25 seconds at 10 ticks/sec before charge starts
+HEAVY_ATTACK_CHARGE_TICKS = 10   # ~2.0 seconds at 10 ticks/sec to fill meter
+HEAVY_ATTACK_MIN_MULTIPLIER = 1.001  # Damage multiplier at minimum charge
+HEAVY_ATTACK_MAX_MULTIPLIER = 6.0    # Damage multiplier at full charge
+
 # =============================================================================
 # PERCEPTION SETTINGS (Vision and Hearing)
 # =============================================================================

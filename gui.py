@@ -174,6 +174,8 @@ class InputState:
         
         # Actions
         self.attack = False
+        self.attack_held = False  # True while attack button is held down
+        self.attack_released = False  # True on frame attack button is released
         self.combat_mode_toggle = False
         self.block = False  # Held while spacebar is down
         self.shoot = False  # F key to shoot arrow
@@ -630,6 +632,7 @@ class BoardGUI:
         """Handle all input sources (keyboard, mouse, gamepad)"""
         # Reset per-frame input state
         self.input.attack = False
+        self.input.attack_released = False  # Reset release flag each frame
         self.input.combat_mode_toggle = False
         self.input.shoot = False
         self.input.pause = False
@@ -792,9 +795,17 @@ class BoardGUI:
         self.input.mouse_x = rl.get_mouse_x()
         self.input.mouse_y = rl.get_mouse_y()
         
+        # Track attack button pressed (first frame)
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_LEFT):
             self.input.mouse_left_click = True
             self.input.attack = True
+        
+        # Track attack button held (continuous)
+        self.input.attack_held = rl.is_mouse_button_down(rl.MOUSE_BUTTON_LEFT)
+        
+        # Track attack button released (frame it goes up)
+        if rl.is_mouse_button_released(rl.MOUSE_BUTTON_LEFT):
+            self.input.attack_released = True
         
         if rl.is_mouse_button_pressed(rl.MOUSE_BUTTON_RIGHT):
             self.input.mouse_right_click = True
@@ -910,6 +921,16 @@ class BoardGUI:
                 self.player_moving = False
             return
         
+        # Block movement while charging heavy attack
+        if player.is_charging_heavy_attack():
+            if self.player_moving:
+                self.player_controller.stop_movement()
+                self.player_moving = False
+            # Still allow facing updates while charging
+            if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
+                self._update_player_facing_to_mouse()
+            return
+        
         # Update player facing based on mouse (when using keyboard/mouse)
         if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
             self._update_player_facing_to_mouse()
@@ -951,11 +972,26 @@ class BoardGUI:
         if self.input.interact:
             self._handle_unified_interact()
         
-        # Attacks require combat mode
-        if self.input.attack:
-            player = self.state.player
-            if player and player.get('combat_mode', False):
-                self.player_controller.handle_attack_input()
+        # Heavy attack system (combat mode required)
+        player = self.state.player
+        if player and player.get('combat_mode', False):
+            current_tick = self.state.ticks
+            
+            # On attack button press, start tracking
+            if self.input.attack:
+                self.player_controller.handle_attack_button_down(current_tick)
+            
+            # While attack button is held, update charge
+            if self.input.attack_held:
+                self.player_controller.handle_attack_button_held(current_tick)
+            
+            # On attack button release, execute attack
+            if self.input.attack_released:
+                self.player_controller.handle_attack_button_release(current_tick)
+        else:
+            # Not in combat mode - cancel any charging
+            if player and player.is_charging_heavy_attack():
+                player.cancel_heavy_attack()
         
         # Shoot arrow requires combat mode
         if self.input.shoot:
@@ -3874,6 +3910,33 @@ void main() {
                 if progress_fill_width > 0:
                     # Blue color for progress
                     rl.draw_rectangle(bar_x, progress_bar_y, progress_fill_width, bar_height, 
+                                     rl.Color(70, 130, 220, 220))
+        
+        # Draw heavy attack charge bar (player only, when charging)
+        if is_player and char.is_charging_heavy_attack():
+            progress = char.get_heavy_attack_progress(self.state.ticks)
+            if progress is not None and progress >= 0:
+                # Make bars narrower than sprite (70% of sprite width)
+                bar_width = int(sprite_width * 0.7)
+                bar_height = max(3, int(4 * self.zoom))
+                bar_x = int(pixel_cx - bar_width / 2)
+                bar_gap = max(1, int(2 * self.zoom))
+                
+                # Position below stamina bar (after HP and stamina bars)
+                if should_show_bars:
+                    # After HP and stamina bars
+                    charge_bar_y = text_y + 12 + (bar_height + bar_gap) * 2
+                else:
+                    # Just below name
+                    charge_bar_y = text_y + 12
+                
+                # Background
+                rl.draw_rectangle(bar_x, charge_bar_y, bar_width, bar_height, rl.Color(255, 255, 255, 25))
+                
+                # Foreground (blue charge bar - same as ongoing action)
+                charge_fill_width = int(bar_width * progress)
+                if charge_fill_width > 0:
+                    rl.draw_rectangle(bar_x, charge_bar_y, charge_fill_width, bar_height, 
                                      rl.Color(70, 130, 220, 220))
     
     def _draw_single_character(self, char):

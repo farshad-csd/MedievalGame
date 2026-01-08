@@ -201,6 +201,10 @@ class SpriteManager:
             # Death is now just 1 frame
             return 'Death', 0
         
+        # Check for heavy attack charging (player only) - show first attack frame
+        if char.get('heavy_attack_charging', False):
+            return 'Attack', 0
+        
         # Check for attack animation
         attack_start = char.get('attack_animation_start')
         if attack_start:

@@ -31,7 +31,9 @@ from constants import (
     BREAD_PER_BITE, STARVATION_THRESHOLD,
     ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
     STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD,
-    DEBUG_TRIPLE_PLAYER_HEALTH
+    DEBUG_TRIPLE_PLAYER_HEALTH,
+    HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
+    HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -97,6 +99,10 @@ class Character:
         # Block state (player only)
         self.is_blocking = False
         
+        # Heavy attack state (player only)
+        self.heavy_attack_start_tick = None  # Tick when attack button was pressed
+        self.heavy_attack_charging = False   # True when past threshold, actively charging
+
 
         
         # Core stats (mutable)
@@ -816,6 +822,127 @@ class Character:
         if facing in valid_directions:
             return facing
         return 'down'  # Fallback
+    
+    # =========================================================================
+    # HEAVY ATTACK (Player charged attack)
+    # =========================================================================
+    
+    def start_heavy_attack_hold(self, current_tick):
+        """Called when attack button is first pressed. Records the tick.
+        
+        Args:
+            current_tick: Current game tick
+        """
+        if self.heavy_attack_start_tick is None:
+            self.heavy_attack_start_tick = current_tick
+            self.heavy_attack_charging = False
+    
+    def update_heavy_attack(self, current_tick):
+        """Update heavy attack state based on how long button has been held.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            True if now in charging state (past threshold)
+        """
+        if self.heavy_attack_start_tick is None:
+            return False
+        
+        ticks_held = current_tick - self.heavy_attack_start_tick
+        
+        # Check if past threshold
+        if ticks_held >= HEAVY_ATTACK_THRESHOLD_TICKS:
+            self.heavy_attack_charging = True
+            return True
+        
+        return False
+    
+    def get_heavy_attack_progress(self, current_tick):
+        """Get the charge progress as a fraction (0.0 to 1.0).
+        
+        Only returns a value if past the threshold and actively charging.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Float from 0.0 to 1.0, or None if not charging
+        """
+        if not self.heavy_attack_charging or self.heavy_attack_start_tick is None:
+            return None
+        
+        ticks_held = current_tick - self.heavy_attack_start_tick
+        charge_ticks = ticks_held - HEAVY_ATTACK_THRESHOLD_TICKS
+        
+        if charge_ticks < 0:
+            return 0.0
+        
+        progress = charge_ticks / HEAVY_ATTACK_CHARGE_TICKS
+        return min(1.0, max(0.0, progress))
+    
+    def get_heavy_attack_multiplier(self, current_tick):
+        """Get the damage multiplier based on charge progress.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Damage multiplier (1.001 to 2.0), or 1.0 if not charging
+        """
+        progress = self.get_heavy_attack_progress(current_tick)
+        if progress is None:
+            return 1.0
+        
+        # Linear interpolation from MIN to MAX
+        return HEAVY_ATTACK_MIN_MULTIPLIER + progress * (HEAVY_ATTACK_MAX_MULTIPLIER - HEAVY_ATTACK_MIN_MULTIPLIER)
+    
+    def release_heavy_attack(self, current_tick):
+        """Called when attack button is released.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Tuple of (was_heavy_attack, damage_multiplier)
+            was_heavy_attack is True if this was a charged attack (past threshold)
+        """
+        if self.heavy_attack_start_tick is None:
+            return (False, 1.0)
+        
+        ticks_held = current_tick - self.heavy_attack_start_tick
+        was_charging = self.heavy_attack_charging
+        multiplier = self.get_heavy_attack_multiplier(current_tick)
+        
+        # Reset state
+        self.heavy_attack_start_tick = None
+        self.heavy_attack_charging = False
+        
+        # If we were past threshold, this was a heavy attack
+        if was_charging:
+            return (True, multiplier)
+        else:
+            # Quick tap - normal attack
+            return (False, 1.0)
+    
+    def cancel_heavy_attack(self):
+        """Cancel heavy attack charge without attacking.
+        
+        Returns:
+            True if there was an attack to cancel
+        """
+        was_charging = self.heavy_attack_start_tick is not None
+        self.heavy_attack_start_tick = None
+        self.heavy_attack_charging = False
+        return was_charging
+    
+    def is_charging_heavy_attack(self):
+        """Check if currently charging a heavy attack.
+        
+        Returns:
+            True if charging (past threshold)
+        """
+        return self.heavy_attack_charging
     
     # =========================================================================
     # ONGOING ACTIONS (Player timed actions)

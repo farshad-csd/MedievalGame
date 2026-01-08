@@ -240,7 +240,7 @@ class GameLogic:
         last_attack_tick = char.get('last_attack_tick', -ATTACK_COOLDOWN_TICKS)
         return self.state.ticks - last_attack_tick >= ATTACK_COOLDOWN_TICKS
     
-    def resolve_attack(self, attacker, attack_direction=None):
+    def resolve_attack(self, attacker, attack_direction=None, damage_multiplier=1.0):
         """Resolve an attack from a character.
         
         This is the unified attack resolution used by BOTH player and NPCs.
@@ -250,6 +250,8 @@ class GameLogic:
             attacker: Character performing the attack
             attack_direction: Optional direction ('up', 'down', 'left', 'right')
                             If None, uses attacker's current facing
+            damage_multiplier: Multiplier for damage (1.0 = normal, 2.0 = double)
+                              Used for heavy attacks
         
         Returns:
             List of characters that were hit
@@ -344,10 +346,16 @@ class GameLogic:
                 self.state.log_action(f"{target_name} BLOCKED {attacker_name}'s attack!")
                 continue  # Skip damage for this target
             
-            # Calculate and apply damage
-            damage = random.randint(2, 5)
+            # Calculate and apply damage (with multiplier for heavy attacks)
+            base_damage = random.randint(2, 5)
+            damage = int(base_damage * damage_multiplier)
             target.health -= damage
-            self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
+            
+            # Log with heavy attack indicator if multiplier > 1
+            if damage_multiplier > 1.01:
+                self.state.log_action(f"{attacker_name} HEAVY ATTACKS {target_name} for {damage}! (x{damage_multiplier:.1f}) HP: {target.health}")
+            else:
+                self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
             # Cancel ongoing action if player is hit
             if target.is_player and target.has_ongoing_action():
@@ -355,6 +363,11 @@ class GameLogic:
                 if cancelled:
                     action_name = cancelled['action'].title()
                     self.state.log_action(f"{target_name}'s {action_name} interrupted by attack!")
+            
+            # Cancel heavy attack charge if player is hit
+            if target.is_player and target.is_charging_heavy_attack():
+                target.cancel_heavy_attack()
+                self.state.log_action(f"{target_name}'s heavy attack interrupted!")
             
             # Set hit flash for visual feedback
             target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
