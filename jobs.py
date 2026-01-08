@@ -21,7 +21,7 @@ from constants import (
     CRIME_INTENSITY_MURDER,
     FLEE_TIMEOUT_TICKS,
     JOB_TIERS, DEFAULT_JOB_TIER,
-    SOUND_RADIUS, VISION_RANGE
+    SOUND_RADIUS, VISION_RANGE, COMBAT_SPACE, MELEE_ATTACK_DISTANCE
 )
 
 
@@ -646,6 +646,7 @@ class Job:
                         break
         
         if not attacker:
+            char['combat_track_target'] = None
             return False
         
         # Set attack intent if not already targeting this attacker
@@ -653,30 +654,48 @@ class Job:
             state.log_action(f"{char.get_display_name()} FIGHTING BACK against {attacker.get_display_name()}!")
             char.set_intent('attack', attacker, reason='self_defense', started_tick=state.ticks)
         
-        if logic.is_adjacent(char, attacker) and logic.can_attack(char):
+        # Calculate distance to target
+        dx = attacker.x - char.x
+        dy = attacker.y - char.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Attack if in melee range and off cooldown
+        if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
             logic._do_attack(char, attacker)
             return True
         
-        logic.set_goal_to_character(char, attacker)
+        # Set combat tracking target - movement system handles the rest
+        char['combat_track_target'] = attacker
+        char.goal = None
+        
         return False
     
     def _do_combat(self, char, state, logic):
         """Continue combat with target."""
         if char.intent is None or char.intent.get('action') != 'attack':
+            char['combat_track_target'] = None
             return False
         
         target = char.intent.get('target')
         if not target or target not in state.characters or target.health <= 0:
             char.clear_intent()
+            char['combat_track_target'] = None
             return False
         
-        if logic.is_adjacent(char, target):
-            if logic.can_attack(char):
-                logic._do_attack(char, target)
-                return True
-            char.goal = None
-        else:
-            logic.set_goal_to_character(char, target)
+        # Calculate distance to target
+        dx = target.x - char.x
+        dy = target.y - char.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Attack if in melee range and off cooldown
+        if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
+            logic._do_attack(char, target)
+            return True
+        
+        # Set combat tracking target - movement system handles the rest
+        char['combat_track_target'] = target
+        char.goal = None  # Clear any existing goal
+        
         return False
     
     def _do_flee_criminal(self, char, state, logic):
@@ -864,19 +883,28 @@ class Job:
         """Confront a known criminal."""
         criminal, intensity = logic.find_known_criminal_nearby(char)
         if not criminal:
+            char['combat_track_target'] = None
             return False
         
-        if logic.is_adjacent(char, criminal):
-            # Set attack intent if not already
-            if char.intent is None or char.intent.get('target') is not criminal:
-                state.log_action(f"{char.get_display_name()} confronting {criminal.get_display_name()}!")
-                char.set_intent('attack', criminal, reason='confronting_criminal', started_tick=state.ticks)
-            
-            if logic.can_attack(char):
-                logic._do_attack(char, criminal)
-                return True
+        # Set attack intent if not already
+        if char.intent is None or char.intent.get('target') is not criminal:
+            state.log_action(f"{char.get_display_name()} confronting {criminal.get_display_name()}!")
+            char.set_intent('attack', criminal, reason='confronting_criminal', started_tick=state.ticks)
         
-        logic.set_goal_to_character(char, criminal)
+        # Calculate distance to target
+        dx = criminal.x - char.x
+        dy = criminal.y - char.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Attack if in melee range and off cooldown
+        if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
+            logic._do_attack(char, criminal)
+            return True
+        
+        # Set combat tracking target - movement system handles the rest
+        char['combat_track_target'] = criminal
+        char.goal = None
+        
         return False
     
     def _do_watch_fleeing_person(self, char, state, logic):
@@ -1189,13 +1217,20 @@ class SoldierJob(Job):
             state.log_action(f"{char.get_display_name()} confronting {criminal.get_display_name()}!")
             char.set_intent('attack', criminal, reason='law_enforcement', started_tick=state.ticks)
         
-        if logic.is_adjacent(char, criminal):
-            if logic.can_attack(char):
-                logic._do_attack(char, criminal)
-                return True
-            char.goal = None
-        else:
-            logic.set_goal_to_character(char, criminal)
+        # Calculate distance to target
+        dx = criminal.x - char.x
+        dy = criminal.y - char.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Attack if in melee range and off cooldown
+        if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
+            logic._do_attack(char, criminal)
+            return True
+        
+        # Set combat tracking target - movement system handles the rest
+        char['combat_track_target'] = criminal
+        char.goal = None
+        
         return False
     
     def _do_patrol(self, char, state, logic):

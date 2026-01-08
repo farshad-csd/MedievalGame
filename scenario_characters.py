@@ -36,19 +36,19 @@ CHARACTER_TEMPLATES = {
         "starting_skills": {"strength": 50, "swords": 50},
         "is_player": False
     },
-    "Edmund Cole": {
-        "attractiveness": 5,
-        "confidence": 3,
-        "cunning": 9,
-        "morality": 7,
-        "starting_allegiance": "Dunmere",
-        "starting_job": None,
-        "starting_money": 200,
-        "starting_wheat": 100,
-        "starting_age": 45,
-        "starting_skills": {"mercantile": 70},
-        "is_player": False
-    },
+    # "Edmund Cole": {
+    #     "attractiveness": 5,
+    #     "confidence": 3,
+    #     "cunning": 9,
+    #     "morality": 7,
+    #     "starting_allegiance": "Dunmere",
+    #     "starting_job": None,
+    #     "starting_money": 200,
+    #     "starting_wheat": 100,
+    #     "starting_age": 45,
+    #     "starting_skills": {"mercantile": 70},
+    #     "is_player": False
+    # },
     # "Brynn Ashford": {
     #     "attractiveness": 5,
     #     "confidence": 9,

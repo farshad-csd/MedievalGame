@@ -75,16 +75,26 @@ CHARACTER_COLLISION_RADIUS = 0.15  # Tiny - only blocks when nearly on top of ea
 SQUEEZE_THRESHOLD_TICKS = 3  # Ticks blocked before starting to squeeze
 SQUEEZE_SLIDE_SPEED = 0.8  # How fast to slide perpendicular (relative to movement speed)
 
-# Adjacency threshold - how close characters need to be for interactions
-ADJACENCY_DISTANCE = 0.8 # Within 0.8 cells - tighter for better targeting
+# Adjacency threshold - how close characters need to be for object interactions
+ADJACENCY_DISTANCE = 0.8  # Within 0.8 cells for barrels, beds, stoves, dialogue, etc.
 # Interact distance - tighter radius for player E interactions (must also be facing target)
 INTERACT_DISTANCE = 0.8  # Within 0.8 cells for E interactions
 
 # Door threshold - how close to a door to trigger zone transition (entering/exiting buildings)
 DOOR_THRESHOLD = 0.5
 
-# Combat range - need to be closer for attacks
-COMBAT_RANGE = 1.3  # Within 1.3 cells to attack
+# =============================================================================
+# COMBAT SETTINGS
+# =============================================================================
+# Weapon reach - actual hit detection range for attacks
+WEAPON_REACH = 1.7  # How far a sword swing can hit
+
+# NPC combat behavior distances
+MELEE_ATTACK_DISTANCE = 1.7  # NPCs attack when this close to target
+COMBAT_SPACE = 1.0  # NPCs backpedal if target gets closer than this
+COMBAT_SPRINT_DISTANCE = 2.0  # NPCs sprint if target is this far beyond attack range
+
+# Attack timing
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
 ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 

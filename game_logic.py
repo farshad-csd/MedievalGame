@@ -24,7 +24,7 @@ from constants import (
     THEFT_PATIENCE_TICKS, THEFT_COOLDOWN_TICKS,
     FLEE_DISTANCE_DIVISOR,
     SLEEP_START_FRACTION,
-    MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, COMBAT_RANGE,
+    MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, WEAPON_REACH, MELEE_ATTACK_DISTANCE, COMBAT_SPACE, COMBAT_SPRINT_DISTANCE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
     VENDOR_GOODS,
@@ -82,8 +82,8 @@ class GameLogic:
         return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
     
     def is_in_combat_range(self, char1, char2):
-        """Check if two characters are close enough to attack each other.
-        Uses COMBAT_RANGE which is tighter than ADJACENCY_DISTANCE.
+        """Check if two characters are within weapon reach of each other.
+        Uses WEAPON_REACH for hit detection range.
         Uses prevailing coords (local when in interior) for same-zone checks.
         """
         # Must be in same zone to fight
@@ -93,7 +93,19 @@ class GameLogic:
         # or world coords when in exterior
         dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
                         (char1.prevailing_y - char2.prevailing_y) ** 2)
-        return dist <= COMBAT_RANGE
+        return dist <= WEAPON_REACH
+    
+    def is_in_melee_range(self, char1, char2):
+        """Check if two characters are close enough for NPC to decide to attack.
+        Uses MELEE_ATTACK_DISTANCE - the range at which NPCs will swing.
+        Uses prevailing coords (local when in interior) for same-zone checks.
+        """
+        # Must be in same zone to fight
+        if char1.zone != char2.zone:
+            return False
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
+        return dist <= MELEE_ATTACK_DISTANCE and dist > 0
     
     # =========================================================================
     # GOAL-SETTING HELPERS (cross-zone navigation)
@@ -274,8 +286,8 @@ class GameLogic:
                 proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
                 perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
                 
-                # Hit if within range in attack direction and within swing width
-                if 0 < proj_dist <= COMBAT_RANGE and perp_dist < 0.7:
+                # Hit if within weapon reach in attack direction and within swing width
+                if 0 < proj_dist <= WEAPON_REACH and perp_dist < 0.7:
                     targets_hit.append(char)
         
         # Log miss if no targets
@@ -379,8 +391,8 @@ class GameLogic:
         attacker_name = attacker.get_display_name()
         target_name = target.get_display_name()
         
-        # Check if in range
-        if not self.is_adjacent(attacker, target):
+        # Check if in melee attack range
+        if not self.is_in_melee_range(attacker, target):
             return result
         
         result['hit'] = True
@@ -454,23 +466,39 @@ class GameLogic:
         return None
     
     def _update_facing(self, char, dx, dy):
-        """Update character's facing direction based on movement delta"""
-        if dx > 0 and dy < 0:
-            char['facing'] = 'up-right'
-        elif dx > 0 and dy > 0:
-            char['facing'] = 'down-right'
-        elif dx < 0 and dy < 0:
-            char['facing'] = 'up-left'
-        elif dx < 0 and dy > 0:
-            char['facing'] = 'down-left'
-        elif dx > 0:
-            char['facing'] = 'right'
-        elif dx < 0:
-            char['facing'] = 'left'
-        elif dy > 0:
-            char['facing'] = 'down'
-        elif dy < 0:
-            char['facing'] = 'up'
+        """Update character's facing direction based on movement delta.
+        Uses magnitude comparison to determine if movement is primarily
+        horizontal, vertical, or diagonal.
+        """
+        # Determine primary direction based on magnitude
+        if abs(dx) > abs(dy) * 2:
+            # Mostly horizontal
+            char['facing'] = 'right' if dx > 0 else 'left'
+        elif abs(dy) > abs(dx) * 2:
+            # Mostly vertical
+            char['facing'] = 'down' if dy > 0 else 'up'
+        else:
+            # Diagonal
+            if dx > 0 and dy < 0:
+                char['facing'] = 'up-right'
+            elif dx > 0 and dy > 0:
+                char['facing'] = 'down-right'
+            elif dx < 0 and dy < 0:
+                char['facing'] = 'up-left'
+            else:
+                char['facing'] = 'down-left'
+    
+    def _face_toward_character(self, char, target):
+        """Make char face toward target character."""
+        if char.zone == target.zone and char.zone is not None:
+            dx = target.prevailing_x - char.prevailing_x
+            dy = target.prevailing_y - char.prevailing_y
+        else:
+            dx = target.x - char.x
+            dy = target.y - char.y
+        
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            self._update_facing(char, dx, dy)
     
     # =========================================================================
     # SLEEP HELPERS
@@ -2121,6 +2149,12 @@ class GameLogic:
             if char.get('is_frozen') or char.get('health', 100) <= 0:
                 continue
             
+            # Check for combat tracking (bypasses goal system for smooth pursuit)
+            combat_target = char.get('combat_track_target')
+            if combat_target and combat_target in self.state.characters:
+                self._update_combat_tracking_velocity(char, combat_target)
+                continue
+            
             goal = char.goal
             goal_zone = getattr(char, 'goal_zone', None)
             
@@ -2151,10 +2185,21 @@ class GameLogic:
                 dy = effective_goal[1] - char.prevailing_y
                 dist = math.sqrt(dx * dx + dy * dy)
                 
-                if dist < 0.35:  # Close enough - prevents overshoot jitter
+                # Check if in combat (tracking a moving target)
+                is_combat_tracking = (char.intent and char.intent.get('action') == 'attack')
+                
+                # For combat tracking, use tighter threshold to stay responsive
+                # For normal movement, use 0.35 to prevent overshoot jitter
+                stop_threshold = 0.1 if is_combat_tracking else 0.35
+                
+                if dist < stop_threshold:
                     char.vx = 0.0
                     char.vy = 0.0
                     char.is_sprinting = False
+                    # Even when stopped, face the target if backpedaling
+                    face_target = char.get('face_target')
+                    if face_target and face_target in self.state.characters:
+                        self._face_toward_character(char, face_target)
                 else:
                     # Determine if NPC should sprint
                     should_sprint = self._should_npc_sprint(char)
@@ -2183,8 +2228,13 @@ class GameLogic:
                     # Normalize and apply speed
                     char.vx = (dx / dist) * speed
                     char.vy = (dy / dist) * speed
-                    # Update facing direction
-                    self._update_facing_from_velocity(char)
+                    
+                    # Update facing - check face_target first (for backpedaling)
+                    face_target = char.get('face_target')
+                    if face_target and face_target in self.state.characters:
+                        self._face_toward_character(char, face_target)
+                    else:
+                        self._update_facing_from_velocity(char)
             else:
                 char.vx = 0.0
                 char.vy = 0.0
@@ -2524,17 +2574,8 @@ class GameLogic:
         # Check for face_target override first
         face_target = char.get('face_target')
         if face_target and face_target in self.state.characters:
-            # Face the target instead of movement direction
-            if char.zone == face_target.zone and char.zone is not None:
-                dx = face_target.prevailing_x - char.prevailing_x
-                dy = face_target.prevailing_y - char.prevailing_y
-            else:
-                dx = face_target.x - char.x
-                dy = face_target.y - char.y
-            
-            if abs(dx) > 0.01 or abs(dy) > 0.01:
-                self._update_facing(char, dx, dy)
-                return
+            self._face_toward_character(char, face_target)
+            return
         
         vx = char.get('vx', 0.0)
         vy = char.get('vy', 0.0)
@@ -2559,6 +2600,66 @@ class GameLogic:
                 char['facing'] = 'up-left'
             else:
                 char['facing'] = 'down-left'
+    
+    def _update_combat_tracking_velocity(self, char, target):
+        """Update velocity to track a combat target smoothly.
+        
+        This bypasses the goal system to provide smooth pursuit of a moving target.
+        - If too far: move toward target (to MELEE_ATTACK_DISTANCE), sprint if able
+        - If too close: backpedal away (to just outside COMBAT_SPACE)
+        - If in sweet spot: hold position
+        Always face the target.
+        """
+        # Calculate distance and direction
+        if char.zone == target.zone and char.zone is not None:
+            dx = target.prevailing_x - char.prevailing_x
+            dy = target.prevailing_y - char.prevailing_y
+        else:
+            dx = target.x - char.x
+            dy = target.y - char.y
+        
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        # Always face the target
+        self._face_toward_character(char, target)
+        
+        # Avoid division by zero
+        if dist < 0.01:
+            char.vx = 0.0
+            char.vy = 0.0
+            char.is_sprinting = False
+            return
+        
+        # Normalize direction
+        nx = dx / dist
+        ny = dy / dist
+        
+        # Determine movement based on distance
+        if dist > MELEE_ATTACK_DISTANCE:
+            # Too far - chase the target
+            # Only sprint if target is significantly beyond attack range
+            sprint_threshold = MELEE_ATTACK_DISTANCE + COMBAT_SPRINT_DISTANCE
+            should_sprint = dist > sprint_threshold
+            
+            if should_sprint:
+                can_sprint = char.can_continue_sprint() if char.is_sprinting else char.can_start_sprint()
+                should_sprint = can_sprint
+            
+            char.is_sprinting = should_sprint
+            speed = SPRINT_SPEED if should_sprint else MOVEMENT_SPEED
+            
+            char.vx = nx * speed
+            char.vy = ny * speed
+        elif dist < COMBAT_SPACE:
+            # Too close - backpedal slowly (half speed, away from target)
+            char.is_sprinting = False
+            char.vx = -nx * MOVEMENT_SPEED * 0.5
+            char.vy = -ny * MOVEMENT_SPEED * 0.5
+        else:
+            # In sweet spot - hold position
+            char.vx = 0.0
+            char.vy = 0.0
+            char.is_sprinting = False
     
     def _get_desired_step(self, char):
         """Calculate the position this NPC wants to move toward.
