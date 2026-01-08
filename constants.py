@@ -92,7 +92,7 @@ WEAPON_REACH = 1.7  # How far a sword swing can hit
 # NPC combat behavior distances
 MELEE_ATTACK_DISTANCE = 1.7  # NPCs attack when this close to target
 COMBAT_SPACE = 1.0  # NPCs backpedal if target gets closer than this
-COMBAT_SPRINT_DISTANCE = 2.0  # NPCs sprint if target is this far beyond attack range
+COMBAT_SPRINT_DISTANCE = .5  # NPCs sprint if target is this far beyond attack range
 
 # Attack timing
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
@@ -108,8 +108,38 @@ SOUND_RADIUS = 3.0  # cells - characters hear events within this range
 VISION_RANGE = 8.0  # cells - how far characters can see
 VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
 
-# Debug visualization
-SHOW_PERCEPTION_DEBUG = False  # Set to True to show vision cones and sound radii
+# =============================================================================
+# DEBUG VISUALIZATION SETTINGS
+# =============================================================================
+# Set any of these to True to show debug overlays
+
+# Perception debug - vision cones and sound radii
+SHOW_PERCEPTION_DEBUG = False
+
+# Character hitbox debug - collision and sprite boundaries
+SHOW_CHARACTER_HITBOXES = True       # Master toggle for all character hitbox visualization
+SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
+SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)
+SHOW_INTERACTION_RADIUS = False       # Circle showing ADJACENCY_DISTANCE (green)
+SHOW_ATTACK_RANGE = True             # Circle showing WEAPON_REACH (orange)
+SHOW_ATTACK_CONE = True               # Player's directional attack hitbox (yellow) - the actual hit zone
+SHOW_CHARACTER_POSITION = True        # Small dot at exact x,y position (white)
+
+# Hitbox colors (RGBA tuples - use with rl.Color(*COLOR))
+DEBUG_COLOR_COLLISION = (255, 80, 80, 180)      # Red - collision radius
+DEBUG_COLOR_SPRITE = (80, 120, 255, 150)        # Blue - sprite bounds
+DEBUG_COLOR_INTERACT = (80, 255, 80, 120)       # Green - interaction radius
+DEBUG_COLOR_ATTACK = (255, 180, 60, 120)        # Orange - attack range (circle)
+DEBUG_COLOR_ATTACK_CONE = (255, 255, 0, 100)    # Yellow - player's directional attack cone
+DEBUG_COLOR_POSITION = (255, 255, 255, 255)     # White - center position dot
+
+# Attack cone geometry (matches resolve_attack hit detection)
+ATTACK_CONE_HALF_WIDTH = 0.7          # Perpendicular distance for hit detection
+
+# =============================================================================
+# DEBUG GAMEPLAY SETTINGS
+# =============================================================================
+DEBUG_TRIPLE_PLAYER_HEALTH = True    # Player starts with 300 HP instead of 100
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS

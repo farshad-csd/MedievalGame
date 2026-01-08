@@ -308,7 +308,7 @@ class GameLogic:
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
             # Set hit flash for visual feedback
-            target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
+            target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
             
             # Clear face_target and intent - being hit interrupts current behavior
             # This forces immediate re-evaluation (e.g. bystander -> fight back)
@@ -404,7 +404,7 @@ class GameLogic:
         self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
         
         # Set hit flash for visual feedback
-        target['hit_flash_until'] = self.state.ticks + 8  # Flash for ~8 ticks
+        target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
         
         # Clear face_target and intent - being hit interrupts current behavior
         # This forces immediate re-evaluation (e.g. bystander -> fight back)
@@ -3327,13 +3327,28 @@ class GameLogic:
     
     def _do_attack(self, attacker, target):
         """Execute an attack. Wrapper around resolve_melee_attack for NPC combat."""
-        # Set attack animation direction toward target
+        # Set attack animation direction toward target (8 directions)
         dx = target.x - attacker.x
         dy = target.y - attacker.y
-        if abs(dx) > abs(dy):
+        
+        # Use same 8-direction logic as _update_facing
+        if abs(dx) > abs(dy) * 2:
+            # Mostly horizontal
             attacker.attack_direction = 'right' if dx > 0 else 'left'
-        else:
+        elif abs(dy) > abs(dx) * 2:
+            # Mostly vertical
             attacker.attack_direction = 'down' if dy > 0 else 'up'
+        else:
+            # Diagonal
+            if dx > 0 and dy < 0:
+                attacker.attack_direction = 'up-right'
+            elif dx > 0 and dy > 0:
+                attacker.attack_direction = 'down-right'
+            elif dx < 0 and dy < 0:
+                attacker.attack_direction = 'up-left'
+            else:
+                attacker.attack_direction = 'down-left'
+        
         attacker.attack_animation_start = time.time()
         
         # Record attack tick for cooldown

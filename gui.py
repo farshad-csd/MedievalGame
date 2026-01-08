@@ -27,7 +27,14 @@ from constants import (
     MOVEMENT_SPEED, CHARACTER_WIDTH, CHARACTER_HEIGHT,
     DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, ZOOM_SPEED, SPRINT_SPEED,
     SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE, SHOW_PERCEPTION_DEBUG,
-    ADJACENCY_DISTANCE, INTERACT_DISTANCE, SKILLS, START_MUTED
+    ADJACENCY_DISTANCE, INTERACT_DISTANCE, SKILLS, START_MUTED,
+    # Hitbox debug settings
+    SHOW_CHARACTER_HITBOXES, SHOW_COLLISION_RADIUS, SHOW_SPRITE_BOUNDS,
+    SHOW_INTERACTION_RADIUS, SHOW_ATTACK_RANGE, SHOW_CHARACTER_POSITION,
+    SHOW_ATTACK_CONE, ATTACK_CONE_HALF_WIDTH,
+    DEBUG_COLOR_COLLISION, DEBUG_COLOR_SPRITE, DEBUG_COLOR_INTERACT,
+    DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
+    CHARACTER_COLLISION_RADIUS, WEAPON_REACH
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
@@ -1493,6 +1500,10 @@ class BoardGUI:
         _cp_t4 = time.time()
         self._canvas_profile['trees_chars'] += _cp_t4 - _cp_t3
         
+        # Draw character hitbox debug visualization
+        if SHOW_CHARACTER_HITBOXES:
+            self._draw_character_hitboxes()
+        
         # Draw death animations
         self._draw_death_animations()
         _cp_t5 = time.time()
@@ -1618,6 +1629,10 @@ class BoardGUI:
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
         self._draw_trees_and_characters()
+        
+        # Draw character hitbox debug visualization
+        if SHOW_CHARACTER_HITBOXES:
+            self._draw_character_hitboxes()
         
         # Draw death animations
         self._draw_death_animations()
@@ -2906,6 +2921,221 @@ void main() {
             'should_flip': should_flip,
         })
     
+    def _draw_character_hitboxes(self):
+        """Draw debug visualization of character hitboxes and collision radii.
+        
+        Only draws when SHOW_CHARACTER_HITBOXES is True in constants.py.
+        Individual elements can be toggled with SHOW_COLLISION_RADIUS, etc.
+        """
+        if not SHOW_CHARACTER_HITBOXES:
+            return
+        
+        cell_size = self._cam_cell_size
+        
+        # Determine current rendering zone
+        player = self.state.player
+        if self.window_viewing and self.window_viewing_interior is not None:
+            rendering_zone = self.window_viewing_interior.name
+        elif self.window_viewing:
+            rendering_zone = None
+        elif player and player.zone is not None:
+            rendering_zone = player.zone
+        elif self._last_player_zone is not None:
+            rendering_zone = self._last_player_zone
+        else:
+            rendering_zone = None
+        
+        for char in self.state.characters:
+            # Only draw hitboxes for characters in current zone
+            if char.zone != rendering_zone:
+                continue
+            
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Get visual coordinates (same logic as _draw_single_character_sprite)
+            if char.zone:
+                if not self.window_viewing:
+                    vis_x = char.prevailing_x
+                    vis_y = char.prevailing_y
+                elif self.window_viewing_interior and char.zone == self.window_viewing_interior.name:
+                    vis_x = char.prevailing_x
+                    vis_y = char.prevailing_y
+                else:
+                    vis_x = char.x
+                    vis_y = char.y
+            else:
+                vis_x = char.x
+                vis_y = char.y
+            
+            # Convert to screen coordinates
+            pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
+            
+            # Draw interaction radius (green) - outermost, draw first
+            if SHOW_INTERACTION_RADIUS:
+                interact_radius_px = ADJACENCY_DISTANCE * cell_size
+                rl.draw_circle_lines(
+                    int(pixel_cx), int(pixel_cy), 
+                    interact_radius_px, 
+                    rl.Color(*DEBUG_COLOR_INTERACT)
+                )
+                # Also draw filled with low alpha
+                rl.draw_circle(
+                    int(pixel_cx), int(pixel_cy),
+                    interact_radius_px,
+                    rl.Color(DEBUG_COLOR_INTERACT[0], DEBUG_COLOR_INTERACT[1], 
+                             DEBUG_COLOR_INTERACT[2], 30)
+                )
+            
+            # Draw attack range (orange)
+            if SHOW_ATTACK_RANGE:
+                attack_radius_px = WEAPON_REACH * cell_size
+                rl.draw_circle_lines(
+                    int(pixel_cx), int(pixel_cy),
+                    attack_radius_px,
+                    rl.Color(*DEBUG_COLOR_ATTACK)
+                )
+                # Also draw filled with low alpha
+                rl.draw_circle(
+                    int(pixel_cx), int(pixel_cy),
+                    attack_radius_px,
+                    rl.Color(DEBUG_COLOR_ATTACK[0], DEBUG_COLOR_ATTACK[1],
+                             DEBUG_COLOR_ATTACK[2], 20)
+                )
+            
+            # Draw sprite bounds (blue rectangle)
+            if SHOW_SPRITE_BOUNDS:
+                sprite_height = int(CHARACTER_HEIGHT * cell_size)
+                sprite_width = int(CHARACTER_WIDTH * cell_size)
+                blit_x = int(pixel_cx - sprite_width / 2)
+                blit_y = int(pixel_cy - sprite_height / 2)
+                rl.draw_rectangle_lines(
+                    blit_x, blit_y, sprite_width, sprite_height,
+                    rl.Color(*DEBUG_COLOR_SPRITE)
+                )
+            
+            # Draw collision radius (red circle)
+            if SHOW_COLLISION_RADIUS:
+                collision_radius_px = CHARACTER_COLLISION_RADIUS * cell_size
+                rl.draw_circle_lines(
+                    int(pixel_cx), int(pixel_cy),
+                    collision_radius_px,
+                    rl.Color(*DEBUG_COLOR_COLLISION)
+                )
+                # Also draw filled
+                rl.draw_circle(
+                    int(pixel_cx), int(pixel_cy),
+                    collision_radius_px,
+                    rl.Color(DEBUG_COLOR_COLLISION[0], DEBUG_COLOR_COLLISION[1],
+                             DEBUG_COLOR_COLLISION[2], 80)
+                )
+            
+            # Draw exact position dot (white)
+            if SHOW_CHARACTER_POSITION:
+                rl.draw_circle(
+                    int(pixel_cx), int(pixel_cy),
+                    3,  # 3 pixel radius dot
+                    rl.Color(*DEBUG_COLOR_POSITION)
+                )
+            
+            # Draw player's directional attack cone (yellow) - only for player
+            if SHOW_ATTACK_CONE and char.is_player:
+                self._draw_player_attack_cone(char, pixel_cx, pixel_cy, cell_size)
+
+    def _draw_player_attack_cone(self, player, pixel_cx, pixel_cy, cell_size):
+        """Draw the player's directional attack hitbox.
+        
+        This shows the actual hit zone used by resolve_attack():
+        - Rectangle extending WEAPON_REACH in facing direction
+        - Width of ATTACK_CONE_HALF_WIDTH on each side (0.7 cells each side)
+        
+        Args:
+            player: Player character
+            pixel_cx, pixel_cy: Screen center position
+            cell_size: Current cell size in pixels
+        """
+        facing = player.get('facing', 'down')
+        
+        # Get direction vector for facing
+        facing_vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        dx, dy = facing_vectors.get(facing, (0, 1))
+        
+        # Perpendicular vector (rotate 90 degrees)
+        perp_x, perp_y = -dy, dx
+        
+        # Convert dimensions to pixels
+        reach_px = WEAPON_REACH * cell_size
+        half_width_px = ATTACK_CONE_HALF_WIDTH * cell_size
+        
+        # Calculate the 4 corners of the attack rectangle
+        # Start at player position, extend forward by WEAPON_REACH
+        # Width is ATTACK_CONE_HALF_WIDTH on each side
+        
+        # Near corners (at player position)
+        near_left_x = pixel_cx + perp_x * half_width_px
+        near_left_y = pixel_cy + perp_y * half_width_px
+        near_right_x = pixel_cx - perp_x * half_width_px
+        near_right_y = pixel_cy - perp_y * half_width_px
+        
+        # Far corners (at WEAPON_REACH distance)
+        far_left_x = pixel_cx + dx * reach_px + perp_x * half_width_px
+        far_left_y = pixel_cy + dy * reach_px + perp_y * half_width_px
+        far_right_x = pixel_cx + dx * reach_px - perp_x * half_width_px
+        far_right_y = pixel_cy + dy * reach_px - perp_y * half_width_px
+        
+        # Draw filled quad using two triangles
+        cone_color = rl.Color(*DEBUG_COLOR_ATTACK_CONE)
+        
+        # Triangle 1: near_left, far_left, far_right
+        rl.draw_triangle(
+            rl.Vector2(near_left_x, near_left_y),
+            rl.Vector2(far_left_x, far_left_y),
+            rl.Vector2(far_right_x, far_right_y),
+            cone_color
+        )
+        
+        # Triangle 2: near_left, far_right, near_right
+        rl.draw_triangle(
+            rl.Vector2(near_left_x, near_left_y),
+            rl.Vector2(far_right_x, far_right_y),
+            rl.Vector2(near_right_x, near_right_y),
+            cone_color
+        )
+        
+        # Draw outline for clarity
+        outline_color = rl.Color(DEBUG_COLOR_ATTACK_CONE[0], DEBUG_COLOR_ATTACK_CONE[1],
+                                  DEBUG_COLOR_ATTACK_CONE[2], 200)
+        rl.draw_line_ex(
+            rl.Vector2(near_left_x, near_left_y),
+            rl.Vector2(far_left_x, far_left_y),
+            2, outline_color
+        )
+        rl.draw_line_ex(
+            rl.Vector2(far_left_x, far_left_y),
+            rl.Vector2(far_right_x, far_right_y),
+            2, outline_color
+        )
+        rl.draw_line_ex(
+            rl.Vector2(far_right_x, far_right_y),
+            rl.Vector2(near_right_x, near_right_y),
+            2, outline_color
+        )
+        rl.draw_line_ex(
+            rl.Vector2(near_right_x, near_right_y),
+            rl.Vector2(near_left_x, near_left_y),
+            2, outline_color
+        )
+
     def _draw_character_ui(self, ui_info):
         """Draw character name and health/stamina bars (on top of everything)"""
         char = ui_info['char']

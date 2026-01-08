@@ -30,7 +30,8 @@ from constants import (
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     BREAD_PER_BITE, STARVATION_THRESHOLD,
     ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
-    STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD
+    STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD,
+    DEBUG_TRIPLE_PLAYER_HEALTH
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -96,7 +97,7 @@ class Character:
         
         # Core stats (mutable)
         self.age = template.get('starting_age', 25)
-        self.health = 100
+        self.health = 300 if (self._is_player and DEBUG_TRIPLE_PLAYER_HEALTH) else 100
         self.hunger = MAX_HUNGER
         self.fatigue = MAX_FATIGUE
         self.stamina = MAX_STAMINA
@@ -788,21 +789,15 @@ class Character:
         return attack_dir
     
     def _facing_to_attack_direction(self, facing):
-        """Convert facing direction to cardinal attack direction."""
-        if facing in ('up', 'up-left', 'up-right'):
-            return 'up'
-        elif facing in ('down', 'down-left', 'down-right'):
-            return 'down'
-        elif facing == 'left':
-            return 'left'
-        elif facing == 'right':
-            return 'right'
-        # Handle diagonal facings
-        if 'left' in facing:
-            return 'left'
-        if 'right' in facing:
-            return 'right'
-        return 'down'
+        """Convert facing direction to attack direction.
+        
+        Now supports all 8 directions for diagonal attacks.
+        """
+        valid_directions = ('up', 'down', 'left', 'right', 
+                           'up-left', 'up-right', 'down-left', 'down-right')
+        if facing in valid_directions:
+            return facing
+        return 'down'  # Fallback
     
     # =========================================================================
     # DICT-LIKE ACCESS (backward compatibility)
