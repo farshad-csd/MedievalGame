@@ -97,6 +97,7 @@ COMBAT_SPRINT_DISTANCE = .5  # NPCs sprint if target is this far beyond attack r
 # Attack timing
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
 ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
+ATTACK_DAMAGE_TICKS_BEFORE_END = 1  # Ticks before animation ends that damage registers (0 = at end)
 
 # Heavy attack settings (player only)
 # Player must hold attack button for THRESHOLD time before charge begins
@@ -151,10 +152,10 @@ BLOCK_MOVEMENT_SPEED = 0.4            # Movement speed while blocking (cells/sec
 SHIELD_COLOR = (80, 160, 255, 180)    # Light blue, semi-transparent
 
 # Arrow/projectile settings
-ARROW_SPEED = 8.0                    # cells per second
-ARROW_MAX_RANGE = 13.0                # cells before disappearing
-ARROW_LENGTH = 0.4                    # visual length in cells
-ARROW_THICKNESS = 2                   # pixels
+ARROW_SPEED = 6.5                    # cells per second
+ARROW_MAX_RANGE = 15.0                # cells before disappearing
+ARROW_LENGTH = 0.8                    # visual length in cells
+ARROW_THICKNESS = .8                   # pixels
 
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS

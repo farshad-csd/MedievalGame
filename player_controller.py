@@ -222,7 +222,7 @@ class PlayerController:
     # =========================================================================
     
     def handle_attack_input(self):
-        """Handle attack key press.
+        """Handle attack key press (quick attack, no heavy charge).
         
         Returns:
             True if attack was initiated
@@ -238,12 +238,9 @@ class PlayerController:
         # Get the precise attack angle for 360° aiming (set by GUI from mouse position)
         attack_angle = player.get('attack_angle')
         
-        # Start attack animation on character with precise angle
-        attack_dir = player.start_attack(angle=attack_angle)
-        
-        # Find targets and resolve damage through game logic
-        # This is the same resolution path NPCs use
-        targets_hit = self.logic.resolve_attack(player, attack_dir)
+        # Start attack animation - damage will be dealt when animation completes
+        # (processed by game_logic._process_pending_attacks)
+        attack_dir = player.start_attack(angle=attack_angle, damage_multiplier=1.0)
         
         return True
 
@@ -307,11 +304,9 @@ class PlayerController:
         # Get the precise attack angle for 360° aiming
         attack_angle = player.get('attack_angle')
         
-        # Start attack animation
-        attack_dir = player.start_attack(angle=attack_angle)
-        
-        # Resolve attack with damage multiplier
-        targets_hit = self.logic.resolve_attack(player, attack_dir, damage_multiplier=multiplier)
+        # Start attack animation with multiplier stored - damage dealt when animation completes
+        # (processed by game_logic._process_pending_attacks)
+        attack_dir = player.start_attack(angle=attack_angle, damage_multiplier=multiplier)
         
         return True
 

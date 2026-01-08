@@ -1997,15 +1997,39 @@ class GameLogic:
             return False
         
         # Movement is handled by velocity system in _get_goal
-        # We just check if adjacent and attack if so
+        # We just check if adjacent and can attack if so
         
         if self.is_adjacent(attacker, target):
-            result = self.resolve_melee_attack(attacker, target)
-            
-            if result['killed']:
-                attacker.clear_intent()
+            # Check if can attack (not already animating)
+            if attacker.can_attack():
+                # Face the target before attacking
+                self._face_toward_target(attacker, target)
+                
+                # Start attack animation - damage dealt when animation completes
+                # (processed by _process_pending_attacks)
+                attacker.start_attack(target=target)
+                attacker.last_attack_tick = self.state.ticks
         
         return True
+    
+    def _face_toward_target(self, char, target):
+        """Make character face toward a target."""
+        dx = target.prevailing_x - char.prevailing_x
+        dy = target.prevailing_y - char.prevailing_y
+        
+        # Determine facing based on angle
+        if abs(dx) > abs(dy) * 2:
+            # Mostly horizontal
+            char.facing = 'right' if dx > 0 else 'left'
+        elif abs(dy) > abs(dx) * 2:
+            # Mostly vertical
+            char.facing = 'down' if dy > 0 else 'up'
+        else:
+            # Diagonal
+            if dx > 0:
+                char.facing = 'down-right' if dy > 0 else 'up-right'
+            else:
+                char.facing = 'down-left' if dy > 0 else 'up-left'
     
     def witness_crime(self, criminal, victim, crime_type):
         """Witnesses within perception range learn about the crime and may react.
@@ -3558,40 +3582,20 @@ class GameLogic:
     # =========================================================================
     
     def _do_attack(self, attacker, target):
-        """Execute an attack. Wrapper around resolve_melee_attack for NPC combat."""
-        # Set attack animation direction toward target (8 directions)
-        dx = target.x - attacker.x
-        dy = target.y - attacker.y
+        """Execute an attack. Starts attack animation, damage dealt when animation completes."""
+        # Check if can attack (not already animating)
+        if not attacker.can_attack():
+            return
         
-        # Use same 8-direction logic as _update_facing
-        if abs(dx) > abs(dy) * 2:
-            # Mostly horizontal
-            attacker.attack_direction = 'right' if dx > 0 else 'left'
-        elif abs(dy) > abs(dx) * 2:
-            # Mostly vertical
-            attacker.attack_direction = 'down' if dy > 0 else 'up'
-        else:
-            # Diagonal
-            if dx > 0 and dy < 0:
-                attacker.attack_direction = 'up-right'
-            elif dx > 0 and dy > 0:
-                attacker.attack_direction = 'down-right'
-            elif dx < 0 and dy < 0:
-                attacker.attack_direction = 'up-left'
-            else:
-                attacker.attack_direction = 'down-left'
+        # Face the target before attacking
+        self._face_toward_target(attacker, target)
         
-        attacker.attack_animation_start = time.time()
+        # Start attack animation - damage dealt when animation completes
+        # (processed by _process_pending_attacks)
+        attacker.start_attack(target=target)
         
         # Record attack tick for cooldown
         attacker['last_attack_tick'] = self.state.ticks
-        
-        # Use unified attack resolution
-        result = self.resolve_melee_attack(attacker, target)
-        
-        # Handle post-attack cleanup for NPCs
-        if result['killed']:
-            attacker.clear_intent()
 
     # =========================================================================
     # TICK PROCESSING
@@ -3613,6 +3617,9 @@ class GameLogic:
         
         # Update NPC combat mode based on intent
         self._process_npc_combat_mode()
+        
+        # Process pending attacks (resolve damage when animation completes)
+        self._process_pending_attacks()
         
         # Handle deaths IMMEDIATELY - remove from game logic, store visual info separately
         # This must happen right after starvation before any other processing
@@ -3811,6 +3818,47 @@ class GameLogic:
                 # No intent - exit combat mode
                 if char.get('combat_mode', False):
                     char['combat_mode'] = False
+    
+    def _process_pending_attacks(self):
+        """Process pending attacks when their animations complete.
+        
+        Called every tick. Checks all characters for pending attacks and
+        resolves damage when the attack animation has finished.
+        """
+        for char in self.state.characters:
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Check if character has a pending attack and animation is complete
+            if char.has_pending_attack() and char.is_attack_animation_complete():
+                pending = char.get_and_clear_pending_attack()
+                if pending is None:
+                    continue
+                
+                target = pending.get('target')
+                
+                if target is not None:
+                    # NPC targeted melee attack
+                    result = self.resolve_melee_attack(char, target)
+                    
+                    # Clear attack intent if target killed
+                    if result.get('killed'):
+                        if char.intent and char.intent.get('action') == 'attack':
+                            char.clear_intent()
+                else:
+                    # Player AOE cone attack (or NPC without specific target)
+                    attack_dir = pending.get('direction', char.facing)
+                    multiplier = pending.get('multiplier', 1.0)
+                    
+                    # Temporarily set attack_angle for resolve_attack
+                    old_angle = char.attack_angle
+                    char.attack_angle = pending.get('angle')
+                    
+                    self.resolve_attack(char, attack_dir, damage_multiplier=multiplier)
+                    
+                    # Restore angle
+                    char.attack_angle = old_angle
     
     def _update_farm_cells(self):
         """Update all farm cell states"""

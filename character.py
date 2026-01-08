@@ -29,7 +29,8 @@ from constants import (
     MAX_HUNGER, MAX_FATIGUE, MAX_STAMINA, INVENTORY_SLOTS, ITEMS, SKILLS,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     BREAD_PER_BITE, STARVATION_THRESHOLD,
-    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
+    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS, ATTACK_DAMAGE_TICKS_BEFORE_END,
+    UPDATE_INTERVAL,
     STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD,
     DEBUG_TRIPLE_PLAYER_HEALTH,
     HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
@@ -103,6 +104,9 @@ class Character:
         self.heavy_attack_start_tick = None  # Tick when attack button was pressed
         self.heavy_attack_charging = False   # True when past threshold, actively charging
 
+        # Pending attack state (for delayed damage at animation end)
+        # All attacks store their info here, damage is dealt when animation completes
+        self.pending_attack = None  # Dict with: {angle, direction, multiplier, target}
 
         
         # Core stats (mutable)
@@ -796,12 +800,16 @@ class Character:
                 return False
         return True
     
-    def start_attack(self, angle=None):
-        """Begin attack animation.
+    def start_attack(self, angle=None, damage_multiplier=1.0, target=None):
+        """Begin attack animation and store pending attack info.
+        
+        The attack damage will be dealt when the animation completes.
         
         Args:
             angle: Optional precise attack angle in radians (for 360° aiming).
                    If None, uses 8-direction facing (for NPCs).
+            damage_multiplier: Damage multiplier for heavy attacks (default 1.0)
+            target: Optional specific target for NPC melee attacks
         
         Returns:
             Attack direction string ('up', 'down', 'left', 'right', etc.)
@@ -810,7 +818,48 @@ class Character:
         attack_dir = self._facing_to_attack_direction(self.facing)
         self.attack_direction = attack_dir
         self.attack_angle = angle  # None for NPCs, radians for player
+        
+        # Store pending attack info - damage dealt when animation completes
+        self.pending_attack = {
+            'angle': angle,
+            'direction': attack_dir,
+            'multiplier': damage_multiplier,
+            'target': target,  # None for player AOE, Character for NPC targeted
+        }
+        
         return attack_dir
+    
+    def has_pending_attack(self):
+        """Check if there's a pending attack waiting for animation to complete."""
+        return self.pending_attack is not None
+    
+    def is_attack_animation_complete(self):
+        """Check if the attack animation has reached the damage point.
+        
+        Damage registers ATTACK_DAMAGE_TICKS_BEFORE_END ticks before the
+        animation visually completes. This allows fine-tuning when the
+        hit registers relative to the swing animation.
+        
+        Returns:
+            True if animation has reached damage point (or no animation in progress)
+        """
+        if self.attack_animation_start is None:
+            return True
+        elapsed = time.time() - self.attack_animation_start
+        # Convert ticks to seconds: ticks * (ms_per_tick / 1000)
+        damage_offset = ATTACK_DAMAGE_TICKS_BEFORE_END * (UPDATE_INTERVAL / 1000.0)
+        damage_time = ATTACK_ANIMATION_DURATION - damage_offset
+        return elapsed >= damage_time
+    
+    def get_and_clear_pending_attack(self):
+        """Get pending attack info and clear it.
+        
+        Returns:
+            Dict with {angle, direction, multiplier, target} or None
+        """
+        attack = self.pending_attack
+        self.pending_attack = None
+        return attack
     
     def _facing_to_attack_direction(self, facing):
         """Convert facing direction to attack direction.
