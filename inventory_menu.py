@@ -1298,10 +1298,9 @@ class InventoryMenu:
         # End scissor mode
         rl.end_scissor_mode()
         
-        # Draw scroll indicator if needed
-        if needs_scroll:
-            self._draw_scroll_indicator(x + width - 12, y, 10, self.canvas_height, 
-                                       self._left_panel_scroll, total_content_height, available_height)
+        # Note: Left panel scroll bar intentionally hidden - scrolling still works via mouse wheel/trackpad
+        # Clear the scroll bar rect since we're not drawing it
+        self._left_scroll_bar_rect = None
     
     def _draw_status_bar(self, player, x, y, width, compact_mode=False):
         """Draw compact status bar with health, hunger, stamina, fatigue, encumbrance, gold.

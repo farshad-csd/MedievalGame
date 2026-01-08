@@ -117,7 +117,7 @@ VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
 SHOW_PERCEPTION_DEBUG = False
 
 # Character hitbox debug - collision and sprite boundaries
-SHOW_CHARACTER_HITBOXES = True       # Master toggle for all character hitbox visualization
+SHOW_CHARACTER_HITBOXES = False       # Master toggle for all character hitbox visualization
 SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
 SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)
 SHOW_INTERACTION_RADIUS = True       # Circle showing ADJACENCY_DISTANCE (green)
