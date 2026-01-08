@@ -3283,6 +3283,7 @@ void main() {
         - Truncated wedge extending from near player to WEAPON_REACH
         - ATTACK_CONE_BASE_ANGLE at the base (near player)
         - ATTACK_CONE_ANGLE at max range (outer edge)
+        - Straight edges (linear angle interpolation)
         
         Args:
             player: Player character
@@ -3296,61 +3297,72 @@ void main() {
         
         # Convert dimensions to pixels
         reach_px = WEAPON_REACH * cell_size
-        base_dist_px = 0.1 * cell_size  # Small offset so base is visible
+        base_dist_px = 0.35 * cell_size  # Base of truncated cone starts here
         
         # Convert cone angles to radians (half angles)
         half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
         half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
         
-        # Number of segments for smooth arcs
-        num_segments = 12
+        # Number of radial segments (for the body) and arc segments (for curves)
+        num_radial_segments = 8
+        num_arc_segments = 12
         
         cone_color = rl.Color(*DEBUG_COLOR_ATTACK_CONE)
         outline_color = rl.Color(DEBUG_COLOR_ATTACK_CONE[0], DEBUG_COLOR_ATTACK_CONE[1],
                                   DEBUG_COLOR_ATTACK_CONE[2], 200)
         
-        # Draw filled truncated wedge using quads (as two triangles each)
-        for i in range(num_segments):
-            # Interpolate angles for inner and outer arcs at this segment
-            t1 = i / num_segments
-            t2 = (i + 1) / num_segments
+        # Draw filled truncated wedge using radial slices
+        # Each slice is at a fixed distance, with the cone angle interpolated
+        for i in range(num_radial_segments):
+            # Distances for this slice
+            t1 = i / num_radial_segments
+            t2 = (i + 1) / num_radial_segments
+            dist1 = base_dist_px + t1 * (reach_px - base_dist_px)
+            dist2 = base_dist_px + t2 * (reach_px - base_dist_px)
             
-            # Inner arc angles (at base distance, use base angle)
-            inner_left = attack_angle - half_base_rad
-            inner_angle1 = inner_left + t1 * (2 * half_base_rad)
-            inner_angle2 = inner_left + t2 * (2 * half_base_rad)
+            # Interpolate half-angles at each distance
+            half_angle1 = half_base_rad + t1 * (half_full_rad - half_base_rad)
+            half_angle2 = half_base_rad + t2 * (half_full_rad - half_base_rad)
             
-            # Outer arc angles (at reach distance, use full angle)
-            outer_left = attack_angle - half_full_rad
-            outer_angle1 = outer_left + t1 * (2 * half_full_rad)
-            outer_angle2 = outer_left + t2 * (2 * half_full_rad)
-            
-            # Calculate the 4 corners of this quad
-            inner_x1 = pixel_cx + math.cos(inner_angle1) * base_dist_px
-            inner_y1 = pixel_cy + math.sin(inner_angle1) * base_dist_px
-            inner_x2 = pixel_cx + math.cos(inner_angle2) * base_dist_px
-            inner_y2 = pixel_cy + math.sin(inner_angle2) * base_dist_px
-            
-            outer_x1 = pixel_cx + math.cos(outer_angle1) * reach_px
-            outer_y1 = pixel_cy + math.sin(outer_angle1) * reach_px
-            outer_x2 = pixel_cx + math.cos(outer_angle2) * reach_px
-            outer_y2 = pixel_cy + math.sin(outer_angle2) * reach_px
-            
-            # Draw quad as two triangles
-            rl.draw_triangle(
-                rl.Vector2(inner_x1, inner_y1),
-                rl.Vector2(outer_x1, outer_y1),
-                rl.Vector2(outer_x2, outer_y2),
-                cone_color
-            )
-            rl.draw_triangle(
-                rl.Vector2(inner_x1, inner_y1),
-                rl.Vector2(outer_x2, outer_y2),
-                rl.Vector2(inner_x2, inner_y2),
-                cone_color
-            )
+            # Draw this radial slice as multiple angular segments
+            for j in range(num_arc_segments):
+                # Angular position within the slice (0 to 1 across the cone width)
+                a1 = j / num_arc_segments
+                a2 = (j + 1) / num_arc_segments
+                
+                # Angles at inner ring
+                angle_inner1 = attack_angle - half_angle1 + a1 * (2 * half_angle1)
+                angle_inner2 = attack_angle - half_angle1 + a2 * (2 * half_angle1)
+                
+                # Angles at outer ring
+                angle_outer1 = attack_angle - half_angle2 + a1 * (2 * half_angle2)
+                angle_outer2 = attack_angle - half_angle2 + a2 * (2 * half_angle2)
+                
+                # Calculate the 4 corners
+                x_in1 = pixel_cx + math.cos(angle_inner1) * dist1
+                y_in1 = pixel_cy + math.sin(angle_inner1) * dist1
+                x_in2 = pixel_cx + math.cos(angle_inner2) * dist1
+                y_in2 = pixel_cy + math.sin(angle_inner2) * dist1
+                x_out1 = pixel_cx + math.cos(angle_outer1) * dist2
+                y_out1 = pixel_cy + math.sin(angle_outer1) * dist2
+                x_out2 = pixel_cx + math.cos(angle_outer2) * dist2
+                y_out2 = pixel_cy + math.sin(angle_outer2) * dist2
+                
+                # Draw quad as two triangles
+                rl.draw_triangle(
+                    rl.Vector2(x_in1, y_in1),
+                    rl.Vector2(x_out1, y_out1),
+                    rl.Vector2(x_out2, y_out2),
+                    cone_color
+                )
+                rl.draw_triangle(
+                    rl.Vector2(x_in1, y_in1),
+                    rl.Vector2(x_out2, y_out2),
+                    rl.Vector2(x_in2, y_in2),
+                    cone_color
+                )
         
-        # Draw outline - left edge (from inner to outer)
+        # Draw outline - left edge (straight line from base to reach)
         inner_left_x = pixel_cx + math.cos(attack_angle - half_base_rad) * base_dist_px
         inner_left_y = pixel_cy + math.sin(attack_angle - half_base_rad) * base_dist_px
         outer_left_x = pixel_cx + math.cos(attack_angle - half_full_rad) * reach_px
@@ -3361,7 +3373,7 @@ void main() {
             2, outline_color
         )
         
-        # Draw outline - right edge (from inner to outer)
+        # Draw outline - right edge (straight line from base to reach)
         inner_right_x = pixel_cx + math.cos(attack_angle + half_base_rad) * base_dist_px
         inner_right_y = pixel_cy + math.sin(attack_angle + half_base_rad) * base_dist_px
         outer_right_x = pixel_cx + math.cos(attack_angle + half_full_rad) * reach_px
@@ -3373,12 +3385,11 @@ void main() {
         )
         
         # Draw outline - inner arc (base)
-        for i in range(num_segments):
-            t1 = i / num_segments
-            t2 = (i + 1) / num_segments
-            inner_left = attack_angle - half_base_rad
-            angle1 = inner_left + t1 * (2 * half_base_rad)
-            angle2 = inner_left + t2 * (2 * half_base_rad)
+        for i in range(num_arc_segments):
+            a1 = i / num_arc_segments
+            a2 = (i + 1) / num_arc_segments
+            angle1 = attack_angle - half_base_rad + a1 * (2 * half_base_rad)
+            angle2 = attack_angle - half_base_rad + a2 * (2 * half_base_rad)
             
             x1 = pixel_cx + math.cos(angle1) * base_dist_px
             y1 = pixel_cy + math.sin(angle1) * base_dist_px
@@ -3392,12 +3403,11 @@ void main() {
             )
         
         # Draw outline - outer arc (at reach)
-        for i in range(num_segments):
-            t1 = i / num_segments
-            t2 = (i + 1) / num_segments
-            outer_left = attack_angle - half_full_rad
-            angle1 = outer_left + t1 * (2 * half_full_rad)
-            angle2 = outer_left + t2 * (2 * half_full_rad)
+        for i in range(num_arc_segments):
+            a1 = i / num_arc_segments
+            a2 = (i + 1) / num_arc_segments
+            angle1 = attack_angle - half_full_rad + a1 * (2 * half_full_rad)
+            angle2 = attack_angle - half_full_rad + a2 * (2 * half_full_rad)
             
             x1 = pixel_cx + math.cos(angle1) * reach_px
             y1 = pixel_cy + math.sin(angle1) * reach_px

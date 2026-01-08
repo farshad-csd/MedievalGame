@@ -117,7 +117,7 @@ VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
 SHOW_PERCEPTION_DEBUG = False
 
 # Character hitbox debug - collision and sprite boundaries
-SHOW_CHARACTER_HITBOXES = True       # Master toggle for all character hitbox visualization
+SHOW_CHARACTER_HITBOXES = False       # Master toggle for all character hitbox visualization
 SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
 SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)
 SHOW_INTERACTION_RADIUS = False       # Circle showing ADJACENCY_DISTANCE (green)
@@ -135,8 +135,8 @@ DEBUG_COLOR_POSITION = (255, 255, 255, 255)     # White - center position dot
 
 # Attack cone geometry (matches resolve_attack hit detection)
 ATTACK_CONE_HALF_WIDTH = 0.7          # Perpendicular distance for hit detection (NPCs only)
-ATTACK_CONE_ANGLE = 35                # Total cone angle in degrees at max range (360° aiming)
-ATTACK_CONE_BASE_ANGLE = 15           # Total cone angle in degrees at player position (minimum width)
+ATTACK_CONE_ANGLE = 45                # Total cone angle in degrees at max range (360° aiming)
+ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player position (minimum width)
 
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
