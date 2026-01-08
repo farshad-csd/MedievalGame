@@ -117,12 +117,12 @@ VISION_CONE_ANGLE = 80  # degrees - field of view (120 = wide peripheral vision)
 SHOW_PERCEPTION_DEBUG = False
 
 # Character hitbox debug - collision and sprite boundaries
-SHOW_CHARACTER_HITBOXES = False       # Master toggle for all character hitbox visualization
+SHOW_CHARACTER_HITBOXES = True       # Master toggle for all character hitbox visualization
 SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
 SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)
-SHOW_INTERACTION_RADIUS = False       # Circle showing ADJACENCY_DISTANCE (green)
+SHOW_INTERACTION_RADIUS = True       # Circle showing ADJACENCY_DISTANCE (green)
 SHOW_ATTACK_RANGE = False             # Circle showing WEAPON_REACH (orange)
-SHOW_ATTACK_CONE = True               # Player's directional attack hitbox (yellow) - the actual hit zone
+SHOW_ATTACK_CONE = False               # Player's directional attack hitbox (yellow) - the actual hit zone
 SHOW_CHARACTER_POSITION = True        # Small dot at exact x,y position (white)
 
 # Hitbox colors (RGBA tuples - use with rl.Color(*COLOR))
@@ -141,7 +141,7 @@ ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player p
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
 # =============================================================================
-DEBUG_TRIPLE_PLAYER_HEALTH = True    # Player starts with 300 HP instead of 100
+DEBUG_TRIPLE_PLAYER_HEALTH = False    # Player starts with 300 HP instead of 100
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS
@@ -513,4 +513,5 @@ UI_COLOR_HEADER_GREEN = (140, 180, 120, 255)  # Green header text
 
 # Aiming chevron visual settings
 AIM_CHEVRON_FEET_OFFSET = 10          # Pixels to offset chevron downward (toward feet)
-AIM_CHEVRON_THICKNESS = 2
+AIM_CHEVRON_THICKNESS = 4
+AIM_CHEVRON_COLOR = (255, 255, 255, 120)
