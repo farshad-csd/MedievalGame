@@ -35,7 +35,10 @@ from constants import (
     AIM_CHEVRON_FEET_OFFSET, AIM_CHEVRON_THICKNESS, AIM_CHEVRON_COLOR,
     DEBUG_COLOR_COLLISION, DEBUG_COLOR_SPRITE, DEBUG_COLOR_INTERACT,
     DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
-    CHARACTER_COLLISION_RADIUS, WEAPON_REACH
+    CHARACTER_COLLISION_RADIUS, WEAPON_REACH,
+    # Ongoing action constants
+    ONGOING_ACTION_HARVEST_DURATION, ONGOING_ACTION_PLANT_DURATION,
+    ONGOING_ACTION_CHOP_DURATION, UI_COLOR_PROGRESS_BAR
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
@@ -63,6 +66,7 @@ HUD_BAR_HEIGHT = 4
 # Stat bar colors (RGBA)
 COLOR_HEALTH = rl.Color(201, 76, 76, 255)      # Red
 COLOR_STAMINA = rl.Color(92, 184, 92, 255)     # Green  
+COLOR_PROGRESS = rl.Color(80, 140, 220, 255)   # Blue (for ongoing action progress bar)
 COLOR_FATIGUE = rl.Color(91, 192, 222, 255)    # Cyan
 COLOR_HUNGER = rl.Color(217, 164, 65, 255)     # Gold/Orange
 
@@ -522,23 +526,95 @@ class BoardGUI:
         name = player.get_display_name()
         
         if action == "Harvest":
-            # Instant harvest via game logic (handles theft detection)
-            if not self.logic.player_harvest_cell(player):
+            # Check if harvest is possible first
+            cell_x = int(player.x)
+            cell_y = int(player.y)
+            farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+            
+            if not farm_cell or farm_cell.get('state') != 'ready':
                 self.state.log_action(f"{name} couldn't harvest here.")
+                return
+            
+            # Check inventory space
+            from constants import FARM_CELL_YIELD
+            if not player.can_add_item('wheat', FARM_CELL_YIELD):
+                self.state.log_action(f"{name}'s inventory is full!")
+                return
+            
+            # Start ongoing harvest action
+            player.start_ongoing_action(
+                'harvest', 
+                ONGOING_ACTION_HARVEST_DURATION,
+                {'cell': (cell_x, cell_y)}
+            )
+            self.state.log_action(f"{name} started harvesting...")
         
         elif action == "Plant":
-            # Instant plant via game logic
-            if not self.logic.player_plant_cell(player):
+            # Check if planting is possible first
+            cell_x = int(player.x)
+            cell_y = int(player.y)
+            farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+            
+            if not farm_cell or farm_cell.get('state') != 'replanting':
                 self.state.log_action(f"{name} couldn't plant here.")
+                return
+            
+            # Start ongoing plant action
+            player.start_ongoing_action(
+                'plant',
+                ONGOING_ACTION_PLANT_DURATION,
+                {'cell': (cell_x, cell_y)}
+            )
+            self.state.log_action(f"{name} started planting...")
         
         elif action == "Build Campfire":
-            # Build a campfire at current location
+            # Build a campfire at current location (instant action)
             if not self.logic.make_camp(player):
                 self.state.log_action(f"{name} can't make a camp here")
         
         elif action == "Build":
             # TODO: Open build menu (future feature)
             self.state.log_action(f"{name} looks around for building materials...")
+    
+    def _update_ongoing_actions(self):
+        """Update ongoing actions and complete them when finished."""
+        player = self.state.player
+        if not player or not player.has_ongoing_action():
+            return
+        
+        # Check if action is complete
+        if player.is_ongoing_action_complete():
+            action = player.ongoing_action
+            action_type = action['action']
+            action_data = action['data']
+            name = player.get_display_name()
+            
+            if action_type == 'harvest':
+                # Complete the harvest
+                cell = action_data.get('cell')
+                if cell:
+                    success = self.logic.player_harvest_cell(player)
+                    if success:
+                        self.state.log_action(f"{name} finished harvesting!")
+                    else:
+                        self.state.log_action(f"{name} couldn't harvest - something changed.")
+            
+            elif action_type == 'plant':
+                # Complete the planting
+                cell = action_data.get('cell')
+                if cell:
+                    success = self.logic.player_plant_cell(player)
+                    if success:
+                        self.state.log_action(f"{name} finished planting!")
+                    else:
+                        self.state.log_action(f"{name} couldn't plant - something changed.")
+            
+            elif action_type == 'chop':
+                # Complete tree chopping (future feature)
+                self.state.log_action(f"{name} finished chopping!")
+            
+            # Clear the ongoing action
+            player.cancel_ongoing_action()
     
     # =========================================================================
     # INPUT HANDLING
@@ -574,6 +650,38 @@ class BoardGUI:
             action = self.environment_menu.handle_input()
             if action and action != "closed":
                 self._handle_environment_action(action)
+            # Still need to handle window resize
+            if rl.is_window_resized():
+                self.window_width = rl.get_screen_width()
+                self.window_height = rl.get_screen_height()
+                self.canvas_width = self.window_width
+                self.canvas_height = self.window_height
+            return
+        
+        # Handle ongoing action (blocks all input except cancel and pause)
+        player = self.state.player
+        if player and player.has_ongoing_action():
+            # Only handle cancel input (Tab on keyboard, B on gamepad)
+            cancel_pressed = rl.is_key_pressed(rl.KEY_TAB)
+            
+            # Check gamepad B button
+            for i in range(4):
+                if rl.is_gamepad_available(i):
+                    if rl.is_gamepad_button_pressed(i, rl.GAMEPAD_BUTTON_RIGHT_FACE_RIGHT):
+                        cancel_pressed = True
+                    break
+            
+            if cancel_pressed:
+                cancelled = player.cancel_ongoing_action()
+                if cancelled:
+                    action_name = cancelled['action'].title()
+                    self.state.log_action(f"{player.get_display_name()} cancelled {action_name}")
+            
+            # Check for pause (Escape still works)
+            if rl.is_key_pressed(rl.KEY_ESCAPE):
+                self.input.pause = True
+                self._apply_ui_input()
+            
             # Still need to handle window resize
             if rl.is_window_resized():
                 self.window_width = rl.get_screen_width()
@@ -1360,6 +1468,9 @@ class BoardGUI:
         
         # Update environment menu
         self.environment_menu.update(dt)
+        
+        # Update ongoing actions (player timed actions)
+        self._update_ongoing_actions()
     
     # =========================================================================
     # RENDERING
@@ -2688,7 +2799,7 @@ void main() {
         
         // If any neighbor is opaque, draw red outline
         if (neighborAlpha > 0.5) {
-            finalColor = vec4(1.0, 0.0, 0.0, 0.9);  // Bright red outline
+            finalColor = vec4(1.0, 1.0, 1.0, 0.8);
         } else {
             finalColor = vec4(0.0, 0.0, 0.0, 0.0);
         }
@@ -2787,7 +2898,7 @@ void main() {
             
             # Set shader uniforms
             texture_size = rl.ffi.new("float[2]", [recolored_texture.width, recolored_texture.height])
-            outline_width = rl.ffi.new("float *", 1.0)  # Slightly thicker than perceived outlines
+            outline_width = rl.ffi.new("float *", .5)  # Slightly thicker than perceived outlines
             rl.set_shader_value(shader, self._red_outline_texture_size_loc, texture_size, rl.SHADER_UNIFORM_VEC2)
             rl.set_shader_value(shader, self._red_outline_width_loc, outline_width, rl.SHADER_UNIFORM_FLOAT)
             
@@ -3621,6 +3732,34 @@ void main() {
             if stamina_fill_width > 0:
                 rl.draw_rectangle(bar_x, stamina_bar_y, stamina_fill_width, bar_height, 
                                  rl.Color(COLOR_STAMINA.r, COLOR_STAMINA.g, COLOR_STAMINA.b, 220))
+        
+        # Draw ongoing action progress bar (player only)
+        if is_player and char.has_ongoing_action():
+            progress = char.get_ongoing_action_progress()
+            if progress is not None:
+                # Make bars narrower than sprite (70% of sprite width)
+                bar_width = int(sprite_width * 0.7)
+                bar_height = max(3, int(4 * self.zoom))
+                bar_x = int(pixel_cx - bar_width / 2)
+                bar_gap = max(1, int(2 * self.zoom))
+                
+                # Position below name (or below other bars if showing)
+                if should_show_bars:
+                    # After HP and stamina bars
+                    progress_bar_y = text_y + 12 + (bar_height + bar_gap) * 2
+                else:
+                    # Just below name
+                    progress_bar_y = text_y + 12
+                
+                # Background
+                rl.draw_rectangle(bar_x, progress_bar_y, bar_width, bar_height, rl.Color(255, 255, 255, 25))
+                
+                # Foreground (blue progress bar)
+                progress_fill_width = int(bar_width * progress)
+                if progress_fill_width > 0:
+                    # Blue color for progress
+                    rl.draw_rectangle(bar_x, progress_bar_y, progress_fill_width, bar_height, 
+                                     rl.Color(70, 130, 220, 220))
     
     def _draw_single_character(self, char):
         """Draw a single character (legacy - calls sprite + UI)"""

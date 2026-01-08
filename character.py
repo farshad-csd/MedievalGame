@@ -184,6 +184,11 @@ class Character:
         # Logging flags
         self._idle_logged = False
         self._work_logged = False
+        
+        # Ongoing action state (player only - timed actions like harvesting)
+        # Structure: {'action': str, 'start_time': float, 'duration': float, 'data': dict}
+        # Actions: 'harvest', 'plant', 'chop'
+        self.ongoing_action = None
     
     # =========================================================================
     # PROPERTIES
@@ -804,6 +809,77 @@ class Character:
         if facing in valid_directions:
             return facing
         return 'down'  # Fallback
+    
+    # =========================================================================
+    # ONGOING ACTIONS (Player timed actions)
+    # =========================================================================
+    
+    def start_ongoing_action(self, action_type, duration, data=None):
+        """Start an ongoing action (freezes player until complete or cancelled).
+        
+        Args:
+            action_type: Type of action ('harvest', 'plant', 'chop')
+            duration: Duration in seconds (real-time)
+            data: Optional dict with action-specific data (e.g., cell coords)
+            
+        Returns:
+            True if action started, False if already doing an action
+        """
+        if self.ongoing_action is not None:
+            return False
+        
+        self.ongoing_action = {
+            'action': action_type,
+            'start_time': time.time(),
+            'duration': duration,
+            'data': data or {}
+        }
+        return True
+    
+    def cancel_ongoing_action(self):
+        """Cancel the current ongoing action.
+        
+        Returns:
+            The action that was cancelled, or None if no action was in progress
+        """
+        if self.ongoing_action is None:
+            return None
+        
+        cancelled = self.ongoing_action
+        self.ongoing_action = None
+        return cancelled
+    
+    def get_ongoing_action_progress(self):
+        """Get the progress of the current ongoing action.
+        
+        Returns:
+            Float from 0.0 to 1.0 representing progress, or None if no action
+        """
+        if self.ongoing_action is None:
+            return None
+        
+        elapsed = time.time() - self.ongoing_action['start_time']
+        progress = elapsed / self.ongoing_action['duration']
+        return min(1.0, max(0.0, progress))
+    
+    def is_ongoing_action_complete(self):
+        """Check if the current ongoing action is complete.
+        
+        Returns:
+            True if complete (progress >= 1.0), False otherwise or if no action
+        """
+        progress = self.get_ongoing_action_progress()
+        if progress is None:
+            return False
+        return progress >= 1.0
+    
+    def has_ongoing_action(self):
+        """Check if player has an ongoing action in progress.
+        
+        Returns:
+            True if an ongoing action is in progress
+        """
+        return self.ongoing_action is not None
     
     # =========================================================================
     # DICT-LIKE ACCESS (backward compatibility)

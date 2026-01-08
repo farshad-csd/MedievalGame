@@ -233,9 +233,7 @@ REPORT_ADJACENCY_DISTANCE = 1  # Must be within this distance to report crimes t
 # All characters have 0-100 points in each skill
 SKILLS = {
     "strength": {"name": "Strength", "category": "combat"}, # warrior
-    "arobics": {"name": "Strength", "category": "combat"}, # warrior
     "agility": {"name": "Agility", "category": "combat"}, # warrior
-    "weapon_mastery": {"name": "Weapon Mastery", "category": "combat"}, # warrior
     "mercantile": {"name": "Mercantile", "category": "benign"}, # vendor
     "demolition": {"name": "Demolition", "category": "combat"}, # vendor
     "smithing": {"name": "Smithing", "category": "benign"}, # vendor
@@ -250,7 +248,7 @@ SKILLS = {
     "brewing": {"name": "Brewing", "category": "benign"}, # vendor
     "tailor": {"name": "Tailor", "category": "benign"}, # vendor
     "hospitality": {"name": "Hospitality", "category": "benign"}, # vendor
-    "finesse": {"name": "Grifting", "category": "benign"}, # thief: forging, lockpicking, breaking out, impersonation, trust building, lying, keeping stuff in jail
+    "grifting": {"name": "Grifting", "category": "benign"}, # thief: forging, lockpicking, breaking out, impersonation, trust building, lying, keeping stuff in jail
     "bard": {"name": "Bard", "category": "benign"}, # thief
 }
 
@@ -375,6 +373,17 @@ FARM_CELL_COLORS = {
     "replanting": "#8B4513",
     "growing": "#FFD700"
 }
+
+# =============================================================================
+# ONGOING ACTIONS (Player timed actions like harvesting, planting, chopping)
+# =============================================================================
+# Duration in seconds (real-time, not affected by game speed)
+ONGOING_ACTION_HARVEST_DURATION = 5.0  # 5 seconds to harvest
+ONGOING_ACTION_PLANT_DURATION = 5.0    # 5 seconds to plant
+ONGOING_ACTION_CHOP_DURATION = 8.0     # 8 seconds to chop tree (future)
+
+# Progress bar color (blue, RGBA)
+UI_COLOR_PROGRESS_BAR = (80, 140, 220, 220)  # Blue progress bar
 
 # =============================================================================
 # JOB DEFINITIONS AND TIERS

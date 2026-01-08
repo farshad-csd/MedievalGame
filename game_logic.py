@@ -344,6 +344,13 @@ class GameLogic:
             target.health -= damage
             self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
+            # Cancel ongoing action if player is hit
+            if target.is_player and target.has_ongoing_action():
+                cancelled = target.cancel_ongoing_action()
+                if cancelled:
+                    action_name = cancelled['action'].title()
+                    self.state.log_action(f"{target_name}'s {action_name} interrupted by attack!")
+            
             # Set hit flash for visual feedback
             target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
             
