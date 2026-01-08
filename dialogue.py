@@ -2,7 +2,7 @@
 """
 Dialogue system that provides:
 - Pokemon-style dialogue box at the bottom of the screen
-- Options menu on the right side
+- Options menu on the right side with submenus
 - Typewriter text effect
 - Input handling when dialogue is active
 
@@ -68,17 +68,57 @@ CURSOR_BLINK_RATE = 0.5  # Seconds per blink cycle
 
 
 # =============================================================================
-# DIALOGUE OPTIONS
+# DIALOGUE MENU STRUCTURE
 # =============================================================================
 
-DIALOGUE_OPTIONS = [
+# Main menu options - order matters for display
+MAIN_MENU_OPTIONS = [
+    "Demand",
+    "Tell",
     "Ask",
     "Intimidate",
+    "Recruit",
     "Request",
     "Offer",
     "Trade",
     "Exit"
 ]
+
+# Submenus for options that have them
+# Each submenu automatically gets "Back" appended
+SUBMENUS = {
+    "Demand": [
+        "Surrender",
+        "Valuables",
+    ],
+    "Ask": [
+        "Name",
+        "Home",
+        "Allegiance",
+        "History",
+        "Gossip",
+        "Others",
+    ],
+    "Request": [
+        "Marriage",
+        "Song",
+        "Job",
+        "Property",
+        "Commission",
+        "Charity",
+        "Training",
+        "Lodging",
+        "Campfire",
+        "Follow Me",
+    ],
+    "Offer": [
+        "Surrender",
+        "Compliment",
+        "Gift",
+        "Lodging",
+        "Campfire",
+    ],
+}
 
 
 class DialogueSystem:
@@ -89,7 +129,7 @@ class DialogueSystem:
     - Blocks player movement and actions
     - Makes the NPC face the player and stop moving
     - Displays dialogue box with typewriter text effect
-    - Shows options menu for player choices
+    - Shows options menu for player choices (with submenus)
     """
     
     def __init__(self, game_state, game_logic):
@@ -114,9 +154,11 @@ class DialogueSystem:
         self._displayed_chars = 0
         self._text_start_time = 0
         
-        # Options menu state
+        # Menu state
+        self._menu_stack = []  # Stack of (menu_name, options_list) for navigation
+        self._current_menu_name = "Main"
+        self._current_options = MAIN_MENU_OPTIONS.copy()
         self._selected_option = 0
-        self._options = DIALOGUE_OPTIONS.copy()
         
         # Animation state
         self._cursor_visible = True
@@ -198,7 +240,10 @@ class DialogueSystem:
         self._displayed_chars = 0
         self._text_start_time = time.time()
         
-        # Reset options
+        # Reset menu to main
+        self._menu_stack = []
+        self._current_menu_name = "Main"
+        self._current_options = MAIN_MENU_OPTIONS.copy()
         self._selected_option = 0
         
         return True
@@ -219,6 +264,12 @@ class DialogueSystem:
         self._npc_original_goal = None
         self._full_text = ""
         self._displayed_chars = 0
+        
+        # Reset menu state
+        self._menu_stack = []
+        self._current_menu_name = "Main"
+        self._current_options = MAIN_MENU_OPTIONS.copy()
+        self._selected_option = 0
     
     def _make_npc_face_player(self):
         """Make the NPC face toward the player (8-directional)."""
@@ -258,6 +309,39 @@ class DialogueSystem:
             npc.facing = 'up-right'
     
     # =========================================================================
+    # MENU NAVIGATION
+    # =========================================================================
+    
+    def _enter_submenu(self, menu_name):
+        """
+        Enter a submenu.
+        
+        Args:
+            menu_name: Name of the submenu to enter (key in SUBMENUS)
+        """
+        if menu_name not in SUBMENUS:
+            return False
+        
+        # Push current menu onto stack
+        self._menu_stack.append((self._current_menu_name, self._current_options, self._selected_option))
+        
+        # Set up new menu
+        self._current_menu_name = menu_name
+        self._current_options = SUBMENUS[menu_name].copy() + ["Back"]
+        self._selected_option = 0
+        
+        return True
+    
+    def _go_back(self):
+        """Go back to the previous menu."""
+        if not self._menu_stack:
+            return False
+        
+        # Pop previous menu from stack
+        self._current_menu_name, self._current_options, self._selected_option = self._menu_stack.pop()
+        return True
+    
+    # =========================================================================
     # INPUT HANDLING
     # =========================================================================
     
@@ -288,11 +372,11 @@ class DialogueSystem:
         if text_complete:
             # W/S to navigate options
             if rl.is_key_pressed(rl.KEY_W):
-                self._selected_option = (self._selected_option - 1) % len(self._options)
+                self._selected_option = (self._selected_option - 1) % len(self._current_options)
                 return True
             
             if rl.is_key_pressed(rl.KEY_S):
-                self._selected_option = (self._selected_option + 1) % len(self._options)
+                self._selected_option = (self._selected_option + 1) % len(self._current_options)
                 return True
             
             # Mouse selection handled in render (hover) and click
@@ -327,7 +411,7 @@ class DialogueSystem:
                 relative_y = mouse_y - options_start_y
                 clicked_option = int(relative_y // OPTIONS_ITEM_HEIGHT)
                 
-                if 0 <= clicked_option < len(self._options):
+                if 0 <= clicked_option < len(self._current_options):
                     self._selected_option = clicked_option
                     self._select_option()
                     return True
@@ -336,18 +420,59 @@ class DialogueSystem:
     
     def _select_option(self):
         """Handle selection of the current option."""
-        option = self._options[self._selected_option]
+        option = self._current_options[self._selected_option]
         
+        # Handle Exit - always exits dialogue
         if option == "Exit":
             self.end_dialogue()
+            return
+        
+        # Handle Back - go to previous menu
+        if option == "Back":
+            self._go_back()
+            return
+        
+        # Check if this option has a submenu
+        if option in SUBMENUS:
+            self._enter_submenu(option)
+            return
+        
+        # Handle options without submenus that are on the main menu
+        if self._current_menu_name == "Main":
+            if option == "Tell":
+                self._show_not_implemented("Tell")
+            elif option == "Intimidate":
+                self._show_not_implemented("Intimidate")
+            elif option == "Recruit":
+                self._show_not_implemented("Recruit")
+            elif option == "Trade":
+                self._show_not_implemented("Trade")
+            return
+        
+        # Handle submenu selections (all not implemented for now)
+        self._show_not_implemented(f"{self._current_menu_name} > {option}")
+    
+    def _show_not_implemented(self, action_name):
+        """Show a 'not implemented' message for an action."""
+        self._full_text = f"[{action_name}] - Not yet implemented."
+        self._displayed_chars = 0
+        self._text_start_time = time.time()
+        
+        # If we're in a submenu, stay there but select Back
+        if self._menu_stack:
+            # Find the Back option index
+            try:
+                back_idx = self._current_options.index("Back")
+                self._selected_option = back_idx
+            except ValueError:
+                pass
         else:
-            # For now, other options just show a response and return to Exit
-            # This can be expanded later
-            self._full_text = f"[{option}] - Not yet implemented."
-            self._displayed_chars = 0
-            self._text_start_time = time.time()
-            # Move selection to Exit
-            self._selected_option = len(self._options) - 1
+            # On main menu, move selection to Exit
+            try:
+                exit_idx = self._current_options.index("Exit")
+                self._selected_option = exit_idx
+            except ValueError:
+                pass
     
     # =========================================================================
     # UPDATE
@@ -474,7 +599,7 @@ class DialogueSystem:
             return
         
         # Calculate menu dimensions
-        menu_height = len(self._options) * OPTIONS_ITEM_HEIGHT + OPTIONS_PADDING * 2 + 24
+        menu_height = len(self._current_options) * OPTIONS_ITEM_HEIGHT + OPTIONS_PADDING * 2 + 24
         menu_x = screen_width - OPTIONS_BOX_WIDTH - OPTIONS_BOX_MARGIN
         menu_y = (screen_height - menu_height) // 2  # Vertically centered
         
@@ -499,8 +624,8 @@ class DialogueSystem:
         # Draw background
         rl.draw_rectangle(menu_x, menu_y, OPTIONS_BOX_WIDTH, menu_height, COLOR_BOX_BG)
         
-        # Draw header
-        header_text = "Action"
+        # Draw header (shows current menu name)
+        header_text = self._current_menu_name if self._current_menu_name != "Main" else "Action"
         header_x = menu_x + (OPTIONS_BOX_WIDTH - rl.measure_text(header_text, 12)) // 2
         header_y = menu_y + 8
         rl.draw_text(header_text, header_x, header_y, 12, COLOR_TEXT_DIM)
@@ -525,7 +650,7 @@ class DialogueSystem:
         mouse_x = rl.get_mouse_x()
         mouse_y = rl.get_mouse_y()
         
-        for i, option in enumerate(self._options):
+        for i, option in enumerate(self._current_options):
             item_y = options_start_y + i * OPTIONS_ITEM_HEIGHT
             
             # Check if mouse is hovering over this option
@@ -555,8 +680,25 @@ class DialogueSystem:
             # Draw option text
             text_x = menu_x + OPTIONS_PADDING + 16
             text_y = item_y + 6
-            text_color = COLOR_TEXT if i == self._selected_option else COLOR_TEXT_DIM
+            
+            # Determine text color based on option type
+            is_selected = (i == self._selected_option)
+            text_color = self._get_option_color(option, is_selected)
+            
             rl.draw_text(option, text_x, text_y, 14, text_color)
+    
+    def _get_option_color(self, option, is_selected):
+        """
+        Get the appropriate color for a menu option.
+        
+        Args:
+            option: The option text
+            is_selected: Whether this option is currently selected
+            
+        Returns:
+            Raylib Color for the option text
+        """
+        return COLOR_TEXT if is_selected else COLOR_TEXT_DIM
     
     def _draw_wrapped_text(self, text, x, y, max_width, font_size, color):
         """Draw text with word wrapping."""

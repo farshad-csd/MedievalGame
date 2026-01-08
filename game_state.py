@@ -965,8 +965,9 @@ class GameState:
         """
         if char.zone is not None:
             # Character is inside - check for interior door to exit
+            # Must be basically standing ON the door from the north side
             interior = self.interiors.get_interior(char.zone)
-            if interior and interior.is_at_door(char.prevailing_x, char.prevailing_y, threshold=1.0):
+            if interior and interior.is_at_door(char.prevailing_x, char.prevailing_y, threshold=0.5):
                 return interior.house
             return None
         

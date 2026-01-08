@@ -171,23 +171,34 @@ class Interior:
         """
         return (self.exterior_door_x + 0.5, self.exterior_door_y + 0.5)
     
-    def is_at_door(self, interior_x, interior_y, threshold=1.5):
+    def is_at_door(self, interior_x, interior_y, threshold=0.5):
         """
         Check if a position is at the door (for exiting).
-        Door is in front wall at y=height. Player can exit from last floor row.
+        Door is in front wall at y=height. Player must be standing basically
+        ON the door from the north side (inside the building).
         
         Args:
             interior_x: X position in interior
             interior_y: Y position in interior
-            threshold: How close to door counts as "at door"
+            threshold: How close to door counts as "at door" (tight by default)
             
         Returns:
             True if at door
         """
+        # Door is centered at (door_x + 0.5, height)
+        # Player must be at the very bottom of the floor (y close to height)
+        # and horizontally aligned with the door
+        
+        # Horizontal distance from door center
         dx = abs(interior_x - (self.door_x + 0.5))
-        # Check if near bottom of floor (y approaching height)
-        dy = abs(interior_y - (self.height - 0.5))
-        return dx < threshold and dy < threshold
+        
+        # Player must be at the bottom edge of the floor (y approaching height)
+        # The floor ends at y = height, so player should be very close to that
+        # Using (height - 0.3) as the "door zone" - must be in bottom 0.3 of last row
+        distance_from_door_edge = self.height - interior_y
+        
+        # Must be horizontally aligned with door AND at the very bottom of floor
+        return dx < threshold and distance_from_door_edge < 0.5 and distance_from_door_edge >= 0
     
     # =========================================================================
     # WINDOWS

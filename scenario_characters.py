@@ -33,7 +33,7 @@ CHARACTER_TEMPLATES = {
         "starting_money": 0,
         "starting_wheat": 0,
         "starting_age": 25,
-        "starting_skills": {"strength": 50},
+        "starting_skills": {"strength": 50, "swords": 50},
         "is_player": False
     },
     "Edmund Cole": {
@@ -49,45 +49,45 @@ CHARACTER_TEMPLATES = {
         "starting_skills": {"mercantile": 70},
         "is_player": False
     },
-    "Brynn Ashford": {
-        "attractiveness": 5,
-        "confidence": 9,
-        "cunning": 3,
-        "morality": 9,
-        "starting_allegiance": None,
-        "starting_job": None,
-        "starting_money": 0,
-        "starting_wheat": 0,
-        "starting_age": 28,
-        "starting_skills": {"strength": 50},
-        "is_player": False
-    },
-    "Harren Slade": {
-        "attractiveness": 5,
-        "confidence": 9,
-        "cunning": 9,
-        "morality": 4,
-        "starting_allegiance": None,
-        "starting_job": None,
-        "starting_money": 0,
-        "starting_wheat": 0,
-        "starting_age": 32,
-        "starting_skills": {},
-        "is_player": False
-    },
-    "Aldric Thorne": {
-        "attractiveness": 5,
-        "confidence": 9,
-        "cunning": 9,
-        "morality": 5,
-        "starting_allegiance": None,
-        "starting_job": None,
-        "starting_money": 200,
-        "starting_wheat": 0,
-        "starting_age": 32,
-        "starting_skills": {"mercantile": 50},
-        "is_player": False
-    },
+    # "Brynn Ashford": {
+    #     "attractiveness": 5,
+    #     "confidence": 9,
+    #     "cunning": 3,
+    #     "morality": 9,
+    #     "starting_allegiance": None,
+    #     "starting_job": None,
+    #     "starting_money": 0,
+    #     "starting_wheat": 0,
+    #     "starting_age": 28,
+    #     "starting_skills": {"strength": 50, "swords": 50},
+    #     "is_player": False
+    # },
+    # "Harren Slade": {
+    #     "attractiveness": 5,
+    #     "confidence": 9,
+    #     "cunning": 9,
+    #     "morality": 4,
+    #     "starting_allegiance": None,
+    #     "starting_job": None,
+    #     "starting_money": 0,
+    #     "starting_wheat": 0,
+    #     "starting_age": 32,
+    #     "starting_skills": {"grifting": 50, "swords": 50},
+    #     "is_player": False
+    # },
+    # "Aldric Thorne": {
+    #     "attractiveness": 5,
+    #     "confidence": 9,
+    #     "cunning": 9,
+    #     "morality": 5,
+    #     "starting_allegiance": None,
+    #     "starting_job": None,
+    #     "starting_money": 200,
+    #     "starting_wheat": 0,
+    #     "starting_age": 32,
+    #     "starting_skills": {"mercantile": 50},
+    #     "is_player": False
+    # },
     "Cade Wren": {
         "attractiveness": 5,
         "confidence": 10,
