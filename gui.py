@@ -38,7 +38,9 @@ from constants import (
     CHARACTER_COLLISION_RADIUS, WEAPON_REACH,
     # Ongoing action constants
     ONGOING_ACTION_HARVEST_DURATION, ONGOING_ACTION_PLANT_DURATION,
-    ONGOING_ACTION_CHOP_DURATION, UI_COLOR_PROGRESS_BAR
+    ONGOING_ACTION_CHOP_DURATION, UI_COLOR_PROGRESS_BAR,
+    # Block/shield
+    SHIELD_COLOR
 )
 from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
@@ -173,6 +175,7 @@ class InputState:
         # Actions
         self.attack = False
         self.combat_mode_toggle = False
+        self.block = False  # Held while spacebar is down
         self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
@@ -374,6 +377,8 @@ class BoardGUI:
             # Object sprites
             'bed': 'sprites/Bed.png',
             'stove': 'sprites/Stove.png',
+            # UI sprites
+            'shield': 'sprites/shield.png',
         }
         
         for name, filename in sprite_files.items():
@@ -772,6 +777,9 @@ class BoardGUI:
             self.input.zoom_in = True
         if rl.is_key_pressed(rl.KEY_MINUS) or rl.is_key_pressed(rl.KEY_KP_SUBTRACT):
             self.input.zoom_out = True
+        
+        # Block (held while spacebar is down)
+        self.input.block = rl.is_key_down(rl.KEY_SPACE)
     
     def _handle_mouse_input(self):
         """Handle mouse input"""
@@ -1136,6 +1144,10 @@ class BoardGUI:
                 mode_str = "COMBAT MODE" if player['combat_mode'] else "normal mode"
                 self.state.log_action(f"{player.get_display_name()} entered {mode_str}")
         
+        # Update block state (only in combat mode)
+        if player:
+            player.is_blocking = self.input.block and player.get('combat_mode', False)
+        
         # Manual panning
         if self.input.pan_x != 0 or self.input.pan_y != 0:
             self.camera_following_player = False
@@ -1378,24 +1390,30 @@ class BoardGUI:
             player.vy = 0.0
             return False
         
-        # Check stamina for sprinting (Skyrim-style)
-        if sprinting:
-            # Check if player can sprint (has stamina)
-            if player.is_sprinting:
-                # Already sprinting - check if can continue
-                if not player.can_continue_sprint():
-                    sprinting = False
-            else:
-                # Trying to start sprinting - check if can start
-                if not player.can_start_sprint():
-                    sprinting = False
-        
-        if movement_dot > 0:
-            speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
-            player.is_sprinting = sprinting
-        else:
-            speed = MOVEMENT_SPEED * 0.9
+        # Blocking overrides sprint and slows movement
+        if player.is_blocking:
+            from constants import BLOCK_MOVEMENT_SPEED
+            speed = BLOCK_MOVEMENT_SPEED
             player.is_sprinting = False
+        else:
+            # Check stamina for sprinting (Skyrim-style)
+            if sprinting:
+                # Check if player can sprint (has stamina)
+                if player.is_sprinting:
+                    # Already sprinting - check if can continue
+                    if not player.can_continue_sprint():
+                        sprinting = False
+                else:
+                    # Trying to start sprinting - check if can start
+                    if not player.can_start_sprint():
+                        sprinting = False
+            
+            if movement_dot > 0:
+                speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
+                player.is_sprinting = sprinting
+            else:
+                speed = MOVEMENT_SPEED * 0.9
+                player.is_sprinting = False
         
         # Normalize diagonal movement
         if dx != 0 and dy != 0:
@@ -3178,6 +3196,10 @@ void main() {
             else:
                 rl.draw_rectangle(int(blit_x), int(blit_y), sprite_width, sprite_height, hex_to_color(char_color))
         
+        # Draw shield if player is blocking
+        if char.is_player and char.is_blocking:
+            self._draw_shield(char, pixel_cx, pixel_cy, sprite_width, sprite_height)
+        
         # Cache UI info for drawing on top later
         if not hasattr(self, '_character_ui_cache'):
             self._character_ui_cache = []
@@ -3190,6 +3212,23 @@ void main() {
             'frame_info': frame_info,
             'should_flip': should_flip,
         })
+    
+    def _draw_shield(self, char, pixel_cx, pixel_cy, sprite_width, sprite_height):
+        """Draw shield sprite at player center when blocking."""
+        shield_tex = self.world_textures.get('shield')
+        if shield_tex:
+            # Draw shield centered on player, scaled to be small
+            shield_size = int(sprite_width * 0.2)  # 20% of sprite width
+            draw_x = int(pixel_cx - shield_size / 2)
+            draw_y = int(pixel_cy - shield_size / 2)
+            
+            source = rl.Rectangle(0, 0, shield_tex.width, shield_tex.height)
+            dest = rl.Rectangle(draw_x, draw_y, shield_size, shield_size)
+            rl.draw_texture_pro(shield_tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
+        else:
+            # Fallback to blue circle if texture not found
+            shield_color = rl.Color(*SHIELD_COLOR)
+            rl.draw_circle(int(pixel_cx), int(pixel_cy), 4, shield_color)
     
     def _draw_character_hitboxes(self):
         """Draw debug visualization of character hitboxes and collision radii.

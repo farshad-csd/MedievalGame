@@ -94,6 +94,9 @@ class Character:
         self.attack_angle = None  # Precise angle in radians for 360° aiming (player only)
         self.last_attack_tick = 0
         
+        # Block state (player only)
+        self.is_blocking = False
+        
 
         
         # Core stats (mutable)
@@ -771,11 +774,15 @@ class Character:
         return self.stamina / MAX_STAMINA
     
     def can_attack(self):
-        """Check if character can attack (animation not in progress).
+        """Check if character can attack (animation not in progress, not blocking).
         
         Returns:
             True if can attack
         """
+        # Can't attack while blocking
+        if self.is_blocking:
+            return False
+        
         anim_start = self.attack_animation_start
         if anim_start is not None:
             elapsed = time.time() - anim_start

@@ -339,6 +339,11 @@ class GameLogic:
         for target in targets_hit:
             target_name = target.get_display_name()
             
+            # Check if target is blocking (blocks attacks from any direction for now)
+            if target.is_blocking:
+                self.state.log_action(f"{target_name} BLOCKED {attacker_name}'s attack!")
+                continue  # Skip damage for this target
+            
             # Calculate and apply damage
             damage = random.randint(2, 5)
             target.health -= damage
@@ -438,6 +443,40 @@ class GameLogic:
         # Check if in melee attack range
         if not self.is_in_melee_range(attacker, target):
             return result
+        
+        # Check if target is blocking
+        if target.is_blocking:
+            # Check if attacker is within target's block cone (same as attack cone)
+            block_angle = target.get('attack_angle')
+            if block_angle is not None:
+                # Calculate angle from target to attacker
+                rel_x = attacker.prevailing_x - target.prevailing_x
+                rel_y = attacker.prevailing_y - target.prevailing_y
+                distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+                
+                if distance > 0:
+                    angle_to_attacker = math.atan2(rel_y, rel_x)
+                    
+                    # Use attack cone angles for block cone
+                    half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+                    half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
+                    
+                    # Interpolate cone angle based on distance
+                    t = min(distance / WEAPON_REACH, 1.0)
+                    half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
+                    
+                    # Check if attacker is within block cone
+                    angle_diff = angle_to_attacker - block_angle
+                    while angle_diff > math.pi:
+                        angle_diff -= 2 * math.pi
+                    while angle_diff < -math.pi:
+                        angle_diff += 2 * math.pi
+                    
+                    if abs(angle_diff) <= half_cone_rad:
+                        # Attack blocked!
+                        self.state.log_action(f"{target_name} BLOCKED {attacker_name}'s attack!")
+                        result['hit'] = False
+                        return result
         
         result['hit'] = True
         

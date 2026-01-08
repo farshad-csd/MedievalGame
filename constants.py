@@ -138,6 +138,10 @@ ATTACK_CONE_HALF_WIDTH = 0.7          # Perpendicular distance for hit detection
 ATTACK_CONE_ANGLE = 50                # Total cone angle in degrees at max range (360° aiming)
 ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player position (minimum width)
 
+# Block/defense settings
+BLOCK_MOVEMENT_SPEED = 0.4            # Movement speed while blocking (cells/second)
+SHIELD_COLOR = (80, 160, 255, 180)    # Light blue, semi-transparent
+
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
 # =============================================================================
