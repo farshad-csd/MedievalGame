@@ -31,7 +31,7 @@ from constants import (
     # Hitbox debug settings
     SHOW_CHARACTER_HITBOXES, SHOW_COLLISION_RADIUS, SHOW_SPRITE_BOUNDS,
     SHOW_INTERACTION_RADIUS, SHOW_ATTACK_RANGE, SHOW_CHARACTER_POSITION,
-    SHOW_ATTACK_CONE, ATTACK_CONE_HALF_WIDTH,
+    SHOW_ATTACK_CONE, ATTACK_CONE_HALF_WIDTH, ATTACK_CONE_ANGLE, ATTACK_CONE_BASE_ANGLE,
     DEBUG_COLOR_COLLISION, DEBUG_COLOR_SPRITE, DEBUG_COLOR_INTERACT,
     DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
     CHARACTER_COLLISION_RADIUS, WEAPON_REACH
@@ -1175,7 +1175,10 @@ class BoardGUI:
         return world_x, world_y
     
     def _update_player_facing_to_mouse(self):
-        """Update player facing direction to face the mouse cursor."""
+        """Update player facing direction to face the mouse cursor.
+        
+        Also stores the precise angle for 360° attack aiming.
+        """
         player = self.state.player
         if not player:
             return
@@ -1192,10 +1195,11 @@ class BoardGUI:
             dx = world_x - player.x
             dy = world_y - player.y
         
-        # Determine 8-direction facing
+        # Calculate precise angle and store it for 360° aiming
         angle = math.atan2(dy, dx)
+        player.attack_angle = angle
         
-        # Convert to 8 directions
+        # Determine 8-direction facing (for sprite animation)
         if angle >= -math.pi/8 and angle < math.pi/8:
             player.facing = 'right'
         elif angle >= math.pi/8 and angle < 3*math.pi/8:
@@ -3187,15 +3191,15 @@ void main() {
                     rl.Color(*DEBUG_COLOR_POSITION)
                 )
             
-            # Draw player's directional attack cone (yellow) - only for player
-            if SHOW_ATTACK_CONE and char.is_player:
+            # Draw player's directional attack cone (yellow) - only for player in combat mode
+            if SHOW_ATTACK_CONE and char.is_player and char.get('combat_mode', False):
                 self._draw_player_attack_cone(char, pixel_cx, pixel_cy, cell_size)
 
     def _is_char_in_player_attack_cone(self, char):
         """Check if a character is in the player's attack cone.
         
-        Uses the same logic as resolve_attack() in game_logic.py to determine
-        if a character would be hit by the player's attack.
+        Uses 360° angle-based cone detection matching resolve_attack() in game_logic.py.
+        Cone interpolates from BASE_ANGLE at player to full ANGLE at WEAPON_REACH.
         
         Args:
             char: Character to check
@@ -3215,34 +3219,41 @@ void main() {
         if char.zone != player.zone:
             return False
         
-        # Get facing direction vector
-        facing = player.get('facing', 'down')
-        facing_vectors = {
-            'up': (0, -1),
-            'down': (0, 1),
-            'left': (-1, 0),
-            'right': (1, 0),
-            'up-left': (-0.707, -0.707),
-            'up-right': (0.707, -0.707),
-            'down-left': (-0.707, 0.707),
-            'down-right': (0.707, 0.707),
-        }
-        dx, dy = facing_vectors.get(facing, (0, 1))
+        # Get the precise attack angle (360° aiming)
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return False
         
         # Calculate relative position using prevailing coords (local when in interior)
         rel_x = char.prevailing_x - player.prevailing_x
         rel_y = char.prevailing_y - player.prevailing_y
         
-        # Project onto attack direction
-        if dx != 0 or dy != 0:
-            proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
-            perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
-            
-            # Hit if within weapon reach in attack direction and within swing width
-            if 0 < proj_dist <= WEAPON_REACH and perp_dist < ATTACK_CONE_HALF_WIDTH:
-                return True
+        # Calculate distance to target
+        distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
         
-        return False
+        # Must be within weapon reach and not at same position
+        if distance <= 0 or distance > WEAPON_REACH:
+            return False
+        
+        # Interpolate cone half-angle based on distance (wider at range)
+        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
+        t = distance / WEAPON_REACH  # 0 at player, 1 at max range
+        half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
+        
+        # Calculate angle to target
+        angle_to_target = math.atan2(rel_y, rel_x)
+        
+        # Calculate angular difference (handle wraparound)
+        angle_diff = angle_to_target - attack_angle
+        # Normalize to [-pi, pi]
+        while angle_diff > math.pi:
+            angle_diff -= 2 * math.pi
+        while angle_diff < -math.pi:
+            angle_diff += 2 * math.pi
+        
+        # Check if within interpolated cone angle
+        return abs(angle_diff) <= half_cone_rad
     
     def _get_chars_in_attack_cone(self):
         """Get all characters currently in the player's attack cone.
@@ -3266,97 +3277,138 @@ void main() {
         return targets
     
     def _draw_player_attack_cone(self, player, pixel_cx, pixel_cy, cell_size):
-        """Draw the player's directional attack hitbox.
+        """Draw the player's directional attack cone as a truncated wedge.
         
         This shows the actual hit zone used by resolve_attack():
-        - Rectangle extending WEAPON_REACH in facing direction
-        - Width of ATTACK_CONE_HALF_WIDTH on each side (0.7 cells each side)
+        - Truncated wedge extending from near player to WEAPON_REACH
+        - ATTACK_CONE_BASE_ANGLE at the base (near player)
+        - ATTACK_CONE_ANGLE at max range (outer edge)
         
         Args:
             player: Player character
             pixel_cx, pixel_cy: Screen center position
             cell_size: Current cell size in pixels
         """
-        facing = player.get('facing', 'down')
-        
-        # Get direction vector for facing
-        facing_vectors = {
-            'up': (0, -1),
-            'down': (0, 1),
-            'left': (-1, 0),
-            'right': (1, 0),
-            'up-left': (-0.707, -0.707),
-            'up-right': (0.707, -0.707),
-            'down-left': (-0.707, 0.707),
-            'down-right': (0.707, 0.707),
-        }
-        dx, dy = facing_vectors.get(facing, (0, 1))
-        
-        # Perpendicular vector (rotate 90 degrees)
-        perp_x, perp_y = -dy, dx
+        # Get the precise attack angle (360° aiming)
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return
         
         # Convert dimensions to pixels
         reach_px = WEAPON_REACH * cell_size
-        half_width_px = ATTACK_CONE_HALF_WIDTH * cell_size
+        base_dist_px = 0.1 * cell_size  # Small offset so base is visible
         
-        # Calculate the 4 corners of the attack rectangle
-        # Start at player position, extend forward by WEAPON_REACH
-        # Width is ATTACK_CONE_HALF_WIDTH on each side
+        # Convert cone angles to radians (half angles)
+        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
         
-        # Near corners (at player position)
-        near_left_x = pixel_cx + perp_x * half_width_px
-        near_left_y = pixel_cy + perp_y * half_width_px
-        near_right_x = pixel_cx - perp_x * half_width_px
-        near_right_y = pixel_cy - perp_y * half_width_px
+        # Number of segments for smooth arcs
+        num_segments = 12
         
-        # Far corners (at WEAPON_REACH distance)
-        far_left_x = pixel_cx + dx * reach_px + perp_x * half_width_px
-        far_left_y = pixel_cy + dy * reach_px + perp_y * half_width_px
-        far_right_x = pixel_cx + dx * reach_px - perp_x * half_width_px
-        far_right_y = pixel_cy + dy * reach_px - perp_y * half_width_px
-        
-        # Draw filled quad using two triangles
         cone_color = rl.Color(*DEBUG_COLOR_ATTACK_CONE)
-        
-        # Triangle 1: near_left, far_left, far_right
-        rl.draw_triangle(
-            rl.Vector2(near_left_x, near_left_y),
-            rl.Vector2(far_left_x, far_left_y),
-            rl.Vector2(far_right_x, far_right_y),
-            cone_color
-        )
-        
-        # Triangle 2: near_left, far_right, near_right
-        rl.draw_triangle(
-            rl.Vector2(near_left_x, near_left_y),
-            rl.Vector2(far_right_x, far_right_y),
-            rl.Vector2(near_right_x, near_right_y),
-            cone_color
-        )
-        
-        # Draw outline for clarity
         outline_color = rl.Color(DEBUG_COLOR_ATTACK_CONE[0], DEBUG_COLOR_ATTACK_CONE[1],
                                   DEBUG_COLOR_ATTACK_CONE[2], 200)
+        
+        # Draw filled truncated wedge using quads (as two triangles each)
+        for i in range(num_segments):
+            # Interpolate angles for inner and outer arcs at this segment
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            
+            # Inner arc angles (at base distance, use base angle)
+            inner_left = attack_angle - half_base_rad
+            inner_angle1 = inner_left + t1 * (2 * half_base_rad)
+            inner_angle2 = inner_left + t2 * (2 * half_base_rad)
+            
+            # Outer arc angles (at reach distance, use full angle)
+            outer_left = attack_angle - half_full_rad
+            outer_angle1 = outer_left + t1 * (2 * half_full_rad)
+            outer_angle2 = outer_left + t2 * (2 * half_full_rad)
+            
+            # Calculate the 4 corners of this quad
+            inner_x1 = pixel_cx + math.cos(inner_angle1) * base_dist_px
+            inner_y1 = pixel_cy + math.sin(inner_angle1) * base_dist_px
+            inner_x2 = pixel_cx + math.cos(inner_angle2) * base_dist_px
+            inner_y2 = pixel_cy + math.sin(inner_angle2) * base_dist_px
+            
+            outer_x1 = pixel_cx + math.cos(outer_angle1) * reach_px
+            outer_y1 = pixel_cy + math.sin(outer_angle1) * reach_px
+            outer_x2 = pixel_cx + math.cos(outer_angle2) * reach_px
+            outer_y2 = pixel_cy + math.sin(outer_angle2) * reach_px
+            
+            # Draw quad as two triangles
+            rl.draw_triangle(
+                rl.Vector2(inner_x1, inner_y1),
+                rl.Vector2(outer_x1, outer_y1),
+                rl.Vector2(outer_x2, outer_y2),
+                cone_color
+            )
+            rl.draw_triangle(
+                rl.Vector2(inner_x1, inner_y1),
+                rl.Vector2(outer_x2, outer_y2),
+                rl.Vector2(inner_x2, inner_y2),
+                cone_color
+            )
+        
+        # Draw outline - left edge (from inner to outer)
+        inner_left_x = pixel_cx + math.cos(attack_angle - half_base_rad) * base_dist_px
+        inner_left_y = pixel_cy + math.sin(attack_angle - half_base_rad) * base_dist_px
+        outer_left_x = pixel_cx + math.cos(attack_angle - half_full_rad) * reach_px
+        outer_left_y = pixel_cy + math.sin(attack_angle - half_full_rad) * reach_px
         rl.draw_line_ex(
-            rl.Vector2(near_left_x, near_left_y),
-            rl.Vector2(far_left_x, far_left_y),
+            rl.Vector2(inner_left_x, inner_left_y),
+            rl.Vector2(outer_left_x, outer_left_y),
             2, outline_color
         )
+        
+        # Draw outline - right edge (from inner to outer)
+        inner_right_x = pixel_cx + math.cos(attack_angle + half_base_rad) * base_dist_px
+        inner_right_y = pixel_cy + math.sin(attack_angle + half_base_rad) * base_dist_px
+        outer_right_x = pixel_cx + math.cos(attack_angle + half_full_rad) * reach_px
+        outer_right_y = pixel_cy + math.sin(attack_angle + half_full_rad) * reach_px
         rl.draw_line_ex(
-            rl.Vector2(far_left_x, far_left_y),
-            rl.Vector2(far_right_x, far_right_y),
+            rl.Vector2(inner_right_x, inner_right_y),
+            rl.Vector2(outer_right_x, outer_right_y),
             2, outline_color
         )
-        rl.draw_line_ex(
-            rl.Vector2(far_right_x, far_right_y),
-            rl.Vector2(near_right_x, near_right_y),
-            2, outline_color
-        )
-        rl.draw_line_ex(
-            rl.Vector2(near_right_x, near_right_y),
-            rl.Vector2(near_left_x, near_left_y),
-            2, outline_color
-        )
+        
+        # Draw outline - inner arc (base)
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            inner_left = attack_angle - half_base_rad
+            angle1 = inner_left + t1 * (2 * half_base_rad)
+            angle2 = inner_left + t2 * (2 * half_base_rad)
+            
+            x1 = pixel_cx + math.cos(angle1) * base_dist_px
+            y1 = pixel_cy + math.sin(angle1) * base_dist_px
+            x2 = pixel_cx + math.cos(angle2) * base_dist_px
+            y2 = pixel_cy + math.sin(angle2) * base_dist_px
+            
+            rl.draw_line_ex(
+                rl.Vector2(x1, y1),
+                rl.Vector2(x2, y2),
+                2, outline_color
+            )
+        
+        # Draw outline - outer arc (at reach)
+        for i in range(num_segments):
+            t1 = i / num_segments
+            t2 = (i + 1) / num_segments
+            outer_left = attack_angle - half_full_rad
+            angle1 = outer_left + t1 * (2 * half_full_rad)
+            angle2 = outer_left + t2 * (2 * half_full_rad)
+            
+            x1 = pixel_cx + math.cos(angle1) * reach_px
+            y1 = pixel_cy + math.sin(angle1) * reach_px
+            x2 = pixel_cx + math.cos(angle2) * reach_px
+            y2 = pixel_cy + math.sin(angle2) * reach_px
+            
+            rl.draw_line_ex(
+                rl.Vector2(x1, y1),
+                rl.Vector2(x2, y2),
+                2, outline_color
+            )
 
     def _draw_character_ui(self, ui_info):
         """Draw character name and health/stamina bars (on top of everything)"""

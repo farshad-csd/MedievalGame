@@ -91,6 +91,7 @@ class Character:
         # Attack animation state
         self.attack_animation_start = None
         self.attack_direction = None
+        self.attack_angle = None  # Precise angle in radians for 360° aiming (player only)
         self.last_attack_tick = 0
         
 
@@ -777,15 +778,20 @@ class Character:
                 return False
         return True
     
-    def start_attack(self):
+    def start_attack(self, angle=None):
         """Begin attack animation.
         
+        Args:
+            angle: Optional precise attack angle in radians (for 360° aiming).
+                   If None, uses 8-direction facing (for NPCs).
+        
         Returns:
-            Attack direction string ('up', 'down', 'left', 'right')
+            Attack direction string ('up', 'down', 'left', 'right', etc.)
         """
         self.attack_animation_start = time.time()
         attack_dir = self._facing_to_attack_direction(self.facing)
         self.attack_direction = attack_dir
+        self.attack_angle = angle  # None for NPCs, radians for player
         return attack_dir
     
     def _facing_to_attack_direction(self, facing):

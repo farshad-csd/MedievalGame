@@ -228,8 +228,11 @@ class PlayerController:
         if not player.can_attack():
             return False
         
-        # Start attack animation on character
-        attack_dir = player.start_attack()
+        # Get the precise attack angle for 360° aiming (set by GUI from mouse position)
+        attack_angle = player.get('attack_angle')
+        
+        # Start attack animation on character with precise angle
+        attack_dir = player.start_attack(angle=attack_angle)
         
         # Find targets and resolve damage through game logic
         # This is the same resolution path NPCs use

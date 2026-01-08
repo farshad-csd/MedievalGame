@@ -31,7 +31,7 @@ from constants import (
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
-    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS,
+    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS, ATTACK_CONE_ANGLE, ATTACK_CONE_BASE_ANGLE,
     WHEAT_TO_BREAD_RATIO,
     BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
@@ -259,8 +259,17 @@ class GameLogic:
         
         attacker_name = attacker.get_display_name()
         
-        # Get direction vector
+        # Check if using 360° aiming (player) or 8-direction (NPCs)
+        attack_angle = attacker.get('attack_angle')
+        use_360_aiming = attack_angle is not None
+        
+        # Get direction vector (for 8-direction fallback)
         dx, dy = self._get_direction_vector(attack_direction)
+        
+        # Convert cone angles to radians (half angle for each side)
+        # Cone interpolates from BASE at player to FULL at WEAPON_REACH
+        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
         
         # Find targets in attack arc
         targets_hit = []
@@ -281,14 +290,42 @@ class GameLogic:
             rel_x = char.prevailing_x - attacker.prevailing_x
             rel_y = char.prevailing_y - attacker.prevailing_y
             
-            # Project onto attack direction
-            if dx != 0 or dy != 0:
-                proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
-                perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
+            # Calculate distance to target
+            distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+            
+            # Must be within weapon reach and not at same position
+            if distance <= 0 or distance > WEAPON_REACH:
+                continue
+            
+            if use_360_aiming:
+                # 360° angle-based cone detection (player)
+                # Interpolate cone half-angle based on distance (wider at range)
+                t = distance / WEAPON_REACH  # 0 at player, 1 at max range
+                half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
                 
-                # Hit if within weapon reach in attack direction and within swing width
-                if 0 < proj_dist <= WEAPON_REACH and perp_dist < 0.7:
+                # Calculate angle to target
+                angle_to_target = math.atan2(rel_y, rel_x)
+                
+                # Calculate angular difference (handle wraparound)
+                angle_diff = angle_to_target - attack_angle
+                # Normalize to [-pi, pi]
+                while angle_diff > math.pi:
+                    angle_diff -= 2 * math.pi
+                while angle_diff < -math.pi:
+                    angle_diff += 2 * math.pi
+                
+                # Hit if within interpolated cone angle
+                if abs(angle_diff) <= half_cone_rad:
                     targets_hit.append(char)
+            else:
+                # 8-direction perpendicular distance method (NPCs)
+                if dx != 0 or dy != 0:
+                    proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
+                    perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
+                    
+                    # Hit if in front and within swing width
+                    if proj_dist > 0 and perp_dist < 0.7:
+                        targets_hit.append(char)
         
         # Log miss if no targets
         if not targets_hit:
