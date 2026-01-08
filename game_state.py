@@ -61,6 +61,9 @@ class GameState:
         # Death animations (purely visual - characters are removed from game logic immediately)
         self.death_animations = []  # List of {'x': float, 'y': float, 'name': str, 'start_time': float, 'facing': str, 'job': str, 'morality': int}
         
+        # Projectiles (arrows)
+        self.arrows = []  # List of {'x': float, 'y': float, 'dx': float, 'dy': float, 'distance': float, 'owner': Character, 'zone': str}
+        
         # Action log
         self.action_log = []
         self.log_total_count = 0  # Total entries ever added (for UI sync)

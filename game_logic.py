@@ -2509,6 +2509,142 @@ class GameLogic:
                 # Blocked - try to find a way through
                 moved = self._try_squeeze_movement(char, vx, vy, new_x, new_y, dt)
     
+    def update_arrows(self, dt):
+        """Update arrow projectile positions and check for hits.
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        from constants import ARROW_SPEED, ARROW_MAX_RANGE
+        
+        arrows_to_remove = []
+        
+        for arrow in self.state.arrows:
+            # Move arrow
+            arrow['x'] += arrow['dx'] * ARROW_SPEED * dt
+            arrow['y'] += arrow['dy'] * ARROW_SPEED * dt
+            arrow['distance'] += ARROW_SPEED * dt
+            
+            # Check if exceeded max range
+            if arrow['distance'] >= ARROW_MAX_RANGE:
+                arrows_to_remove.append(arrow)
+                continue
+            
+            # Check for hits on characters
+            hit_char = self._check_arrow_hit(arrow)
+            if hit_char:
+                # Deal damage
+                self._apply_arrow_damage(arrow, hit_char)
+                arrows_to_remove.append(arrow)
+                continue
+        
+        # Remove arrows that hit or expired
+        for arrow in arrows_to_remove:
+            if arrow in self.state.arrows:
+                self.state.arrows.remove(arrow)
+    
+    def _check_arrow_hit(self, arrow):
+        """Check if arrow hit any character.
+        
+        Returns:
+            Character that was hit, or None
+        """
+        for char in self.state.characters:
+            # Don't hit the owner
+            if char is arrow['owner']:
+                continue
+            
+            # Must be in same zone
+            if char.zone != arrow['zone']:
+                continue
+            
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Check distance to character center
+            if arrow['zone']:
+                char_x = char.prevailing_x
+                char_y = char.prevailing_y
+            else:
+                char_x = char.x
+                char_y = char.y
+            
+            dx = arrow['x'] - char_x
+            dy = arrow['y'] - char_y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            # Hit if within character collision radius (use a slightly larger hitbox)
+            if dist < 0.4:
+                return char
+        
+        return None
+    
+    def _apply_arrow_damage(self, arrow, target):
+        """Apply arrow damage to a target character with full aggro/witness logic."""
+        owner = arrow['owner']
+        owner_name = owner.get_display_name() if owner else "Arrow"
+        target_name = target.get_display_name()
+        
+        # Apply damage (same as melee: 2-5)
+        damage = random.randint(2, 5)
+        target.health -= damage
+        self.state.log_action(f"{owner_name}'s arrow hits {target_name} for {damage}! HP: {target.health}")
+        
+        # Set hit flash
+        target['hit_flash_until'] = self.state.ticks + 2
+        
+        # Clear face_target and intent - being hit interrupts current behavior
+        target['face_target'] = None
+        if target.intent and target.intent.get('reason') == 'bystander':
+            target.clear_intent()
+        
+        # Target remembers being attacked (if owner exists)
+        if owner:
+            self.remember_attack(target, owner, damage)
+            
+            # Check criminal status via memories
+            attacker_is_criminal = self.is_known_criminal(owner)
+            target_was_criminal = self.is_known_criminal(target)
+            
+            # If attacking an innocent, this is a crime
+            if not target_was_criminal:
+                # Attacker records they committed a crime (only once)
+                if not attacker_is_criminal:
+                    owner.add_memory('committed_crime', owner, self.state.ticks,
+                                       location=(owner.x, owner.y),
+                                       intensity=CRIME_INTENSITY_ASSAULT,
+                                       source='self',
+                                       crime_type='assault', victim=target)
+                    attacker_is_criminal = True
+                
+                # Witness EVERY attack against an innocent (not just first)
+                if target.health > 0:
+                    self.witness_crime(owner, target, 'assault')
+            
+            # Handle death
+            if target.health <= 0:
+                if not attacker_is_criminal and target_was_criminal:
+                    self.state.log_action(f"{owner_name} killed {target_name} with an arrow (justified)")
+                else:
+                    # Murder - record and witness
+                    owner.add_memory('committed_crime', owner, self.state.ticks,
+                                       location=(owner.x, owner.y),
+                                       intensity=CRIME_INTENSITY_MURDER,
+                                       source='self',
+                                       crime_type='murder', victim=target)
+                    self.witness_crime(owner, target, 'murder')
+                
+                # Transfer items
+                owner.transfer_all_items_from(target)
+            
+            # Broadcast violence to nearby characters
+            self.broadcast_violence(owner, target)
+        else:
+            # No owner - just handle death
+            if target.health <= 0:
+                self.state.log_action(f"{target_name} was killed by an arrow!")
+    
     def _try_squeeze_movement(self, char, vx, vy, new_x, new_y, dt):
         """Try to squeeze past an obstacle when blocked.
         

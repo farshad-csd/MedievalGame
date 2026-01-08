@@ -142,6 +142,12 @@ ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player p
 BLOCK_MOVEMENT_SPEED = 0.4            # Movement speed while blocking (cells/second)
 SHIELD_COLOR = (80, 160, 255, 180)    # Light blue, semi-transparent
 
+# Arrow/projectile settings
+ARROW_SPEED = 8.0                    # cells per second
+ARROW_MAX_RANGE = 13.0                # cells before disappearing
+ARROW_LENGTH = 0.4                    # visual length in cells
+ARROW_THICKNESS = 2                   # pixels
+
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
 # =============================================================================

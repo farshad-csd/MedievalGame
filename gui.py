@@ -176,6 +176,7 @@ class InputState:
         self.attack = False
         self.combat_mode_toggle = False
         self.block = False  # Held while spacebar is down
+        self.shoot = False  # F key to shoot arrow
         self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
@@ -630,6 +631,7 @@ class BoardGUI:
         # Reset per-frame input state
         self.input.attack = False
         self.input.combat_mode_toggle = False
+        self.input.shoot = False
         self.input.pause = False
         self.input.inventory_toggle = False
         self.input.environment_menu_toggle = False
@@ -780,6 +782,10 @@ class BoardGUI:
         
         # Block (held while spacebar is down)
         self.input.block = rl.is_key_down(rl.KEY_SPACE)
+        
+        # Shoot arrow (F key)
+        if rl.is_key_pressed(rl.KEY_F):
+            self.input.shoot = True
     
     def _handle_mouse_input(self):
         """Handle mouse input"""
@@ -950,6 +956,44 @@ class BoardGUI:
             player = self.state.player
             if player and player.get('combat_mode', False):
                 self.player_controller.handle_attack_input()
+        
+        # Shoot arrow requires combat mode
+        if self.input.shoot:
+            player = self.state.player
+            if player and player.get('combat_mode', False):
+                self._shoot_arrow(player)
+    
+    def _shoot_arrow(self, player):
+        """Spawn an arrow projectile in the direction player is aiming."""
+        import math
+        
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return
+        
+        # Get player position
+        if player.zone:
+            start_x = player.prevailing_x
+            start_y = player.prevailing_y
+        else:
+            start_x = player.x
+            start_y = player.y
+        
+        # Calculate direction vector
+        dx = math.cos(attack_angle)
+        dy = math.sin(attack_angle)
+        
+        # Create arrow
+        arrow = {
+            'x': start_x,
+            'y': start_y,
+            'dx': dx,
+            'dy': dy,
+            'distance': 0.0,
+            'owner': player,
+            'zone': player.zone,
+        }
+        self.state.arrows.append(arrow)
     
     def _handle_unified_interact(self):
         """Handle unified interact (E key / A button).
@@ -1460,6 +1504,7 @@ class BoardGUI:
                 step = min(remaining, 0.05)
                 self.player_controller.update_position(step)
                 self.logic.update_npc_positions(step)
+                self.logic.update_arrows(step)
                 remaining -= step
             
             self._accumulated_time -= tick_duration
@@ -1469,6 +1514,7 @@ class BoardGUI:
             step = min(self._accumulated_time, 0.05)
             self.player_controller.update_position(step)
             self.logic.update_npc_positions(step)
+            self.logic.update_arrows(step)
         
         # Center camera on player if following
         if self.camera_following_player and self.state.player:
@@ -1966,6 +2012,9 @@ class BoardGUI:
         
         # Draw outlines for perceived occluded characters
         self._draw_perceived_outlines()
+        
+        # Draw arrows (projectiles)
+        self._draw_arrows(rendering_zone)
         
         # Draw red outlines for characters in player's attack cone (when in combat mode)
         chars_in_attack_cone = self._get_chars_in_attack_cone()
@@ -3229,6 +3278,33 @@ void main() {
             # Fallback to blue circle if texture not found
             shield_color = rl.Color(*SHIELD_COLOR)
             rl.draw_circle(int(pixel_cx), int(pixel_cy), 4, shield_color)
+    
+    def _draw_arrows(self, rendering_zone):
+        """Draw all arrow projectiles as thin black lines."""
+        from constants import ARROW_LENGTH, ARROW_THICKNESS
+        
+        cell_size = self._cam_cell_size
+        
+        for arrow in self.state.arrows:
+            # Only draw arrows in current zone
+            if arrow['zone'] != rendering_zone:
+                continue
+            
+            # Get arrow position in screen coords
+            screen_x, screen_y = self._world_to_screen(arrow['x'], arrow['y'])
+            
+            # Calculate end point based on direction and length
+            end_x = arrow['x'] - arrow['dx'] * ARROW_LENGTH
+            end_y = arrow['y'] - arrow['dy'] * ARROW_LENGTH
+            screen_end_x, screen_end_y = self._world_to_screen(end_x, end_y)
+            
+            # Draw thin black line
+            rl.draw_line_ex(
+                rl.Vector2(int(screen_x), int(screen_y)),
+                rl.Vector2(int(screen_end_x), int(screen_end_y)),
+                ARROW_THICKNESS,
+                rl.BLACK
+            )
     
     def _draw_character_hitboxes(self):
         """Draw debug visualization of character hitboxes and collision radii.
