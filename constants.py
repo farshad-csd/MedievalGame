@@ -169,7 +169,7 @@ ARROW_DROP_MAX_ANGLE = 20             # Maximum drop angle in degrees (toward gr
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
 # =============================================================================
-DEBUG_TRIPLE_PLAYER_HEALTH = False    # Player starts with 300 HP instead of 100
+DEBUG_TRIPLE_PLAYER_HEALTH = True    # Player starts with 300 HP instead of 100
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS

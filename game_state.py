@@ -365,7 +365,7 @@ class GameState:
         # Currently just trees, but will expand to other obstacles
         return self.interactables.has_tree_at(cell_x, cell_y)
     
-    def is_position_blocked(self, x, y, exclude_char=None, zone=None):
+    def is_position_blocked(self, x, y, exclude_char=None, zone=None, check_characters=True):
         """Check if a position would hard-collide with any character or obstacle.
         Uses a small collision radius to allow characters to squeeze past each other
         like in ALTTP - characters can overlap significantly but can't stand on same spot.
@@ -375,6 +375,8 @@ class GameState:
             exclude_char: Character to exclude from check (for self-collision)
             zone: Which zone to check collisions in (None=exterior, interior_name=inside)
                   If not provided but exclude_char is, uses exclude_char's zone
+            check_characters: Whether to check character collisions (default True)
+                              Set to False for projectiles that handle character hits separately
         """
         # Infer zone from exclude_char if not explicitly provided
         if zone is None and exclude_char is not None:
@@ -452,30 +454,31 @@ class GameState:
                 return True
         
         # Check character collisions - only in same zone
-        for char in self.characters:
-            if char is exclude_char:
-                continue
-            # Only collide with characters in the same zone
-            char_zone = char.zone if hasattr(char, 'zone') else None
-            if char_zone != zone:
-                continue
-            # Use interior coords when in interior, world coords otherwise
-            if zone is not None:
-                char_x = char.prevailing_x
-                char_y = char.prevailing_y
-            else:
-                char_x = char.x
-                char_y = char.y
-            # Use small collision radius - characters can squeeze past each other
-            dx = abs(char_x - x)
-            dy = abs(char_y - y)
-            # Only block if centers are VERY close (within 2x collision radius)
-            collision_dist = CHARACTER_COLLISION_RADIUS * 2
-            if dx < collision_dist and dy < collision_dist:
-                # Use circular distance for smoother collision
-                dist = math.sqrt(dx * dx + dy * dy)
-                if dist < collision_dist:
-                    return True
+        if check_characters:
+            for char in self.characters:
+                if char is exclude_char:
+                    continue
+                # Only collide with characters in the same zone
+                char_zone = char.zone if hasattr(char, 'zone') else None
+                if char_zone != zone:
+                    continue
+                # Use interior coords when in interior, world coords otherwise
+                if zone is not None:
+                    char_x = char.prevailing_x
+                    char_y = char.prevailing_y
+                else:
+                    char_x = char.x
+                    char_y = char.y
+                # Use small collision radius - characters can squeeze past each other
+                dx = abs(char_x - x)
+                dy = abs(char_y - y)
+                # Only block if centers are VERY close (within 2x collision radius)
+                collision_dist = CHARACTER_COLLISION_RADIUS * 2
+                if dx < collision_dist and dy < collision_dist:
+                    # Use circular distance for smoother collision
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist < collision_dist:
+                        return True
         return False
     
     def is_occupied(self, x, y):

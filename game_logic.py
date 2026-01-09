@@ -2579,6 +2579,15 @@ class GameLogic:
                 arrow['stuck_time'] = time.time()
                 continue
             
+            # Check for collision with obstacles (trees, houses, etc.)
+            # Use check_characters=False since we handle character hits separately
+            if self.state.is_position_blocked(arrow['x'], arrow['y'], 
+                                               zone=arrow['zone'],
+                                               check_characters=False):
+                arrow['stuck'] = True
+                arrow['stuck_time'] = time.time()
+                continue
+            
             # Check for hits on characters
             hit_char = self._check_arrow_hit(arrow)
             if hit_char:
