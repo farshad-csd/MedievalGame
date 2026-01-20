@@ -5188,7 +5188,7 @@ class GameLogic:
 
     def _process_deaths(self):
         """Remove dead characters from game and create corpse interactables"""
-        from static_interactables import Corpse
+        from world_objects import Corpse
 
         dead_chars = [char for char in self.state.characters if char['health'] <= 0]
         for char in dead_chars:
