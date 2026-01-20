@@ -119,6 +119,7 @@ class InventoryMenu:
         
         # Held item state (Minecraft-style cursor item)
         self.held_item = None  # {'type': str, 'amount': int} or None
+        self._held_was_equipped = False  # Track if held item was equipped weapon
         
         # Slot geometry cache (populated during render for hit detection)
         self._slot_rects = {}  # {('section', index): (x, y, w, h)}
@@ -212,6 +213,7 @@ class InventoryMenu:
         if self.held_item and self.state.player:
             self._return_held_item_to_inventory()
         self.held_item = None
+        self._held_was_equipped = False
         self._viewing_barrel = None
         self.is_open = False
     
@@ -224,6 +226,7 @@ class InventoryMenu:
         inventory = player.inventory
         held_type = self.held_item['type']
         stack_limit = get_stack_limit(held_type)
+        was_equipped = getattr(self, '_held_was_equipped', False)
         
         # First try to stack with existing items of same type
         for i, slot in enumerate(inventory):
@@ -232,6 +235,7 @@ class InventoryMenu:
                     # Unlimited stacking - combine everything
                     slot['amount'] = slot.get('amount', 0) + self.held_item['amount']
                     self.held_item = None
+                    self._held_was_equipped = False
                     return
                 else:
                     space = stack_limit - slot.get('amount', 0)
@@ -241,18 +245,24 @@ class InventoryMenu:
                         self.held_item['amount'] -= transfer
                         if self.held_item['amount'] <= 0:
                             self.held_item = None
+                            self._held_was_equipped = False
                             return
         
         # Then try empty slots
         for i, slot in enumerate(inventory):
             if slot is None:
                 inventory[i] = self.held_item.copy()
+                # If this was an equipped weapon, re-equip it in new slot
+                if was_equipped:
+                    player.equipped_weapon = i
                 self.held_item = None
+                self._held_was_equipped = False
                 return
         
         # If still holding item, drop to ground (inventory full)
         if self.held_item:
             self._drop_held_item_to_ground(player)
+            self._held_was_equipped = False
     
     def toggle(self):
         """Toggle the inventory menu open/closed."""
@@ -283,7 +293,7 @@ class InventoryMenu:
         self.mouse_right_click = mouse_right_click
         self.gamepad_connected = gamepad_connected
         
-        # Handle shift+click for quick-move (Minecraft style)
+        # Handle shift+click for quick-move (all sections)
         if self.is_open and not self.context_menu_open and not self._confirm_popup_open and mouse_left_click and shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
@@ -294,9 +304,15 @@ class InventoryMenu:
                 elif section == 'barrel':
                     self._quick_move_barrel_to_inventory(index)
                     return  # Don't process normal click
-                # Note: inventory shift+click opens context menu (handled in gui.py)
+                elif section == 'inventory':
+                    # Quick-move to barrel if viewing one, otherwise to ground
+                    if self._viewing_barrel is not None:
+                        self._quick_move_inventory_to_barrel(index)
+                    else:
+                        self._quick_move_inventory_to_ground(index)
+                    return  # Don't process normal click
         
-        # Handle mouse clicks on inventory slots (but not if shift is held or popup is open)
+        # Handle mouse clicks on slots (but not if shift is held or popup is open)
         if self.is_open and not self.context_menu_open and not self._confirm_popup_open and (mouse_left_click or mouse_right_click) and not shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
@@ -305,16 +321,23 @@ class InventoryMenu:
                     if mouse_left_click:
                         self._interact_slot_full(index)
                     elif mouse_right_click:
-                        self._interact_slot_single(index)
+                        # Right-click behavior depends on whether holding an item:
+                        # - Holding item: drop 1 into slot (if empty or compatible)
+                        # - Not holding: context menu (handled in gui.py)
+                        if self.held_item is not None:
+                            self._interact_slot_single(index)
+                        # Context menu opening is handled in gui.py (when not holding)
                 elif section == 'ground':
                     if mouse_left_click:
                         self._interact_ground_slot_full(index)
                     elif mouse_right_click:
+                        # Right-click on ground: if holding item and slot empty, drop single; else pick up half
                         self._interact_ground_slot_single(index)
                 elif section == 'barrel':
                     if mouse_left_click:
                         self._interact_barrel_slot_full(index)
                     elif mouse_right_click:
+                        # Right-click on barrel: if holding item and slot empty, drop single; else pick up half
                         self._interact_barrel_slot_single(index)
     
     def update_scroll(self):
@@ -459,12 +482,20 @@ class InventoryMenu:
             # Pick up entire stack from slot
             if slot_item is not None:
                 self.held_item = slot_item.copy()
+                # Track if we're picking up the equipped weapon
+                self._held_was_equipped = (player.equipped_weapon == slot_index)
+                if self._held_was_equipped:
+                    player.equipped_weapon = None
                 inventory[slot_index] = None
         else:
             # We're holding something
             if slot_item is None:
                 # Place entire held stack in empty slot
                 inventory[slot_index] = self.held_item.copy()
+                # If we were holding an equipped weapon, update the slot reference
+                if getattr(self, '_held_was_equipped', False):
+                    player.equipped_weapon = slot_index
+                    self._held_was_equipped = False
                 self.held_item = None
             elif slot_item.get('type') == self.held_item.get('type'):
                 # Same type - try to stack
@@ -472,6 +503,7 @@ class InventoryMenu:
                 if stack_limit is None:
                     # Unlimited stacking - combine everything
                     slot_item['amount'] = slot_item.get('amount', 0) + self.held_item['amount']
+                    self._held_was_equipped = False
                     self.held_item = None
                 else:
                     space = stack_limit - slot_item.get('amount', 0)
@@ -480,14 +512,29 @@ class InventoryMenu:
                         slot_item['amount'] = slot_item.get('amount', 0) + transfer
                         self.held_item['amount'] -= transfer
                         if self.held_item['amount'] <= 0:
+                            self._held_was_equipped = False
                             self.held_item = None
                     else:
                         # Stack full - swap
                         inventory[slot_index] = self.held_item.copy()
+                        old_slot_was_equipped = (player.equipped_weapon == slot_index)
+                        # If we were holding equipped weapon, it goes to this slot
+                        if getattr(self, '_held_was_equipped', False):
+                            player.equipped_weapon = slot_index
+                        elif old_slot_was_equipped:
+                            player.equipped_weapon = None  # Old equipped is now held
+                        self._held_was_equipped = old_slot_was_equipped
                         self.held_item = slot_item.copy()
             else:
                 # Different type - swap
                 inventory[slot_index] = self.held_item.copy()
+                old_slot_was_equipped = (player.equipped_weapon == slot_index)
+                # If we were holding equipped weapon, it goes to this slot
+                if getattr(self, '_held_was_equipped', False):
+                    player.equipped_weapon = slot_index
+                elif old_slot_was_equipped:
+                    player.equipped_weapon = None  # Old equipped is now held
+                self._held_was_equipped = old_slot_was_equipped
                 self.held_item = slot_item.copy()
     
     def _interact_slot_single(self, slot_index):
@@ -517,7 +564,12 @@ class InventoryMenu:
                 
                 if leave > 0:
                     slot_item['amount'] = leave
+                    # Weapon stays equipped if there's still items in the slot
                 else:
+                    # Track if we're picking up the equipped weapon
+                    self._held_was_equipped = (player.equipped_weapon == slot_index)
+                    if self._held_was_equipped:
+                        player.equipped_weapon = None
                     inventory[slot_index] = None
         else:
             # We're holding something - place single item
@@ -526,6 +578,10 @@ class InventoryMenu:
                 inventory[slot_index] = {'type': self.held_item['type'], 'amount': 1}
                 self.held_item['amount'] -= 1
                 if self.held_item['amount'] <= 0:
+                    # If placing the last of an equipped weapon, equip it in new slot
+                    if getattr(self, '_held_was_equipped', False):
+                        player.equipped_weapon = slot_index
+                        self._held_was_equipped = False
                     self.held_item = None
             elif slot_item.get('type') == self.held_item.get('type'):
                 # Same type - place 1 if room
@@ -535,6 +591,7 @@ class InventoryMenu:
                     slot_item['amount'] = slot_item.get('amount', 0) + 1
                     self.held_item['amount'] -= 1
                     if self.held_item['amount'] <= 0:
+                        self._held_was_equipped = False
                         self.held_item = None
             # Different type - do nothing (can't place)
     
@@ -611,7 +668,7 @@ class InventoryMenu:
             return  # No item, no menu
         
         # Get available options for this item
-        options = self._get_context_options(item)
+        options = self._get_context_options(item, slot_index)
         if not options:
             return  # No options available
         
@@ -627,22 +684,38 @@ class InventoryMenu:
         self.context_menu_options = []
         self.context_menu_selected = 0
     
-    def _get_context_options(self, item):
+    def _get_context_options(self, item, slot_index=None):
         """
         Get available context menu options for an item.
         
         Args:
             item: Item dict with 'type' and 'amount'
+            slot_index: Inventory slot index (needed for equip check)
             
         Returns:
             List of option strings
         """
         options = []
         item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        amount = item.get('amount', 1)
+        
+        # Pick Up Half option for stackable items with more than 1
+        if amount > 1:
+            options.append('Pick Up Half')
         
         # Bread can be eaten
         if item_type == 'bread':
             options.append('Use')
+        
+        # Weapons can be equipped/unequipped
+        if item_info.get('category') == 'weapon':
+            player = self.state.player
+            if player and slot_index is not None:
+                if player.equipped_weapon == slot_index:
+                    options.append('Unequip')
+                else:
+                    options.append('Equip')
         
         # Move to Barrel option when viewing a barrel
         if self._viewing_barrel:
@@ -748,6 +821,12 @@ class InventoryMenu:
         
         if action == 'Use':
             self._use_item(slot_index, item)
+        elif action == 'Pick Up Half':
+            self._pick_up_half(slot_index)
+        elif action == 'Equip':
+            self._equip_weapon(slot_index, item)
+        elif action == 'Unequip':
+            self._unequip_weapon(slot_index)
         elif action == 'Move to Barrel':
             self._quick_move_inventory_to_barrel(slot_index)
         elif action == 'Drop':
@@ -779,6 +858,97 @@ class InventoryMenu:
                     msg = f"{player.get_display_name()} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}"
                 self.state.log_action(msg)
     
+    def _pick_up_half(self, slot_index):
+        """
+        Pick up half of a stack from an inventory slot (like right-click in Minecraft).
+        
+        Args:
+            slot_index: Inventory slot index
+        """
+        player = self.state.player
+        if not player or self.held_item is not None:
+            return  # Can't pick up if already holding something
+        
+        inventory = player.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+        
+        item = inventory[slot_index]
+        if item is None:
+            return
+        
+        amount = item.get('amount', 1)
+        if amount <= 1:
+            # Just pick up the whole thing
+            self.held_item = item
+            inventory[slot_index] = None
+        else:
+            # Pick up half (rounded up)
+            half = (amount + 1) // 2
+            self.held_item = {'type': item['type'], 'amount': half}
+            item['amount'] = amount - half
+            if item['amount'] <= 0:
+                inventory[slot_index] = None
+    
+    def _equip_weapon(self, slot_index, item):
+        """
+        Equip a weapon from a specific inventory slot.
+        
+        Args:
+            slot_index: Inventory slot index
+            item: Item dict
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        
+        # Verify it's a weapon
+        if item_info.get('category') != 'weapon':
+            return
+        
+        # Unequip current weapon if any (only one weapon at a time)
+        if player.equipped_weapon is not None:
+            # Just clear the equipped slot - item stays in inventory
+            old_slot = player.equipped_weapon
+            old_item = player.inventory[old_slot] if old_slot < len(player.inventory) else None
+            if old_item:
+                old_name = ITEMS.get(old_item.get('type', ''), {}).get('name', 'weapon')
+                self.state.log_action(f"{player.get_display_name()} unequipped {old_name}")
+        
+        # Equip the new weapon
+        player.equipped_weapon = slot_index
+        weapon_name = item_info.get('name', item_type)
+        self.state.log_action(f"{player.get_display_name()} equipped {weapon_name}")
+    
+    def _unequip_weapon(self, slot_index):
+        """
+        Unequip the weapon in a specific inventory slot.
+        
+        Args:
+            slot_index: Inventory slot index
+        """
+        player = self.state.player
+        if not player:
+            return
+        
+        # Verify this slot is actually equipped
+        if player.equipped_weapon != slot_index:
+            return
+        
+        # Get weapon name for log
+        item = player.inventory[slot_index] if slot_index < len(player.inventory) else None
+        if item:
+            item_type = item.get('type', '')
+            item_info = ITEMS.get(item_type, {})
+            weapon_name = item_info.get('name', item_type)
+            self.state.log_action(f"{player.get_display_name()} unequipped {weapon_name}")
+        
+        # Clear equipped weapon
+        player.equipped_weapon = None
+
     # =========================================================================
     # CONFIRMATION POPUP METHODS
     # =========================================================================
@@ -1529,9 +1699,15 @@ class InventoryMenu:
         # Get player inventory
         inventory = player.inventory if hasattr(player, 'inventory') else [None] * num_slots
         
+        # Get equipped weapon slot
+        equipped_slot = getattr(player, 'equipped_weapon', None)
+        
         # Adapt text sizes based on slot size
         icon_size = 14 if slot_size >= 32 else 11
         amount_size = 10 if slot_size >= 32 else 8
+        
+        # Color for equipped border (golden/yellow)
+        equipped_border_color = rl.Color(255, 200, 80, 255)
         
         for i in range(num_slots):
             slot_x = slots_x + i * (slot_size + slot_gap)
@@ -1544,6 +1720,9 @@ class InventoryMenu:
                           self.selected_section == 'inventory' and 
                           self.selected_slot == i)
             
+            # Check if this slot has the equipped weapon
+            is_equipped = (equipped_slot == i)
+            
             # Draw slot background with selection highlight
             bg_color = COLOR_BG_SLOT_SELECTED if is_selected else COLOR_BG_SLOT
             border_color = COLOR_BORDER_SELECTED if is_selected else COLOR_BORDER
@@ -1554,6 +1733,13 @@ class InventoryMenu:
             # Draw thicker border if selected
             if is_selected:
                 rl.draw_rectangle_lines(slot_x - 1, slots_y - 1, slot_size + 2, slot_size + 2, border_color)
+            
+            # Draw equipped indicator (golden border)
+            if is_equipped:
+                rl.draw_rectangle_lines(slot_x - 2, slots_y - 2, slot_size + 4, slot_size + 4, equipped_border_color)
+                rl.draw_rectangle_lines(slot_x - 1, slots_y - 1, slot_size + 2, slot_size + 2, equipped_border_color)
+                # Draw "E" indicator in top-left corner
+                rl.draw_text("E", slot_x + 2, slots_y + 1, 8, equipped_border_color)
             
             # Draw item if present
             if i < len(inventory) and inventory[i] is not None:
@@ -1981,6 +2167,10 @@ class InventoryMenu:
         if slot_item is None:
             return
         
+        # Unequip if this was the equipped weapon
+        if player.equipped_weapon == slot_index:
+            player.equipped_weapon = None
+        
         # Find valid drop position
         if player.zone:
             px, py = player.prevailing_x, player.prevailing_y
@@ -2179,6 +2369,10 @@ class InventoryMenu:
         slot_item = inventory[slot_index]
         if slot_item is None:
             return
+        
+        # Unequip if this was the equipped weapon
+        if player.equipped_weapon == slot_index:
+            player.equipped_weapon = None
         
         item_type = slot_item['type']
         amount_to_move = slot_item['amount']

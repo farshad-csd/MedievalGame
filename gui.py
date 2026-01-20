@@ -35,7 +35,7 @@ from constants import (
     AIM_CHEVRON_FEET_OFFSET, AIM_CHEVRON_THICKNESS, AIM_CHEVRON_COLOR,
     DEBUG_COLOR_COLLISION, DEBUG_COLOR_SPRITE, DEBUG_COLOR_INTERACT,
     DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
-    CHARACTER_COLLISION_RADIUS, WEAPON_REACH,
+    CHARACTER_COLLISION_RADIUS, FISTS,
     # Ongoing action constants
     ONGOING_ACTION_HARVEST_DURATION, ONGOING_ACTION_PLANT_DURATION,
     ONGOING_ACTION_CHOP_DURATION, UI_COLOR_PROGRESS_BAR,
@@ -997,34 +997,35 @@ class BoardGUI:
         in_combat_mode = player.get('combat_mode', False)
         current_tick = self.state.ticks
         
-        # Bow draw system (combat mode required)
+        # Get equipped weapon type to determine attack behavior
+        equipped_weapon_type = self._get_equipped_weapon_type()
+        
+        # Combat input handling (combat mode required)
         if in_combat_mode:
-            # Can't start bow draw if charging heavy attack
-            if not player.is_charging_heavy_attack():
-                # On shoot button press, start drawing
-                if self.input.shoot:
+            if equipped_weapon_type == 'ranged':
+                # BOW: Click to draw, release to shoot
+                # On attack button press, start drawing bow
+                if self.input.attack:
                     self.player_controller.handle_shoot_button_down(current_tick)
                 
-                # While shoot button is held, update draw
-                if self.input.shoot_held:
+                # While attack button is held, update draw
+                if self.input.attack_held:
                     self.player_controller.handle_shoot_button_held(current_tick)
-            
-            # On shoot button release, fire arrow (even if was interrupted)
-            if self.input.shoot_released:
-                if player.is_drawing_bow():
-                    result = self.player_controller.handle_shoot_button_release(current_tick)
-                    if result:
-                        arrow_speed, arrow_range = result
-                        self._shoot_arrow(player, arrow_speed, arrow_range)
-        else:
-            # Not in combat mode - cancel any drawing
-            if player.is_drawing_bow():
-                player.cancel_bow_draw()
-        
-        # Heavy attack system (combat mode required)
-        if in_combat_mode:
-            # Can't melee attack while drawing bow
-            if not player.is_drawing_bow():
+                
+                # On attack button release, fire arrow
+                if self.input.attack_released:
+                    if player.is_drawing_bow():
+                        result = self.player_controller.handle_shoot_button_release(current_tick)
+                        if result:
+                            arrow_speed, arrow_range = result
+                            self._shoot_arrow(player, arrow_speed, arrow_range)
+                    
+                # Cancel any melee charging if switching to bow
+                if player.is_charging_heavy_attack():
+                    player.cancel_heavy_attack()
+                    
+            elif equipped_weapon_type == 'melee':
+                # SWORD: Click for quick attack, hold for heavy attack
                 # On attack button press, start tracking
                 if self.input.attack:
                     self.player_controller.handle_attack_button_down(current_tick)
@@ -1036,11 +1037,122 @@ class BoardGUI:
                 # On attack button release, execute attack
                 if self.input.attack_released:
                     self.player_controller.handle_attack_button_release(current_tick)
+                
+                # Cancel any bow drawing if switching to sword
+                if player.is_drawing_bow():
+                    player.cancel_bow_draw()
+            else:
+                # No weapon equipped - use FISTS (unarmed melee combat)
+                # On attack button press, start tracking
+                if self.input.attack:
+                    self.player_controller.handle_attack_button_down(current_tick)
+                
+                # While attack button is held, update charge
+                if self.input.attack_held:
+                    self.player_controller.handle_attack_button_held(current_tick)
+                
+                # On attack button release, execute attack
+                if self.input.attack_released:
+                    self.player_controller.handle_attack_button_release(current_tick)
+                
+                # Cancel any bow drawing
+                if player.is_drawing_bow():
+                    player.cancel_bow_draw()
         else:
-            # Not in combat mode - cancel any charging
+            # Not in combat mode - cancel any combat actions
+            if player.is_drawing_bow():
+                player.cancel_bow_draw()
             if player.is_charging_heavy_attack():
                 player.cancel_heavy_attack()
     
+    def _player_has_weapon_type_equipped(self, weapon_type):
+        """Check if player has a specific type of weapon equipped.
+        
+        Args:
+            weapon_type: 'melee' or 'ranged'
+            
+        Returns:
+            True if player has that weapon type equipped
+        """
+        player = self.state.player
+        if not player:
+            return False
+        
+        equipped_slot = getattr(player, 'equipped_weapon', None)
+        if equipped_slot is None:
+            return False
+        
+        inventory = player.inventory
+        if equipped_slot < 0 or equipped_slot >= len(inventory):
+            return False
+        
+        item = inventory[equipped_slot]
+        if item is None:
+            return False
+        
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        return item_info.get('weapon_type') == weapon_type
+    
+    def _get_equipped_weapon_type(self):
+        """Get the weapon type of currently equipped weapon.
+        
+        Returns:
+            'melee', 'ranged', or None if no weapon equipped
+        """
+        player = self.state.player
+        if not player:
+            return None
+        
+        equipped_slot = getattr(player, 'equipped_weapon', None)
+        if equipped_slot is None:
+            return None
+        
+        inventory = player.inventory
+        if equipped_slot < 0 or equipped_slot >= len(inventory):
+            return None
+        
+        item = inventory[equipped_slot]
+        if item is None:
+            return None
+        
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        return item_info.get('weapon_type')
+    
+    def _get_player_weapon_reach(self):
+        """Get the weapon reach for player's currently equipped melee weapon.
+        
+        Returns weapon reach from equipped melee weapon, or FISTS range if unarmed.
+        
+        Returns:
+            Float range in cells
+        """
+        player = self.state.player
+        if not player:
+            return FISTS["range"]
+        
+        equipped_slot = getattr(player, 'equipped_weapon', None)
+        if equipped_slot is None:
+            return FISTS["range"]
+        
+        inventory = player.inventory
+        if equipped_slot < 0 or equipped_slot >= len(inventory):
+            return FISTS["range"]
+        
+        item = inventory[equipped_slot]
+        if item is None:
+            return FISTS["range"]
+        
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        
+        # Only return range for melee weapons
+        if item_info.get('weapon_type') == 'melee':
+            return item_info.get('range', FISTS["range"])
+        
+        return FISTS["range"]
+
     def _shoot_arrow(self, player, arrow_speed, arrow_range):
         """Spawn an arrow projectile in the direction player is aiming.
         
@@ -1054,7 +1166,8 @@ class BoardGUI:
         """
         import math
         import random
-        from constants import BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES
+        
+        _bow = ITEMS["bow"]
         
         attack_angle = player.get('attack_angle')
         if attack_angle is None:
@@ -1070,14 +1183,15 @@ class BoardGUI:
         
         # Calculate accuracy spread based on draw progress
         # Arrow speed scales linearly from min to max, so we can derive progress from it
-        from constants import ARROW_SPEED, ARROW_MIN_SPEED
-        if ARROW_SPEED > ARROW_MIN_SPEED:
-            draw_progress = (arrow_speed - ARROW_MIN_SPEED) / (ARROW_SPEED - ARROW_MIN_SPEED)
+        if _bow["max_speed"] > _bow["min_speed"]:
+            draw_progress = (arrow_speed - _bow["min_speed"]) / (_bow["max_speed"] - _bow["min_speed"])
         else:
             draw_progress = 1.0
         
         # Get current spread angle (in degrees, one side of center)
-        spread_degrees = BOW_SPREAD_MAX_DEGREES - draw_progress * (BOW_SPREAD_MAX_DEGREES - BOW_SPREAD_MIN_DEGREES)
+        spread_max = _bow["spread_max_degrees"]
+        spread_min = _bow["spread_min_degrees"]
+        spread_degrees = spread_max - draw_progress * (spread_max - spread_min)
         
         # Apply Gaussian deviation if there's any spread
         if spread_degrees > 0:
@@ -1298,9 +1412,10 @@ class BoardGUI:
                 mode_str = "COMBAT MODE" if player['combat_mode'] else "normal mode"
                 self.state.log_action(f"{player.get_display_name()} entered {mode_str}")
         
-        # Update block state (only in combat mode)
+        # Update block state (only in combat mode AND with sword equipped)
         if player:
-            player.is_blocking = self.input.block and player.get('combat_mode', False)
+            has_sword_equipped = self._player_has_weapon_type_equipped('melee')
+            player.is_blocking = self.input.block and player.get('combat_mode', False) and has_sword_equipped
         
         # Manual panning
         if self.input.pan_x != 0 or self.input.pan_y != 0:
@@ -1421,11 +1536,19 @@ class BoardGUI:
                 y_pressed = rl.is_gamepad_button_pressed(self.input.gamepad_id, rl.GAMEPAD_BUTTON_RIGHT_FACE_UP)
                 lb_held = rl.is_gamepad_button_down(self.input.gamepad_id, rl.GAMEPAD_BUTTON_LEFT_TRIGGER_1)
                 
-                # Shift+Click on inventory always opens context menu (mouse)
-                if self.input.mouse_left_click and rl.is_key_down(rl.KEY_LEFT_SHIFT):
+                # Right-click on inventory slot with item opens context menu (mouse)
+                # (dropping single into empty slot is handled in inventory_menu.py)
+                if self.input.mouse_right_click:
                     clicked_slot = self.inventory_menu._get_slot_at_mouse()
                     if clicked_slot and clicked_slot[0] == 'inventory':
-                        self.inventory_menu.open_context_menu(clicked_slot[1])
+                        # Only open context menu if slot has an item AND we're not holding something
+                        slot_index = clicked_slot[1]
+                        player = self.state.player
+                        slot_has_item = (player and slot_index < len(player.inventory) and 
+                                        player.inventory[slot_index] is not None)
+                        not_holding = self.inventory_menu.held_item is None
+                        if slot_has_item and not_holding:
+                            self.inventory_menu.open_context_menu(slot_index)
                 elif a_pressed or x_pressed:
                     # LB + A = quick move, otherwise normal interact
                     quick_move = lb_held and a_pressed
@@ -3398,9 +3521,9 @@ void main() {
     def _draw_arrows(self, rendering_zone):
         """Draw all arrow projectiles using arrow sprite with realistic drop."""
         import math
-        from constants import (ARROW_SPRITE_SCALE, ARROW_MAX_RANGE, 
-                               ARROW_DROP_START, ARROW_DROP_MAX_ANGLE)
+        from constants import ARROW_SPRITE_SCALE, ARROW_DROP_START, ARROW_DROP_MAX_ANGLE
         
+        _bow = ITEMS["bow"]
         arrow_tex = self.world_textures.get('arrow')
         cell_size = self._cam_cell_size
         
@@ -3419,7 +3542,7 @@ void main() {
                 angle_deg = math.degrees(angle_rad) + 135
                 
                 # Calculate drop rotation based on flight progress
-                arrow_max_range = arrow.get('max_range', ARROW_MAX_RANGE)
+                arrow_max_range = arrow.get('max_range', _bow["range"])
                 
                 if arrow.get('stuck'):
                     # Stuck arrow: use maximum drop
@@ -3547,7 +3670,8 @@ void main() {
             
             # Draw attack range (orange)
             if SHOW_ATTACK_RANGE:
-                attack_radius_px = WEAPON_REACH * cell_size
+                # Use longsword range as default display (could check equipped weapon)
+                attack_radius_px = ITEMS["longsword"]["range"] * cell_size
                 rl.draw_circle_lines(
                     int(pixel_cx), int(pixel_cy),
                     attack_radius_px,
@@ -3604,7 +3728,7 @@ void main() {
         """Check if a character is in the player's attack cone.
         
         Uses 360° angle-based cone detection matching resolve_attack() in game_logic.py.
-        Cone interpolates from BASE_ANGLE at player to full ANGLE at WEAPON_REACH.
+        Cone interpolates from BASE_ANGLE at player to full ANGLE at weapon reach.
         
         Args:
             char: Character to check
@@ -3629,6 +3753,9 @@ void main() {
         if attack_angle is None:
             return False
         
+        # Get weapon reach based on equipped weapon
+        weapon_reach = self._get_player_weapon_reach()
+        
         # Calculate relative position using prevailing coords (local when in interior)
         rel_x = char.prevailing_x - player.prevailing_x
         rel_y = char.prevailing_y - player.prevailing_y
@@ -3637,13 +3764,13 @@ void main() {
         distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
         
         # Must be within weapon reach and not at same position
-        if distance <= 0 or distance > WEAPON_REACH:
+        if distance <= 0 or distance > weapon_reach:
             return False
         
         # Interpolate cone half-angle based on distance (wider at range)
         half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
         half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
-        t = distance / WEAPON_REACH  # 0 at player, 1 at max range
+        t = distance / weapon_reach  # 0 at player, 1 at max range
         half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
         
         # Calculate angle to target
@@ -3685,7 +3812,7 @@ void main() {
         """Draw the player's directional attack cone as a truncated wedge.
         
         This shows the actual hit zone used by resolve_attack():
-        - Truncated wedge extending from near player to WEAPON_REACH
+        - Truncated wedge extending from near player to weapon reach
         - ATTACK_CONE_BASE_ANGLE at the base (near player)
         - ATTACK_CONE_ANGLE at max range (outer edge)
         - Straight edges (linear angle interpolation)
@@ -3700,8 +3827,11 @@ void main() {
         if attack_angle is None:
             return
         
+        # Get weapon reach based on equipped weapon
+        weapon_reach = self._get_player_weapon_reach()
+        
         # Convert dimensions to pixels
-        reach_px = WEAPON_REACH * cell_size
+        reach_px = weapon_reach * cell_size
         base_dist_px = 0.35 * cell_size  # Base of truncated cone starts here
         
         # Convert cone angles to radians (half angles)
@@ -3940,11 +4070,9 @@ void main() {
         accuracy spread. Lines start opaque at zero draw and fade to transparent
         at full draw (perfect accuracy).
         """
-        from constants import (
-            BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES,
-            BOW_CONE_LINE_THICKNESS, BOW_CONE_OPACITY_START, BOW_CONE_OPACITY_END,
-            ARROW_MAX_RANGE
-        )
+        from constants import BOW_CONE_LINE_THICKNESS, BOW_CONE_OPACITY_START, BOW_CONE_OPACITY_END
+        
+        _bow = ITEMS["bow"]
         
         player = self.state.player
         if not player:
@@ -3980,7 +4108,7 @@ void main() {
         pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
         
         # Cone extends to max arrow range
-        cone_length = ARROW_MAX_RANGE * cell_size
+        cone_length = _bow["range"] * cell_size
         
         # Convert spread to radians
         spread_radians = math.radians(spread_degrees)

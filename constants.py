@@ -86,17 +86,13 @@ DOOR_THRESHOLD = 0.5
 # =============================================================================
 # COMBAT SETTINGS
 # =============================================================================
-# Weapon reach - actual hit detection range for attacks
-WEAPON_REACH = 1.4  # How far a sword swing can hit
-
-# NPC combat behavior distances
+# NPC combat behavior distances (uses FISTS range as base reference)
 MELEE_ATTACK_DISTANCE = 1.4  # NPCs attack when this close to target
 COMBAT_SPACE = 1.0  # NPCs backpedal if target gets closer than this
 COMBAT_SPRINT_DISTANCE = .5  # NPCs sprint if target is this far beyond attack range
 
 # Attack timing
 ATTACK_ANIMATION_DURATION = 0.25  # Duration in seconds (250ms)
-ATTACK_COOLDOWN_TICKS = 5  # Minimum ticks between attacks
 ATTACK_DAMAGE_TICKS_BEFORE_END = 1  # Ticks before animation ends that damage registers (0 = at end)
 
 # Heavy attack settings (player only)
@@ -151,24 +147,15 @@ ATTACK_CONE_BASE_ANGLE = 150           # Total cone angle in degrees at player p
 BLOCK_MOVEMENT_SPEED = 0.4            # Movement speed while blocking (cells/second)
 SHIELD_COLOR = (80, 160, 255, 180)    # Light blue, semi-transparent
 
-# Arrow/projectile settings
-ARROW_SPEED = 6.5                    # cells per second (max, at full draw)
-ARROW_MAX_RANGE = 15.0                # cells before disappearing (max, at full draw)
+# Arrow visual settings (not weapon stats - those are in ITEMS["bow"])
 ARROW_LENGTH = 0.8                    # visual length in cells
 ARROW_THICKNESS = .8                   # pixels
-
-# Bow draw settings (player only)
-BOW_DRAW_CHARGE_TICKS = 10            # Ticks to reach full draw (~1.0 sec at 10 ticks/sec)
-ARROW_MIN_SPEED = 1                 # cells per second (at minimum draw)
-ARROW_MIN_RANGE = 0.1                 # cells before disappearing (at minimum draw)
 ARROW_SPRITE_SCALE = 0.5              # Scale multiplier for arrow sprite (1.0 = one cell wide)
 ARROW_STUCK_DURATION = 5.0            # Seconds arrow stays stuck in ground before disappearing
 ARROW_DROP_START = 0.6                # Progress (0-1) when arrow starts dropping (0.6 = last 40% of flight)
 ARROW_DROP_MAX_ANGLE = 20             # Maximum drop angle in degrees (toward ground)
 
-# Bow accuracy/spread settings
-BOW_SPREAD_MAX_DEGREES = 20.0         # Spread angle at zero draw (±30° = 60° total cone)
-BOW_SPREAD_MIN_DEGREES = 2.0          # Spread angle at full draw (0 = perfect accuracy)
+# Bow accuracy cone visual settings (weapon stats are in ITEMS["bow"])
 BOW_CONE_LINE_THICKNESS = 0.5         # Thickness of cone lines in pixels
 BOW_CONE_OPACITY_START = 100          # Cone line opacity at zero draw (0-255)
 BOW_CONE_OPACITY_END = 50              # Cone line opacity at full draw (0-255, 0 = invisible)
@@ -387,6 +374,55 @@ ITEMS = {
         "color": (160, 82, 45, 200),
         "icon": "B",
     },
+    "bow": {
+        "name": "Bow",
+        "price": 50,
+        "stack_size": 1,  # Weapons don't stack
+        "weight": 1.5,  # ~3.3 lbs (typical recurve bow)
+        "sprite": "bow.png",  # In sprites/items/
+        "color": (139, 90, 43, 200),  # Warm brown (wood)
+        "icon": ")",  # ASCII bow representation
+        "category": "weapon",
+        "weapon_type": "ranged",
+        "base_damage_min": 2,
+        "base_damage_max": 5,
+        "range": 15.0,  # Max range - cells before arrow disappears at full draw
+        "min_range": 0.1,  # Min range - cells at minimum draw
+        "draw_time_ticks": 10,  # Ticks to reach full draw (~1.0 sec)
+        "min_speed": 1,  # cells per second at minimum draw
+        "max_speed": 6.5,  # cells per second at full draw
+        "spread_max_degrees": 20.0,  # Spread at zero draw
+        "spread_min_degrees": 2.0,  # Spread at full draw
+    },
+    "longsword": {
+        "name": "Longsword",
+        "price": 35,
+        "stack_size": 1,  # Weapons don't stack
+        "weight": 2.0,  # ~4.5 lbs (typical longsword)
+        "sprite": "longsword.png",  # In sprites/items/
+        "color": (192, 192, 192, 200),  # Silver/steel
+        "icon": "/",  # ASCII sword representation
+        "category": "weapon",
+        "weapon_type": "melee",
+        "base_damage_min": 2,
+        "base_damage_max": 5,
+        "range": 1.4,  # Melee weapon reach in cells
+        "attack_speed": 5,  # Ticks between attacks
+    },
+}
+
+# =============================================================================
+# FISTS (Unarmed Combat) - Fallback when no weapon equipped
+# =============================================================================
+# Not an item - just combat stats for unarmed attacks
+# Used by players with no weapon equipped and all NPCs (until NPC equip system exists)
+FISTS = {
+    "name": "Fists",
+    "weapon_type": "melee",
+    "base_damage_min": 1,  # Weaker than weapons
+    "base_damage_max": 3,
+    "range": 1.0,  # Shorter reach than sword (1.4 * 0.7 ≈ 1.0)
+    "attack_speed": 5,  # Ticks between attacks
 }
 
 # =============================================================================

@@ -7,9 +7,10 @@ frame for a character's current state and direction.
 Designed for compatibility with eventual Rust migration (raylib-rs).
 
 Sprite Sheet Layout:
-- Civilian1_Move.png: 4 frames × 8 directions (208x416, walking animation)
-- Civilian1_Move_CombatMode.png: 4 frames × 8 directions (208x416, combat mode walking)
-- Civilian1_Attack.png: 4 frames × 8 directions (208x416, attack animation)
+- Civilian1_Move.png: 4 frames × 8 directions (208x416, walking animation - unarmed/bow/fists)
+- Civilian1_Move_swordsword.png: 4 frames × 8 directions (208x416, walking with sword in combat mode)
+- Civilian1_Attack.png: 4 frames × 8 directions (208x416, attack animation - unarmed/fists)
+- Civilian1_Attack_longsword.png: 4 frames × 8 directions (208x416, attack with sword)
 - Civilian1_Faint.png: 1 frame (52x52, death pose)
 
 Direction Row Mapping (rows 0-7, clockwise from down):
@@ -23,11 +24,12 @@ Direction Row Mapping (rows 0-7, clockwise from down):
 - Row 7: Down-Left
 
 Animation States:
-- Walk: 4 frames, loops continuously while moving (normal mode)
-- WalkCombat: 4 frames, loops continuously while moving (combat mode)
-- Attack: 4 frames, plays once when attacking (requires combat mode)
+- Walk: 4 frames, loops continuously while moving (unarmed, bow, fists, or not in combat)
+- WalkSword: 4 frames, loops continuously while moving (combat mode with sword equipped)
+- Attack: 4 frames, plays once when attacking (unarmed/fists)
+- AttackSword: 4 frames, plays once when attacking (sword equipped)
 - Death: 1 frame, shown when dead
-- Idle: Uses first frame of Walk or WalkCombat depending on combat mode
+- Idle: Uses first frame of appropriate walk animation
 """
 
 import pyray as rl
@@ -86,11 +88,14 @@ class SpriteManager:
             return
         
         # Map action names to filenames
+        # Base sprites (unarmed / bow - no visible weapon)
         sprite_files = {
             'Walk': 'sprites/Civilian1_Move.png',
-            'WalkCombat': 'sprites/Civilian1_Move_CombatMode.png',
             'Attack': 'sprites/Civilian1_Attack.png',
             'Death': 'sprites/Civilian1_Faint.png',
+            # Sword-specific sprites (longsword equipped)
+            'WalkSword': 'sprites/Civilian1_Move_swordsword.png',
+            'AttackSword': 'sprites/Civilian1_Attack_longsword.png',
         }
         
         for action, filename in sprite_files.items():
@@ -173,12 +178,19 @@ class SpriteManager:
         facing = char.get('facing', 'down')
         direction_row = self.get_direction_row(facing)
         
+        # Determine equipped weapon type for sprite selection
+        equipped_weapon_type = self._get_equipped_weapon_type(char)
+        
         # Determine animation state
-        action, frame_idx = self._get_animation_state(char, current_time)
+        action, frame_idx = self._get_animation_state(char, current_time, equipped_weapon_type)
         
         texture = self.textures.get(action)
         if texture is None:
-            return None, False
+            # Fallback to base sprites if weapon-specific not found
+            fallback_action = action.replace('Sword', '')
+            texture = self.textures.get(fallback_action)
+            if texture is None:
+                return None, False
         
         # Get source rectangle
         source_rect = self.get_frame_rect(action, direction_row, frame_idx)
@@ -186,12 +198,41 @@ class SpriteManager:
         # No flipping needed - we have all 8 directions
         return {'texture': texture, 'source': source_rect}, False
     
-    def _get_animation_state(self, char, current_time):
+    def _get_equipped_weapon_type(self, char):
+        """Get the weapon type equipped by a character.
+        
+        Args:
+            char: Character object
+            
+        Returns:
+            'melee', 'ranged', or None
+        """
+        # Import here to avoid circular imports
+        from constants import ITEMS
+        
+        equipped_slot = getattr(char, 'equipped_weapon', None)
+        if equipped_slot is None:
+            return None
+        
+        inventory = getattr(char, 'inventory', [])
+        if equipped_slot < 0 or equipped_slot >= len(inventory):
+            return None
+        
+        item = inventory[equipped_slot]
+        if item is None:
+            return None
+        
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        return item_info.get('weapon_type')
+    
+    def _get_animation_state(self, char, current_time, equipped_weapon_type=None):
         """Determine which animation and frame to show.
         
         Args:
             char: Character dictionary
             current_time: Current time
+            equipped_weapon_type: 'melee', 'ranged', or None
             
         Returns:
             Tuple of (action_name, frame_index)
@@ -201,9 +242,13 @@ class SpriteManager:
             # Death is now just 1 frame
             return 'Death', 0
         
+        # Determine if using sword sprites (melee weapon equipped)
+        use_sword_sprites = (equipped_weapon_type == 'melee')
+        
         # Check for heavy attack charging (player only) - show first attack frame
         if char.get('heavy_attack_charging', False):
-            return 'Attack', 0
+            action = 'AttackSword' if use_sword_sprites else 'Attack'
+            return action, 0
         
         # Check for attack animation
         attack_start = char.get('attack_animation_start')
@@ -212,7 +257,8 @@ class SpriteManager:
             if elapsed < ATTACK_FRAME_DURATION * FRAMES_PER_ROW:
                 frame_idx = int(elapsed / ATTACK_FRAME_DURATION)
                 frame_idx = min(frame_idx, FRAMES_PER_ROW - 1)
-                return 'Attack', frame_idx
+                action = 'AttackSword' if use_sword_sprites else 'Attack'
+                return action, frame_idx
         
         # Detect movement
         current_x = char.get('x', 0)
@@ -229,7 +275,14 @@ class SpriteManager:
         
         # Check if in combat mode
         in_combat_mode = char.get('combat_mode', False)
-        walk_action = 'WalkCombat' if in_combat_mode else 'Walk'
+        
+        # Determine walk action based on combat mode and equipped weapon
+        # Sword equipped in combat mode: use sword walk sprite
+        # Otherwise (fists, bow, or not in combat): use regular walk sprite
+        if in_combat_mode and use_sword_sprites:
+            walk_action = 'WalkSword'
+        else:
+            walk_action = 'Walk'
         
         if is_moving:
             is_sprinting = char.get('is_sprinting', False)
@@ -244,7 +297,7 @@ class SpriteManager:
             
             return walk_action, frame_idx
         else:
-            # Idle - first frame of walk (or walk combat)
+            # Idle - first frame of walk
             return walk_action, 0
     
     def recolor_red_to_color(self, frame_info, target_color, red_threshold=0.3):

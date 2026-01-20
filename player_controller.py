@@ -19,12 +19,14 @@ import time
 from constants import (
     MOVEMENT_SPEED, SPRINT_SPEED, BLOCK_MOVEMENT_SPEED, ENCUMBERED_SPEED,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
-    ATTACK_ANIMATION_DURATION, WEAPON_REACH,
+    ATTACK_ANIMATION_DURATION,
     BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
     WHEAT_TO_BREAD_RATIO,
-    ARROW_SPEED, ARROW_MAX_RANGE, ARROW_MIN_SPEED, ARROW_MIN_RANGE
 )
 from scenario_world import SIZE
+
+# Get bow stats from ITEMS
+_BOW = ITEMS["bow"]
 
 
 class PlayerController:
@@ -373,8 +375,8 @@ class PlayerController:
         
         # Calculate speed and range based on draw progress
         # Linear interpolation from min to max
-        arrow_speed = ARROW_MIN_SPEED + progress * (ARROW_SPEED - ARROW_MIN_SPEED)
-        arrow_range = ARROW_MIN_RANGE + progress * (ARROW_MAX_RANGE - ARROW_MIN_RANGE)
+        arrow_speed = _BOW["min_speed"] + progress * (_BOW["max_speed"] - _BOW["min_speed"])
+        arrow_range = _BOW["min_range"] + progress * (_BOW["range"] - _BOW["min_range"])
         
         return (arrow_speed, arrow_range)
 

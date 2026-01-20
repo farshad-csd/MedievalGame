@@ -29,16 +29,17 @@ from constants import (
     MAX_HUNGER, MAX_FATIGUE, MAX_STAMINA, INVENTORY_SLOTS, ITEMS, SKILLS,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     BREAD_PER_BITE, STARVATION_THRESHOLD,
-    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS, ATTACK_DAMAGE_TICKS_BEFORE_END,
+    ATTACK_ANIMATION_DURATION, ATTACK_DAMAGE_TICKS_BEFORE_END,
     UPDATE_INTERVAL,
     STAMINA_DRAIN_PER_TICK, STAMINA_REGEN_PER_TICK, STAMINA_REGEN_DELAY_TICKS, STAMINA_SPRINT_THRESHOLD,
     DEBUG_TRIPLE_PLAYER_HEALTH,
     HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
     HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER,
-    BOW_DRAW_CHARGE_TICKS,
-    BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES
 )
 from scenario_characters import CHARACTER_TEMPLATES
+
+# Get bow stats from ITEMS
+_BOW = ITEMS["bow"]
 
 
 class Character:
@@ -147,11 +148,20 @@ class Character:
         for skill_id, value in template.get('starting_skills', {}).items():
             self.skills[skill_id] = value
         
-        # Inventory
-        self.inventory = self._build_initial_inventory(
-            template.get('starting_money', 0),
-            template.get('starting_wheat', 0)
-        )
+        # Inventory - use starting_inventory if provided, else build from money/wheat (legacy)
+        starting_inv = template.get('starting_inventory')
+        if starting_inv is not None:
+            self.inventory = self._build_inventory_from_list(starting_inv)
+        else:
+            # Legacy fallback for old-style templates
+            self.inventory = self._build_initial_inventory(
+                template.get('starting_money', 0),
+                template.get('starting_wheat', 0)
+            )
+        
+        # Equipment - currently equipped weapon (only one at a time)
+        # Stores the inventory slot index of the equipped weapon, or None if nothing equipped
+        self.equipped_weapon = None  # int (slot index) or None
         
         # Current state
         self._job_name = template.get('starting_job')  # String name, not Job object
@@ -525,7 +535,7 @@ class Character:
     # =========================================================================
     
     def _build_initial_inventory(self, money, wheat):
-        """Build inventory from starting money and wheat amounts."""
+        """Build inventory from starting money and wheat amounts (legacy method)."""
         inventory = [None] * INVENTORY_SLOTS
         slot_idx = 0
         
@@ -542,6 +552,27 @@ class Character:
             inventory[slot_idx] = {'type': 'wheat', 'amount': stack}
             remaining_wheat -= stack
             slot_idx += 1
+        
+        return inventory
+    
+    def _build_inventory_from_list(self, inv_list):
+        """Build inventory from a list of item dicts.
+        
+        Args:
+            inv_list: List of item dicts like [{'type': 'gold', 'amount': 50}, None, ...]
+                     Can be shorter than INVENTORY_SLOTS (remaining slots will be None)
+        
+        Returns:
+            List of INVENTORY_SLOTS length with items copied from inv_list
+        """
+        inventory = [None] * INVENTORY_SLOTS
+        
+        for i, item in enumerate(inv_list):
+            if i >= INVENTORY_SLOTS:
+                break
+            if item is not None:
+                # Copy the dict so we don't share references with the template
+                inventory[i] = {'type': item['type'], 'amount': item['amount']}
         
         return inventory
     
@@ -1065,7 +1096,7 @@ class Character:
             return None
         
         ticks_held = current_tick - self.bow_draw_start_tick
-        progress = ticks_held / BOW_DRAW_CHARGE_TICKS
+        progress = ticks_held / _BOW["draw_time_ticks"]
         return min(1.0, max(0.0, progress))
     
     def release_bow_draw(self, current_tick):
@@ -1112,8 +1143,8 @@ class Character:
     def get_bow_spread_degrees(self, current_tick):
         """Get the current accuracy spread angle based on draw progress.
         
-        At zero draw, spread is BOW_SPREAD_MAX_DEGREES (±30° = 60° cone).
-        At full draw, spread is BOW_SPREAD_MIN_DEGREES (0° = perfect accuracy).
+        At zero draw, spread is max (spread_max_degrees from bow stats).
+        At full draw, spread is min (spread_min_degrees from bow stats).
         Spread decreases linearly with draw progress.
         
         Args:
@@ -1127,7 +1158,9 @@ class Character:
             return None
         
         # Linear interpolation from max to min spread
-        spread = BOW_SPREAD_MAX_DEGREES - progress * (BOW_SPREAD_MAX_DEGREES - BOW_SPREAD_MIN_DEGREES)
+        spread_max = _BOW["spread_max_degrees"]
+        spread_min = _BOW["spread_min_degrees"]
+        spread = spread_max - progress * (spread_max - spread_min)
         return spread
     
     # =========================================================================

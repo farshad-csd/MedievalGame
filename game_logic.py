@@ -10,7 +10,7 @@ import math
 import time
 from collections import deque
 from constants import (
-    DIRECTIONS, ITEMS,
+    DIRECTIONS, ITEMS, FISTS,
     MAX_HUNGER, HUNGER_DECAY, HUNGER_CRITICAL, HUNGER_CHANCE_THRESHOLD,
     STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL, 
     STARVATION_MORALITY_CHANCE, STARVATION_FREEZE_HEALTH,
@@ -24,14 +24,14 @@ from constants import (
     THEFT_PATIENCE_TICKS, THEFT_COOLDOWN_TICKS,
     FLEE_DISTANCE_DIVISOR,
     SLEEP_START_FRACTION,
-    MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, WEAPON_REACH, MELEE_ATTACK_DISTANCE, COMBAT_SPACE, COMBAT_SPRINT_DISTANCE,
+    MOVEMENT_SPEED, SPRINT_SPEED, ADJACENCY_DISTANCE, MELEE_ATTACK_DISTANCE, COMBAT_SPACE, COMBAT_SPRINT_DISTANCE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
     VENDOR_GOODS,
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
-    ATTACK_ANIMATION_DURATION, ATTACK_COOLDOWN_TICKS, ATTACK_CONE_ANGLE, ATTACK_CONE_BASE_ANGLE,
+    ATTACK_ANIMATION_DURATION, ATTACK_CONE_ANGLE, ATTACK_CONE_BASE_ANGLE,
     WHEAT_TO_BREAD_RATIO,
     BREAD_PER_BITE, BREAD_BUFFER_TARGET,
     PATROL_SPEED_MULTIPLIER, PATROL_CHECK_MIN_TICKS, PATROL_CHECK_MAX_TICKS,
@@ -83,7 +83,7 @@ class GameLogic:
     
     def is_in_combat_range(self, char1, char2):
         """Check if two characters are within weapon reach of each other.
-        Uses WEAPON_REACH for hit detection range.
+        Uses attacker's weapon reach for hit detection range.
         Uses prevailing coords (local when in interior) for same-zone checks.
         """
         # Must be in same zone to fight
@@ -93,7 +93,8 @@ class GameLogic:
         # or world coords when in exterior
         dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
                         (char1.prevailing_y - char2.prevailing_y) ** 2)
-        return dist <= WEAPON_REACH
+        weapon_stats = self.get_weapon_stats(char1)
+        return dist <= weapon_stats.get('range', FISTS['range'])
     
     def is_in_melee_range(self, char1, char2):
         """Check if two characters are close enough for NPC to decide to attack.
@@ -107,6 +108,35 @@ class GameLogic:
                         (char1.prevailing_y - char2.prevailing_y) ** 2)
         return dist <= MELEE_ATTACK_DISTANCE and dist > 0
     
+    def get_weapon_stats(self, char):
+        """Get the weapon stats for a character's current melee weapon.
+        
+        Returns stats dict with: name, weapon_type, base_damage_min, base_damage_max, range
+        Falls back to FISTS if no weapon equipped or for NPCs (no equip system yet).
+        
+        Args:
+            char: Character to get weapon stats for
+            
+        Returns:
+            Dict with weapon stats (from ITEMS entry or FISTS constant)
+        """
+        # Check if character has an equipped weapon
+        equipped_slot = getattr(char, 'equipped_weapon', None)
+        
+        if equipped_slot is not None:
+            inventory = getattr(char, 'inventory', [])
+            if 0 <= equipped_slot < len(inventory):
+                item = inventory[equipped_slot]
+                if item is not None:
+                    item_type = item.get('type', '')
+                    item_info = ITEMS.get(item_type, {})
+                    # Only use if it's a melee weapon
+                    if item_info.get('weapon_type') == 'melee':
+                        return item_info
+        
+        # Fall back to fists (unarmed combat)
+        return FISTS
+
     # =========================================================================
     # GOAL-SETTING HELPERS (cross-zone navigation)
     # =========================================================================
@@ -237,8 +267,10 @@ class GameLogic:
         # Must be in combat mode to attack
         if not char.get('combat_mode', False):
             return False
-        last_attack_tick = char.get('last_attack_tick', -ATTACK_COOLDOWN_TICKS)
-        return self.state.ticks - last_attack_tick >= ATTACK_COOLDOWN_TICKS
+        weapon_stats = self.get_weapon_stats(char)
+        attack_speed = weapon_stats.get('attack_speed', FISTS['attack_speed'])
+        last_attack_tick = char.get('last_attack_tick', -attack_speed)
+        return self.state.ticks - last_attack_tick >= attack_speed
     
     def resolve_attack(self, attacker, attack_direction=None, damage_multiplier=1.0):
         """Resolve an attack from a character.
@@ -261,6 +293,13 @@ class GameLogic:
         
         attacker_name = attacker.get_display_name()
         
+        # Get weapon stats (equipped weapon or fists)
+        weapon_stats = self.get_weapon_stats(attacker)
+        weapon_name = weapon_stats.get('name', 'Fists')
+        weapon_reach = weapon_stats.get('range', FISTS['range'])
+        damage_min = weapon_stats.get('base_damage_min', 2)
+        damage_max = weapon_stats.get('base_damage_max', 5)
+        
         # Check if using 360° aiming (player) or 8-direction (NPCs)
         attack_angle = attacker.get('attack_angle')
         use_360_aiming = attack_angle is not None
@@ -269,7 +308,7 @@ class GameLogic:
         dx, dy = self._get_direction_vector(attack_direction)
         
         # Convert cone angles to radians (half angle for each side)
-        # Cone interpolates from BASE at player to FULL at WEAPON_REACH
+        # Cone interpolates from BASE at player to FULL at weapon_reach
         half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
         half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
         
@@ -296,13 +335,13 @@ class GameLogic:
             distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
             
             # Must be within weapon reach and not at same position
-            if distance <= 0 or distance > WEAPON_REACH:
+            if distance <= 0 or distance > weapon_reach:
                 continue
             
             if use_360_aiming:
                 # 360° angle-based cone detection (player)
                 # Interpolate cone half-angle based on distance (wider at range)
-                t = distance / WEAPON_REACH  # 0 at player, 1 at max range
+                t = distance / weapon_reach  # 0 at player, 1 at max range
                 half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
                 
                 # Calculate angle to target
@@ -329,9 +368,12 @@ class GameLogic:
                     if proj_dist > 0 and perp_dist < 0.7:
                         targets_hit.append(char)
         
-        # Log miss if no targets
+        # Log miss if no targets (use appropriate verb based on weapon)
         if not targets_hit:
-            self.state.log_action(f"{attacker_name} swings sword (missed)")
+            if weapon_name == 'Fists':
+                self.state.log_action(f"{attacker_name} swings fist (missed)")
+            else:
+                self.state.log_action(f"{attacker_name} swings {weapon_name.lower()} (missed)")
             return []
         
         # Determine if attacker is a known criminal to anyone
@@ -347,7 +389,7 @@ class GameLogic:
                 continue  # Skip damage for this target
             
             # Calculate and apply damage (with multiplier for heavy attacks)
-            base_damage = random.randint(2, 5)
+            base_damage = random.randint(damage_min, damage_max)
             damage = int(base_damage * damage_multiplier)
             target.health -= damage
             
@@ -355,7 +397,10 @@ class GameLogic:
             if damage_multiplier > 1.01:
                 self.state.log_action(f"{attacker_name} HEAVY ATTACKS {target_name} for {damage}! (x{damage_multiplier:.1f}) HP: {target.health}")
             else:
-                self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
+                if weapon_name == 'Fists':
+                    self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage}! HP: {target.health}")
+                else:
+                    self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
             
             # Cancel ongoing action if player is hit
             if target.is_player and target.has_ongoing_action():
@@ -474,8 +519,8 @@ class GameLogic:
                     half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
                     half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
                     
-                    # Interpolate cone angle based on distance
-                    t = min(distance / WEAPON_REACH, 1.0)
+                    # Interpolate cone angle based on distance (relative to attacker's weapon reach)
+                    t = min(distance / weapon_reach, 1.0)
                     half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
                     
                     # Check if attacker is within block cone
@@ -2553,8 +2598,9 @@ class GameLogic:
             dt: Delta time in seconds
         """
         import time
-        from constants import ARROW_SPEED, ARROW_MAX_RANGE, ARROW_STUCK_DURATION
+        from constants import ARROW_STUCK_DURATION
         
+        _bow = ITEMS["bow"]
         arrows_to_remove = []
         
         for arrow in self.state.arrows:
@@ -2564,9 +2610,9 @@ class GameLogic:
                     arrows_to_remove.append(arrow)
                 continue
             
-            # Get per-arrow speed and range (with fallback to constants)
-            arrow_speed = arrow.get('speed', ARROW_SPEED)
-            arrow_max_range = arrow.get('max_range', ARROW_MAX_RANGE)
+            # Get per-arrow speed and range (with fallback to bow defaults)
+            arrow_speed = arrow.get('speed', _bow["max_speed"])
+            arrow_max_range = arrow.get('max_range', _bow["range"])
             
             # Move arrow
             arrow['x'] += arrow['dx'] * arrow_speed * dt
