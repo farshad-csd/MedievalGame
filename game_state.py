@@ -57,10 +57,10 @@ class GameState:
         # Character data
         self.characters = []  # List of Character instances
         self.player = None    # Reference to player Character
-        
-        # Death animations (purely visual - characters are removed from game logic immediately)
-        self.death_animations = []  # List of {'x': float, 'y': float, 'name': str, 'start_time': float, 'facing': str, 'job': str, 'morality': int}
-        
+
+        # Corpses (dead characters with lootable inventory)
+        self.corpses = []  # List of Corpse instances
+
         # Projectiles (arrows)
         self.arrows = []  # List of {'x': float, 'y': float, 'dx': float, 'dy': float, 'distance': float, 'owner': Character, 'zone': str}
         
@@ -1039,7 +1039,7 @@ class GameState:
         self.characters = []
         self.player = None
         self.farm_cells = {}
-        self.death_animations = []
+        self.corpses = []
         self.action_log = []
         self.log_total_count = 0
         self.area_map = [[None for _ in range(SIZE)] for _ in range(SIZE)]

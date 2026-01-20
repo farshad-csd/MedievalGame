@@ -119,8 +119,9 @@ class InventoryMenu:
         self._nearby_ground_items = []  # List of GroundItem objects within range
         self._ground_pickup_radius = 1.0  # How close player must be to pick up
         
-        # Barrel viewing state - when player interacts with a barrel
+        # Barrel/Corpse viewing state - when player interacts with a barrel or corpse
         self._viewing_barrel = None  # Barrel object being viewed, or None
+        self._viewing_corpse = None  # Corpse object being viewed, or None
         
         # Context menu state
         self.context_menu_open = False
@@ -180,19 +181,27 @@ class InventoryMenu:
         """Whether the menu is currently active."""
         return self._active
 
+    @property
+    def _viewing_container(self):
+        """Get the current viewing container (barrel or corpse), or None."""
+        return self._viewing_corpse if self._viewing_corpse else self._viewing_barrel
+
     # =========================================================================
     # MENU CONTROL
     # =========================================================================
 
-    def open(self, barrel=None):
+    def open(self, barrel=None, corpse=None):
         """Open the inventory menu.
-        
+
         Args:
             barrel: Optional Barrel object to view. If provided, barrel inventory
                    is shown instead of Ground section.
+            corpse: Optional Corpse object to view. If provided, corpse inventory
+                   is shown instead of Ground section.
         """
         self._active = True
-        self._viewing_barrel = barrel
+        self._viewing_barrel = barrel if not corpse else None
+        self._viewing_corpse = corpse
         # Reset selection to inventory section
         self.selected_section = 'inventory'
         self.selected_slot = 0
@@ -219,6 +228,7 @@ class InventoryMenu:
         self.held_item = None
         self._held_was_equipped = False
         self._viewing_barrel = None
+        self._viewing_corpse = None
         self._active = False
     
     def _return_held_item_to_inventory(self):
@@ -309,8 +319,8 @@ class InventoryMenu:
                     self._quick_move_barrel_to_inventory(index)
                     return  # Don't process normal click
                 elif section == 'inventory':
-                    # Quick-move to barrel if viewing one, otherwise to ground
-                    if self._viewing_barrel is not None:
+                    # Quick-move to barrel/corpse if viewing one, otherwise to ground
+                    if self._viewing_container is not None:
                         self._quick_move_inventory_to_barrel(index)
                     else:
                         self._quick_move_inventory_to_ground(index)
@@ -704,9 +714,7 @@ class InventoryMenu:
         item_info = ITEMS.get(item_type, {})
         amount = item.get('amount', 1)
         
-        # Pick Up Half option for stackable items with more than 1
-        if amount > 1:
-            options.append('Pick Up Half')
+
         
         # Bread can be eaten
         if item_type == 'bread':
@@ -721,10 +729,16 @@ class InventoryMenu:
                 else:
                     options.append('Equip')
         
-        # Move to Barrel option when viewing a barrel
-        if self._viewing_barrel:
-            options.append('Move to Barrel')
+        # Move to Barrel/Corpse option when viewing a container
+        if self._viewing_container:
+            container_name = 'Corpse' if self._viewing_corpse else 'Barrel'
+            options.append(f'Move to {container_name}')
         
+
+        # Pick Up Half option for stackable items with more than 1
+        if amount > 1:
+            options.append('Pick Up Half')
+
         # All items can be dropped
         options.append('Drop')
         
@@ -1227,11 +1241,11 @@ class InventoryMenu:
         # - barrel OR ground (dynamic rows of 5)
         
         # Determine bottom section name
-        bottom_section = 'barrel' if self._viewing_barrel else 'ground'
+        bottom_section = 'barrel' if self._viewing_container else 'ground'
         
         if section == 'barrel':
-            # Barrel navigation
-            barrel_slots = len(self._viewing_barrel.inventory) if self._viewing_barrel else 0
+            # Barrel/Corpse navigation
+            barrel_slots = len(self._viewing_container.inventory) if self._viewing_container else 0
             barrel_rows = (barrel_slots + 4) // 5
             row = slot // 5
             col = slot % 5
@@ -1412,12 +1426,24 @@ class InventoryMenu:
         calculated_slot_size = available_for_slots // 5
         slot_size = max(min_slot_size, min(max_slot_size, calculated_slot_size))
         
-        # Calculate bottom section height (barrel or ground)
-        if self._viewing_barrel:
-            # Barrel has fixed slots (typically 30 = 6 rows of 5)
-            barrel_slots = len(self._viewing_barrel.inventory)
-            barrel_rows = (barrel_slots + 4) // 5  # Ceiling division
-            bottom_section_height = 24 + barrel_rows * (slot_size + slot_gap)
+        # Calculate bottom section height (barrel/corpse or ground)
+        barrel_rows = 0  # Initialize for corpse case
+        if self._viewing_container:
+            if self._viewing_corpse:
+                # Corpse has complex layout: equipment + accessories + inventory
+                acc_slot_size = slot_size - 4
+                bottom_section_height = (
+                    24 +  # Top label
+                    12 + slot_size + 8 +  # Equipment section
+                    12 + (2 * (acc_slot_size + slot_gap)) + 8 +  # Accessories section
+                    12 + slot_size + 20  # Inventory section + padding
+                )
+                barrel_rows = 0  # Not used for corpses, but needs to be defined
+            else:
+                # Regular barrel has simple grid (typically 30 = 6 rows of 5)
+                barrel_slots = len(self._viewing_container.inventory)
+                barrel_rows = (barrel_slots + 4) // 5  # Ceiling division
+                bottom_section_height = 24 + barrel_rows * (slot_size + slot_gap)
         else:
             # Update nearby ground items cache
             self._update_nearby_ground_items(player)
@@ -1454,17 +1480,17 @@ class InventoryMenu:
         # === STATUS BAR (Health, Hunger, Weight, Gold) ===
         actual_status_height = self._draw_status_bar(player, inner_x, inner_y, inner_width, compact_mode)
         inner_y += actual_status_height + 8
-        
+
         # === EQUIPMENT AREA (Head/Body + Accessories) ===
         actual_equip_height = self._draw_equipment_area(player, inner_x, inner_y, inner_width, slot_size, compact_mode)
         inner_y += actual_equip_height + 8
-        
+
         # === BASE INVENTORY (5 slots) ===
         self._draw_storage_section(player, inner_x, inner_y, inner_width, "Base Inventory", 5, slot_size)
         inner_y += inventory_height + 8
-        
-        # === BARREL or GROUND (bottom section) ===
-        if self._viewing_barrel:
+
+        # === BARREL/CORPSE or GROUND (bottom section) ===
+        if self._viewing_container:
             self._draw_barrel_section(player, inner_x, inner_y, inner_width, slot_size, barrel_rows)
         else:
             self._draw_ground_section(player, inner_x, inner_y, inner_width, slot_size, ground_rows)
@@ -1683,60 +1709,74 @@ class InventoryMenu:
         if is_selected:
             rl.draw_rectangle_lines(x - 1, y - 1, size + 2, size + 2, border_color)
     
-    def _draw_storage_section(self, player, x, y, width, label, num_slots, slot_size=36):
-        """Draw a storage section with label and slots showing actual inventory."""
+    def _draw_storage_section(self, character, x, y, width, label, num_slots, slot_size=36,
+                              section_key='inventory', bg_color=None, border_color=None,
+                              label_color=None, slot_bg_color=None, slot_border_color=None):
+        """Draw a storage section with label and slots showing actual inventory.
+
+        Args:
+            character: Player, NPC, or Corpse object with .inventory attribute
+            section_key: Key for slot rect tracking (e.g., 'inventory', 'barrel')
+        """
         slot_gap = 4
         left_padding = 6  # Padding from left edge
-        
+
+        # Default colors
+        bg_color = bg_color or rl.Color(255, 255, 255, 5)
+        border_color = border_color or COLOR_BORDER
+        label_color = label_color or COLOR_TEXT_FAINT
+        slot_bg_color = slot_bg_color or COLOR_BG_SLOT
+        slot_border_color = slot_border_color or COLOR_BORDER
+
         # Section background
         section_height = slot_size + 24
-        rl.draw_rectangle(x, y, width, section_height, rl.Color(255, 255, 255, 5))
-        rl.draw_rectangle_lines(x, y, width, section_height, COLOR_BORDER)
-        
+        rl.draw_rectangle(x, y, width, section_height, bg_color)
+        rl.draw_rectangle_lines(x, y, width, section_height, border_color)
+
         # Label
-        rl.draw_text(label, x + 4, y + 4, 9, COLOR_TEXT_FAINT)
+        rl.draw_text(label, x + 4, y + 4, 9, label_color)
         
         # Slots - with left padding
         slots_x = x + left_padding
         slots_y = y + 18
-        
-        # Get player inventory
-        inventory = player.inventory if hasattr(player, 'inventory') else [None] * num_slots
-        
-        # Get equipped weapon slot
-        equipped_slot = getattr(player, 'equipped_weapon', None)
-        
+
+        # Get character inventory
+        inventory = character.inventory if hasattr(character, 'inventory') else [None] * num_slots
+
+        # Get equipped weapon slot (only for players)
+        equipped_slot = getattr(character, 'equipped_weapon', None)
+
         # Adapt text sizes based on slot size
         icon_size = 14 if slot_size >= 32 else 11
         amount_size = 10 if slot_size >= 32 else 8
-        
+
         # Color for equipped border (golden/yellow)
         equipped_border_color = rl.Color(255, 200, 80, 255)
-        
+
         for i in range(num_slots):
             slot_x = slots_x + i * (slot_size + slot_gap)
-            
+
             # Store slot rect for hit detection
-            self._slot_rects[('inventory', i)] = (slot_x, slots_y, slot_size, slot_size)
-            
+            self._slot_rects[(section_key, i)] = (slot_x, slots_y, slot_size, slot_size)
+
             # Check if this slot is selected (only show on gamepad)
-            is_selected = (self.gamepad_connected and 
-                          self.selected_section == 'inventory' and 
+            is_selected = (self.gamepad_connected and
+                          self.selected_section == section_key and
                           self.selected_slot == i)
-            
+
             # Check if this slot has the equipped weapon
             is_equipped = (equipped_slot == i)
-            
+
             # Draw slot background with selection highlight
-            bg_color = COLOR_BG_SLOT_SELECTED if is_selected else COLOR_BG_SLOT
-            border_color = COLOR_BORDER_SELECTED if is_selected else COLOR_BORDER
+            slot_bg = COLOR_BG_SLOT_SELECTED if is_selected else slot_bg_color
+            slot_border = COLOR_BORDER_SELECTED if is_selected else slot_border_color
             
-            rl.draw_rectangle(slot_x, slots_y, slot_size, slot_size, bg_color)
-            rl.draw_rectangle_lines(slot_x, slots_y, slot_size, slot_size, border_color)
-            
+            rl.draw_rectangle(slot_x, slots_y, slot_size, slot_size, slot_bg)
+            rl.draw_rectangle_lines(slot_x, slots_y, slot_size, slot_size, slot_border)
+
             # Draw thicker border if selected
             if is_selected:
-                rl.draw_rectangle_lines(slot_x - 1, slots_y - 1, slot_size + 2, slot_size + 2, border_color)
+                rl.draw_rectangle_lines(slot_x - 1, slots_y - 1, slot_size + 2, slot_size + 2, slot_border)
             
             # Draw equipped indicator (golden border)
             if is_equipped:
@@ -1870,27 +1910,103 @@ class InventoryMenu:
                 # Dark outline for readability
                 rl.draw_text(amount_str, amount_x + 1, amount_y + 1, amount_size, rl.Color(0, 0, 0, 200))
                 rl.draw_text(amount_str, amount_x, amount_y, amount_size, COLOR_TEXT_BRIGHT)
-    
+
+    def _draw_corpse_section(self, player, x, y, width, slot_size):
+        """Draw corpse inventory as full character layout (equipment + accessories + inventory) in red box."""
+        corpse = self._viewing_corpse
+        slot_gap = 4
+        left_padding = 6
+
+        # Calculate total height needed (match the calculation in content height)
+        acc_slot_size = slot_size - 4
+        total_height = (
+            24 +  # Top label
+            12 + slot_size + 8 +  # Equipment section
+            12 + (2 * (acc_slot_size + slot_gap)) + 8 +  # Accessories section
+            12 + slot_size + 20  # Inventory section + padding
+        )
+
+        # Red background for corpse
+        rl.draw_rectangle(x, y, width, total_height, rl.Color(80, 40, 40, 120))
+        rl.draw_rectangle_lines(x, y, width, total_height, rl.Color(180, 80, 80, 200))
+
+        # Label
+        label = f"{corpse.character_name}'s Corpse"
+        rl.draw_text(label, x + 4, y + 4, 9, rl.Color(220, 100, 100, 255))
+
+        current_y = y + 20
+
+        # Equipment row (Head + Body side by side) - empty for now
+        rl.draw_text("Equipment", x + left_padding, current_y, 8, rl.Color(180, 80, 80, 200))
+        current_y += 12
+
+        head_selected = (self.gamepad_connected and self.selected_section == 'equipment_head' and self.selected_slot == 0)
+        body_selected = (self.gamepad_connected and self.selected_section == 'equipment_body' and self.selected_slot == 0)
+
+        # Head slot
+        self._draw_equipment_slot(x + left_padding, current_y, slot_size, None, head_selected)
+        rl.draw_text("H", x + left_padding + slot_size // 2 - 3, current_y + slot_size // 2 - 5, 10, rl.Color(120, 60, 60, 200))
+
+        # Body slot
+        body_x = x + left_padding + slot_size + slot_gap
+        self._draw_equipment_slot(body_x, current_y, slot_size, None, body_selected)
+        rl.draw_text("B", body_x + slot_size // 2 - 3, current_y + slot_size // 2 - 5, 10, rl.Color(120, 60, 60, 200))
+
+        current_y += slot_size + 8
+
+        # Accessories (2 rows of 4) - empty for now
+        rl.draw_text("Accessories", x + left_padding, current_y, 8, rl.Color(180, 80, 80, 200))
+        current_y += 12
+
+        for row in range(2):
+            for col in range(4):
+                i = row * 4 + col
+                is_selected = (self.gamepad_connected and self.selected_section == 'accessories' and self.selected_slot == i)
+                slot_x = x + left_padding + col * (acc_slot_size + slot_gap)
+                slot_y = current_y + row * (acc_slot_size + slot_gap)
+                self._draw_equipment_slot(slot_x, slot_y, acc_slot_size, None, is_selected)
+
+        current_y += 2 * (acc_slot_size + slot_gap) + 8
+
+        # Base Inventory (5 slots) - use the reusable storage section method
+        # Red theme for corpse
+        self._draw_storage_section(
+            corpse, x, current_y, width, "Base Inventory", 5, slot_size,
+            section_key='barrel',  # Still use 'barrel' key for hit detection compatibility
+            bg_color=rl.Color(0, 0, 0, 0),  # Transparent - already within red box
+            border_color=rl.Color(0, 0, 0, 0),  # No border - already within red box
+            label_color=rl.Color(180, 80, 80, 200),  # Red label
+            slot_bg_color=rl.Color(60, 30, 30, 150),  # Dark red slot background
+            slot_border_color=rl.Color(140, 70, 70, 150)  # Red slot border
+        )
+
     def _draw_barrel_section(self, player, x, y, width, slot_size, num_rows):
-        """Draw the Barrel section showing barrel inventory."""
-        if not self._viewing_barrel:
+        """Draw the Barrel/Corpse section showing container inventory."""
+        if not self._viewing_container:
             return
-        
+
+        # Corpses show full character layout (equipment + accessories + inventory)
+        if self._viewing_corpse:
+            self._draw_corpse_section(player, x, y, width, slot_size)
+            return
+
+        # Regular barrel display
         slot_gap = 4
         left_padding = 6
         slots_per_row = 5
-        
+
         # Section height
         section_height = 24 + num_rows * (slot_size + slot_gap)
-        
+
         # Section background with wooden barrel color
         rl.draw_rectangle(x, y, width, section_height, rl.Color(80, 60, 40, 120))
         rl.draw_rectangle_lines(x, y, width, section_height, rl.Color(160, 120, 80, 200))
-        
-        # Label with barrel name
-        label = self._viewing_barrel.name
-        rl.draw_text(label, x + 4, y + 4, 9, rl.Color(200, 180, 140, 255))
-        
+
+        # Label with container name
+        label = self._viewing_container.name
+        label_color = rl.Color(200, 180, 140, 255)
+        rl.draw_text(label, x + 4, y + 4, 9, label_color)
+
         # Slots
         slots_x = x + left_padding
         slots_y = y + 18
@@ -1898,8 +2014,8 @@ class InventoryMenu:
         # Adapt text sizes based on slot size
         amount_size = 10 if slot_size >= 32 else 8
         
-        # Get barrel inventory
-        barrel_inventory = self._viewing_barrel.inventory
+        # Get container inventory
+        barrel_inventory = self._viewing_container.inventory
         total_slots = len(barrel_inventory)
         
         for i in range(total_slots):
@@ -2201,11 +2317,11 @@ class InventoryMenu:
     # =========================================================================
     
     def _interact_barrel_slot_full(self, slot_index):
-        """Handle left-click on a barrel slot - pick up / place / swap full stack."""
-        if not self.state.player or not self._viewing_barrel:
+        """Handle left-click on a barrel/corpse slot - pick up / place / swap full stack."""
+        if not self.state.player or not self._viewing_container:
             return
-        
-        barrel = self._viewing_barrel
+
+        barrel = self._viewing_container
         barrel_inventory = barrel.inventory
         
         if slot_index < 0 or slot_index >= len(barrel_inventory):
@@ -2255,11 +2371,11 @@ class InventoryMenu:
                 self.held_item = {'type': old_type, 'amount': old_amount}
     
     def _interact_barrel_slot_single(self, slot_index):
-        """Handle right-click on a barrel slot - pick up half / place single."""
-        if not self.state.player or not self._viewing_barrel:
+        """Handle right-click on a barrel/corpse slot - pick up half / place single."""
+        if not self.state.player or not self._viewing_container:
             return
-        
-        barrel = self._viewing_barrel
+
+        barrel = self._viewing_container
         barrel_inventory = barrel.inventory
         
         if slot_index < 0 or slot_index >= len(barrel_inventory):
@@ -2299,13 +2415,13 @@ class InventoryMenu:
             # Different type - do nothing
     
     def _quick_move_barrel_to_inventory(self, slot_index):
-        """Shift+click: Quick-move item from barrel to player inventory."""
-        if not self.state.player or not self._viewing_barrel:
+        """Shift+click: Quick-move item from barrel/corpse to player inventory."""
+        if not self.state.player or not self._viewing_container:
             return
-        
+
         player = self.state.player
         inventory = player.inventory
-        barrel = self._viewing_barrel
+        barrel = self._viewing_container
         barrel_inventory = barrel.inventory
         
         if slot_index < 0 or slot_index >= len(barrel_inventory):
@@ -2358,13 +2474,13 @@ class InventoryMenu:
             barrel_item['amount'] = amount_to_move
     
     def _quick_move_inventory_to_barrel(self, slot_index):
-        """Shift+click: Quick-move item from player inventory to barrel."""
-        if not self.state.player or not self._viewing_barrel:
+        """Shift+click: Quick-move item from player inventory to barrel/corpse."""
+        if not self.state.player or not self._viewing_container:
             return
-        
+
         player = self.state.player
         inventory = player.inventory
-        barrel = self._viewing_barrel
+        barrel = self._viewing_container
         barrel_inventory = barrel.inventory
         
         if slot_index < 0 or slot_index >= len(inventory):
@@ -2787,29 +2903,70 @@ class InventoryMenu:
         hint_x = left_width + 16
         hint_y = self.canvas_height - 95
         line_height = 14
-        
-        if self.gamepad_connected:
-            hints = [
-                ("A", "Pick up / Place"),
-                ("X", "Place one"),
-                ("Y", "Item menu"),
-                ("B / Select", "Close"),
-            ]
+
+        # Dynamic hints based on current state
+        if self.context_menu_open:
+            # Context menu is open
+            if self.gamepad_connected:
+                hints = [
+                    ("A", "Select"),
+                    ("B", "Cancel"),
+                ]
+            else:
+                hints = [
+                    ("Click", "Select"),
+                    ("Esc", "Cancel"),
+                ]
+        elif self._confirm_popup_open:
+            # Confirmation popup is open
+            if self.gamepad_connected:
+                hints = [
+                    ("D-pad", "Choose"),
+                    ("A", "Confirm"),
+                    ("B", "Cancel"),
+                ]
+            else:
+                hints = [
+                    ("Arrow keys", "Choose"),
+                    ("Click", "Confirm"),
+                    ("Esc", "Cancel"),
+                ]
+        elif self.held_item:
+            # Holding an item
+            if self.gamepad_connected:
+                hints = [
+                    ("A", "Place all"),
+                    ("X", "Place one"),
+                    ("B", "Cancel"),
+                ]
+            else:
+                hints = [
+                    ("Click", "Place all"),
+                    ("Right Click", "Place one"),
+                    ("Esc", "Cancel"),
+                ]
         else:
-            hints = [
-                ("Click", "Pick up / Place"),
-                ("Right Click", "Place one"),
-                ("Shift+Click", "Item menu"),
-                ("Tab", "Close"),
-            ]
-        
+            # Normal state - no item held
+            if self.gamepad_connected:
+                hints = [
+                    ("A", "Pick up"),
+                    ("Y", "Item menu"),
+                    ("B / Select", "Close"),
+                ]
+            else:
+                hints = [
+                    ("Click", "Pick up"),
+                    ("Shift+Click", "Item menu"),
+                    ("Tab", "Close"),
+                ]
+
         for i, (key, action) in enumerate(hints):
             y = hint_y + i * line_height
-            
+
             # Key/button
             key_width = rl.measure_text(key, HUD_FONT_SIZE_SMALL)
             rl.draw_text(key, hint_x, y, HUD_FONT_SIZE_SMALL, COLOR_TEXT_DIM)
-            
+
             # Action
             rl.draw_text(f": {action}", hint_x + key_width, y, HUD_FONT_SIZE_SMALL, COLOR_TEXT_FAINT)
     

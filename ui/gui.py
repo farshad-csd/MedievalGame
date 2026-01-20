@@ -532,16 +532,16 @@ class BoardGUI:
 
     def _handle_environment_action(self, action):
         """Handle an action selected from the environment menu.
-        
+
         Args:
             action: The action string selected (e.g., "Harvest", "Plant", "Build Campfire", "Build")
         """
         player = self.state.player
         if not player:
             return
-        
+
         name = player.get_display_name()
-        
+
         if action == "Harvest":
             # Check if harvest is possible first
             cell_x = int(player.x)
@@ -983,6 +983,7 @@ class BoardGUI:
                 'start_dialogue': self.dialogue.start_dialogue,
                 'start_window_viewing': self._start_window_viewing,
                 'open_inventory_with_barrel': lambda barrel: self.inventory_menu.open(barrel=barrel),
+                'open_inventory_with_corpse': lambda corpse: self.inventory_menu.open(corpse=corpse),
             }
             self.player_controller.handle_interact(gui_callbacks)
 
@@ -3742,17 +3743,10 @@ void main() {
                                      rl.Color(70, 130, 220, 220))
     
     def _draw_death_animations(self):
-        """Draw death animations"""
-        DEATH_ANIMATION_DURATION = 0.9
+        """Draw corpses (static dead bodies)"""
         current_time = time.time()
         cell_size = self._cam_cell_size
-        
-        # Remove expired animations
-        self.state.death_animations = [
-            anim for anim in self.state.death_animations
-            if current_time - anim['start_time'] < DEATH_ANIMATION_DURATION
-        ]
-        
+
         # Determine current rendering zone
         player = self.state.player
         if self.window_viewing and self.window_viewing_interior is not None:
@@ -3765,52 +3759,52 @@ void main() {
             rendering_zone = self._last_player_zone
         else:
             rendering_zone = None
-        
-        for anim in self.state.death_animations:
-            # Only draw death animations in the current rendering zone
-            anim_zone = anim.get('zone')
-            if anim_zone != rendering_zone:
+
+        for corpse in self.state.corpses:
+            # Only draw corpses in the current rendering zone
+            if corpse.zone != rendering_zone:
                 continue
-            
+
             # Coords are already in correct space (local for interior, world for exterior)
-            pixel_cx, pixel_cy = self._world_to_screen(anim['x'], anim['y'])
-            
+            pixel_cx, pixel_cy = self._world_to_screen(corpse.x, corpse.y)
+
             sprite_height = int(CHARACTER_HEIGHT * cell_size)
             sprite_width = int(CHARACTER_WIDTH * cell_size)
-            
+
+            # Create fake character dict for sprite manager (always use Faint pose)
             fake_char = {
-                'name': anim['name'],
-                'facing': anim['facing'],
-                'health': 0,
-                'death_animation_start': anim['start_time'],
+                'name': corpse.character_name,
+                'facing': corpse.facing,
+                'health': 0,  # Triggers Faint sprite
+                'death_animation_start': 0,  # Old animation, unused now
                 'vx': 0, 'vy': 0
             }
-            
+
             frame_info, should_flip = self.sprite_manager.get_frame(fake_char, current_time)
-            
+
             if frame_info:
-                job = anim.get('job')
+                job = corpse.job
                 if job in JOB_TIERS and "color" in JOB_TIERS[job]:
                     color = JOB_TIERS[job]["color"]
                 else:
-                    morality = anim.get('morality', 5)
+                    morality = corpse.morality
                     t = (morality - 1) / 9.0
                     r = int(0 + t * 173)
                     g = int(0 + t * 216)
                     b = int(139 + t * (230 - 139))
                     color = f"#{r:02x}{g:02x}{b:02x}"
-                
+
                 recolored_texture = self.sprite_manager.recolor_red_to_color(frame_info, color)
-                
+
                 if recolored_texture:
                     blit_x = pixel_cx - sprite_width / 2
                     blit_y = pixel_cy - sprite_height / 2
-                    
+
                     if should_flip:
                         source = rl.Rectangle(recolored_texture.width, 0, -recolored_texture.width, recolored_texture.height)
                     else:
                         source = rl.Rectangle(0, 0, recolored_texture.width, recolored_texture.height)
-                    
+
                     dest = rl.Rectangle(blit_x, blit_y, sprite_width, sprite_height)
                     rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
     
@@ -4483,189 +4477,74 @@ void main() {
     
     def _get_player_context(self, player):
         """Determine what the player can interact with.
-        
-        Returns the nearest interactable in priority order, with 'E' as the 
-        unified interact key for everything. Requires player to be facing
-        the target and within INTERACT_DISTANCE.
-        
-        Priority order (doors first so you can escape combat):
-        1. Door (enter/exit) - essential for escaping
-        2. NPC (dialogue)
-        3. Window (look through)
-        4. Stove (bake bread)
-        5. Campfire (bake bread)
-        6. Barrel (storage access)
-        7. Bed (sleep - not implemented)
-        8. Tree (chop - not implemented)
+
+        Uses player_controller.get_available_interaction() as single source of truth.
+        This ensures hints and actual interactions never get out of sync.
+
+        Returns dict or None.
         """
-        # Check for door FIRST (entering/exiting buildings) - allows escaping combat
-        house = self.state.get_adjacent_door(player)
-        if house:
-            if player.zone is None:
-                # Outside - can enter
-                return {
-                    'type': 'Door',
-                    'name': house.name,
-                    'actions': [{'key': 'E', 'label': 'Enter'}]
-                }
+        # Use player controller's unified interaction query
+        gui_callbacks = {
+            'is_window_viewing': lambda: self.window_viewing,
+            'toggle_window_view_off': self._toggle_window_view_off,
+            'update_camera': lambda x, y: (setattr(self, 'camera_x', x), setattr(self, 'camera_y', y)),
+            'get_facing_npc': lambda p: self.player_controller.get_facing_npc(),
+            'can_start_dialogue': self.dialogue.can_start_dialogue,
+            'start_dialogue': self.dialogue.start_dialogue,
+            'start_window_viewing': self._start_window_viewing,
+            'open_inventory_with_barrel': lambda barrel: self.inventory_menu.open(barrel=barrel),
+            'open_inventory_with_corpse': lambda corpse: self.inventory_menu.open(corpse=corpse),
+        }
+
+        interaction = self.player_controller.get_available_interaction(gui_callbacks)
+        if not interaction:
+            return None
+
+        # Convert to hint format
+        itype = interaction['type']
+        name = interaction['name']
+        label = interaction['label']
+        can_interact = interaction.get('can_interact', True)
+        blocked_reason = interaction.get('blocked_reason')
+
+        # Map type to display type
+        if itype == 'npc':
+            # For NPCs, use their job as the display type
+            target = interaction.get('target')
+            if target and hasattr(target, 'get'):
+                job = target.get('job')
+                display_type = job if job else 'Character'
             else:
-                # Inside - can exit
-                return {
-                    'type': 'Door',
-                    'name': 'Exit',
-                    'actions': [{'key': 'E', 'label': 'Exit Building'}]
-                }
-        
-        # Check for adjacent characters (NPCs) - must be in same zone and facing them
-        nearest_npc = None
-        nearest_npc_dist = float('inf')
-        
-        for char in self.state.characters:
-            if char == player:
-                continue
-            if char.get('health', 100) <= 0:
-                continue
-            # Must be in same zone to interact
-            if char.zone != player.zone:
-                continue
-            
-            # Use prevailing coords when in interior
-            if player.zone:
-                px, py = player.prevailing_x, player.prevailing_y
-                cx, cy = char.prevailing_x, char.prevailing_y
-            else:
-                px, py = player.x, player.y
-                cx, cy = char.x, char.y
-            
-            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-            
-            # Must be within interact distance AND player facing them
-            if dist <= INTERACT_DISTANCE and dist < nearest_npc_dist:
-                if player.is_facing_position(cx, cy):
-                    nearest_npc = char
-                    nearest_npc_dist = dist
-        
-        if nearest_npc:
-            job = nearest_npc.get('job')
-            return {
-                'type': job if job else 'Character',
-                'name': nearest_npc.get_display_name(),
-                'actions': [{'key': 'E', 'label': 'Talk'}]
-            }
-        
-        # Check for window (inside looking out, or outside looking in)
-        if player.zone is not None:
-            # Inside - check if near interior window
-            interior = self.state.interiors.get_interior(player.zone)
-            if interior:
-                for window in interior.windows:
-                    if window.is_character_near(player.prevailing_x, player.prevailing_y, threshold=1.0):
-                        return {
-                            'type': 'Window',
-                            'name': f'Window ({window.facing})',
-                            'actions': [{'key': 'E', 'label': 'Look Outside'}]
-                        }
+                display_type = 'Character'
+        elif itype == 'cooking':
+            # Cooking spots already have type in name
+            display_type = interaction['name'] if interaction.get('name') else 'Cooking Spot'
         else:
-            # Outside - check if near exterior window AND facing it
-            for house in self.state.interactables.get_all_houses():
-                interior = house.interior
-                if not interior:
-                    continue
-                for window in interior.windows:
-                    if window.is_character_near_exterior(player.x, player.y, threshold=1.0):
-                        # Must be facing toward the window
-                        if self._is_player_facing_window(player, window):
-                            return {
-                                'type': 'Window',
-                                'name': f'{house.name} Window',
-                                'actions': [{'key': 'E', 'label': 'Look Inside'}]
-                            }
-        
-        # Check for adjacent stove (must be facing it)
-        stove = self.state.interactables.get_adjacent_stove(player)
-        if stove:
-            # Check if facing the stove - use local coords for interior
-            if player.is_facing_position(stove.x + 0.5, stove.y + 0.5):
-                if stove.can_use(player):
-                    return {
-                        'type': 'Stove',
-                        'name': stove.name,
-                        'actions': [{'key': 'E', 'label': 'Bake Bread'}]
-                    }
-                else:
-                    return {
-                        'type': 'Stove',
-                        'name': stove.name,
-                        'actions': [{'key': '-', 'label': 'Not your stove'}]
-                    }
-        
-        # Check for adjacent campfire (camps are stored on characters as camp_position)
-        for other_char in self.state.characters:
-            camp_pos = other_char.get('camp_position')
-            if camp_pos and self.state.interactables.is_adjacent_to_camp(player, camp_pos):
-                # Check if facing the campfire - exterior so no zone
-                if player.is_facing_position(camp_pos[0] + 0.5, camp_pos[1] + 0.5):
-                    owner_name = other_char.get_display_name()
-                    return {
-                        'type': 'Campfire',
-                        'name': f"{owner_name}'s Campfire",
-                        'actions': [{'key': 'E', 'label': 'Bake Bread'}]
-                    }
-        
-        # Check for adjacent barrel (must be facing it)
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                # Check if facing the barrel - use local coords if interior
-                if barrel.zone is not None:
-                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                else:
-                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                if player.is_facing_position(target_x, target_y):
-                    if barrel.can_use(player):
-                        return {
-                            'type': 'Barrel',
-                            'name': barrel.name,
-                            'actions': [{'key': 'E', 'label': 'Open'}]
-                        }
-                    else:
-                        return {
-                            'type': 'Barrel',
-                            'name': barrel.name,
-                            'actions': [{'key': '-', 'label': 'Not yours'}]
-                        }
-        
-        # Check for adjacent bed (must be facing it)
-        for bed in self.state.interactables.beds.values():
-            if bed.is_adjacent(player):
-                # Check if facing the bed - use local coords for interior
-                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
-                    is_owned = bed.is_owned_by(player.name)
-                    if is_owned or not bed.is_owned():
-                        return {
-                            'type': 'Bed',
-                            'name': bed.name,
-                            'actions': [{'key': '-', 'label': 'Sleep (not implemented)'}]
-                        }
-                    else:
-                        return {
-                            'type': 'Bed',
-                            'name': bed.name,
-                            'actions': [{'key': '-', 'label': 'Not your bed'}]
-                        }
-        
-        # Check for adjacent tree (must be facing it)
-        for pos, tree in self.state.interactables.trees.items():
-            if tree.is_adjacent(player):
-                # Check if facing the tree - exterior so no zone
-                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
-                    return {
-                        'type': 'Tree',
-                        'name': 'Tree',
-                        'actions': [{'key': '-', 'label': 'Shake (not implemented)'}]
-                    }
-        
-        return None
-    
+            type_map = {
+                'window_view': 'Window View',
+                'door': 'Door',
+                'window': 'Window',
+                'corpse': 'Corpse',
+                'barrel': 'Barrel',
+                'bed': 'Bed',
+                'tree': 'Tree'
+            }
+            display_type = type_map.get(itype, itype.title() if itype else 'Unknown')
+
+        # Ensure display_type is never None
+        if not display_type:
+            display_type = 'Unknown'
+
+        # Return hint format
+        key = '-' if not can_interact else 'E'
+        action_label = blocked_reason if blocked_reason else label
+
+        return {
+            'type': display_type,
+            'name': name,
+            'actions': [{'key': key, 'label': action_label}]
+        }
+
     def _is_player_facing_window(self, player, window):
         """Check if player is facing toward a window from outside."""
         facing = player.get('facing', 'down')

@@ -151,7 +151,7 @@ ATTACK_DAMAGE_TICKS_BEFORE_END = 1  # Ticks before animation ends that damage re
 HEAVY_ATTACK_THRESHOLD_TICKS = 3  # ~0.25 seconds at 10 ticks/sec before charge starts
 HEAVY_ATTACK_CHARGE_TICKS = 10   # ~2.0 seconds at 10 ticks/sec to fill meter
 HEAVY_ATTACK_MIN_MULTIPLIER = 1.001  # Damage multiplier at minimum charge
-HEAVY_ATTACK_MAX_MULTIPLIER = 6.0    # Damage multiplier at full charge
+HEAVY_ATTACK_MAX_MULTIPLIER = 80.0    # Damage multiplier at full charge
 
 # Attack cone geometry (matches resolve_attack hit detection)
 ATTACK_CONE_HALF_WIDTH = 0.7          # Perpendicular distance for hit detection (NPCs only)
@@ -581,6 +581,7 @@ DIALOGUE_MENUS = {
 # All possible environment menu options (as a dictionary for lookup)
 ENVIRONMENT_MENU_OPTIONS = {
     'PICK_UP_BARREL': "Pick Up Barrel",
+    'PICK_UP_CORPSE': "Pick Up Corpse",
     'CHOP_TREE': "Chop Tree",
     'HARVEST': "Harvest",
     'PLANT': "Plant",

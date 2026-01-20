@@ -594,29 +594,183 @@ class PlayerController:
 
         return nearest_npc
 
+    def get_available_interaction(self, gui_callbacks):
+        """Get what interaction is currently available (for hints and execution).
+
+        This is the SINGLE SOURCE OF TRUTH for all E key interactions.
+
+        Returns dict with interaction info, or None if nothing available:
+        {
+            'type': str,  # 'door', 'npc', 'corpse', 'barrel', etc.
+            'name': str,  # Display name
+            'label': str, # Action label (e.g., 'Loot', 'Talk', 'Open')
+            'target': object,  # The actual object (NPC, corpse, barrel, etc.)
+            'can_interact': bool,  # Whether interaction is allowed
+            'blocked_reason': str  # If can_interact=False, why (optional)
+        }
+        """
+        player = self.player
+        if not player:
+            return None
+
+        # Priority 1: If currently window viewing
+        if gui_callbacks['is_window_viewing']():
+            return {
+                'type': 'window_view',
+                'name': 'Window View',
+                'label': 'Stop Viewing',
+                'target': None,
+                'can_interact': True
+            }
+
+        # Priority 2: Door (allows escaping combat)
+        house = self.state.get_adjacent_door(player)
+        if house:
+            if player.zone is None:
+                return {
+                    'type': 'door',
+                    'name': house.name,
+                    'label': 'Enter',
+                    'target': house,
+                    'can_interact': True
+                }
+            else:
+                return {
+                    'type': 'door',
+                    'name': 'Exit',
+                    'label': 'Exit Building',
+                    'target': house,
+                    'can_interact': True
+                }
+
+        # Priority 3: NPC (must be facing them)
+        npc = gui_callbacks['get_facing_npc'](player)
+        if npc:
+            can_talk = gui_callbacks['can_start_dialogue'](npc)
+            return {
+                'type': 'npc',
+                'name': npc.get_display_name(),
+                'label': 'Talk',
+                'target': npc,
+                'can_interact': can_talk,
+                'blocked_reason': f"{npc.get_display_name()} is busy!" if not can_talk else None
+            }
+
+        # Priority 4: Window
+        window = self.handle_window_input()
+        if window:
+            return {
+                'type': 'window',
+                'name': 'Window',
+                'label': 'Look Through',
+                'target': window,
+                'can_interact': True
+            }
+
+        # Priority 5: Cooking spot (stove/campfire - must be facing)
+        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
+        if cooking_spot:
+            source = cooking_spot.get('source')
+            if cooking_spot['type'] == 'stove':
+                target_x, target_y = source.x + 0.5, source.y + 0.5
+                spot_name = source.name
+                can_use = source.can_use(player)
+            else:  # campfire
+                target_x, target_y = source[0] + 0.5, source[1] + 0.5
+                spot_name = 'Campfire'
+                can_use = True
+
+            if player.is_facing_position(target_x, target_y):
+                return {
+                    'type': 'cooking',
+                    'name': spot_name,
+                    'label': 'Bake Bread',
+                    'target': cooking_spot,
+                    'can_interact': can_use,
+                    'blocked_reason': 'Not your stove' if not can_use else None
+                }
+
+        # Priority 6: Corpse (must be facing)
+        for corpse in self.state.corpses:
+            if corpse.zone != player.zone:
+                continue
+
+            if player.zone is not None:
+                px, py = player.prevailing_x, player.prevailing_y
+            else:
+                px, py = player.x, player.y
+
+            cx, cy = corpse.center
+
+            import math
+            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
+
+            if dist <= INTERACT_DISTANCE:
+                if player.is_facing_position(cx, cy):
+                    return {
+                        'type': 'corpse',
+                        'name': f"{corpse.character_name}'s Corpse",
+                        'label': 'Loot',
+                        'target': corpse,
+                        'can_interact': True
+                    }
+
+        # Priority 7: Barrel (must be facing)
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                if barrel.zone is not None:
+                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
+                else:
+                    target_x, target_y = barrel.world_x, barrel.world_y
+                if player.is_facing_position(target_x, target_y):
+                    can_use = barrel.can_use(player)
+                    return {
+                        'type': 'barrel',
+                        'name': barrel.name,
+                        'label': 'Open',
+                        'target': barrel,
+                        'can_interact': can_use,
+                        'blocked_reason': 'Not your barrel' if not can_use else None
+                    }
+
+        # Priority 8: Bed (must be facing)
+        for bed in self.state.interactables.beds.values():
+            if bed.is_adjacent(player):
+                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
+                    is_owned = bed.is_owned_by(player.name)
+                    can_use = is_owned or not bed.is_owned()
+                    return {
+                        'type': 'bed',
+                        'name': bed.name,
+                        'label': 'Sleep',
+                        'target': bed,
+                        'can_interact': False,  # Not implemented
+                        'blocked_reason': 'Sleep not implemented yet' if can_use else 'Not your bed'
+                    }
+
+        # Priority 9: Tree (must be facing)
+        for pos, tree in self.state.interactables.trees.items():
+            if tree.is_adjacent(player):
+                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
+                    return {
+                        'type': 'tree',
+                        'name': 'Tree',
+                        'label': 'Shake',
+                        'target': tree,
+                        'can_interact': False,  # Not implemented
+                        'blocked_reason': 'Shaking trees not implemented yet'
+                    }
+
+        return None
+
     def handle_interact(self, gui_callbacks):
         """Handle unified interact (E key / A button).
 
-        Checks for interactables in priority order:
-        1. If window viewing → toggle off
-        2. Door → enter/exit building (first so player can escape combat)
-        3. NPC → start dialogue (must be facing them)
-        4. Window → start window viewing
-        5. Stove/campfire → bake bread
-        6. Barrel → take wheat
-        7. Bed → sleep (not implemented)
-        8. Tree → chop (not implemented)
+        Uses get_available_interaction() to determine what to interact with.
+        This ensures interaction hints and actual interactions never get out of sync.
 
         Args:
-            gui_callbacks: Dict with callbacks for GUI operations:
-                - 'is_window_viewing': lambda: bool
-                - 'toggle_window_view_off': lambda: None
-                - 'update_camera': lambda x, y: None
-                - 'get_facing_npc': lambda player: Character or None
-                - 'can_start_dialogue': lambda npc: bool
-                - 'start_dialogue': lambda npc: None
-                - 'start_window_viewing': lambda window: None
-                - 'open_inventory_with_barrel': lambda barrel: None
+            gui_callbacks: Dict with callbacks for GUI operations
 
         Returns:
             str describing what was interacted with, or None
@@ -625,86 +779,57 @@ class PlayerController:
         if not player:
             return None
 
-        # Priority 1: If currently window viewing, toggle it off
-        if gui_callbacks['is_window_viewing']():
+        # Get what's available to interact with
+        interaction = self.get_available_interaction(gui_callbacks)
+        if not interaction:
+            return None
+
+        # If blocked, show reason and don't interact
+        if not interaction.get('can_interact', False):
+            if interaction.get('blocked_reason'):
+                self.state.log_action(interaction['blocked_reason'])
+            return None
+
+        # Execute the interaction based on type
+        itype = interaction['type']
+        target = interaction['target']
+
+        if itype == 'window_view':
             gui_callbacks['toggle_window_view_off']()
             return 'window_view_off'
 
-        # Priority 2: Check for door FIRST (allows escaping combat)
-        house = self.state.get_adjacent_door(player)
-        if house:
+        elif itype == 'door':
             if self.handle_door_input():
-                # Successfully entered/exited - update camera
                 gui_callbacks['update_camera'](player.x, player.y)
                 return 'door'
 
-        # Priority 3: Check for nearby NPC (must be facing them)
-        npc = gui_callbacks['get_facing_npc'](player)
-        if npc:
-            if gui_callbacks['can_start_dialogue'](npc):
-                gui_callbacks['start_dialogue'](npc)
-                return 'npc'
-            else:
-                self.state.log_action(f"{npc.get_display_name()} is busy!")
-                return 'npc_busy'
+        elif itype == 'npc':
+            gui_callbacks['start_dialogue'](target)
+            return 'npc'
 
-        # Priority 4: Check for window
-        window = self.handle_window_input()
-        if window:
-            gui_callbacks['start_window_viewing'](window)
+        elif itype == 'window':
+            gui_callbacks['start_window_viewing'](target)
             return 'window'
 
-        # Priority 5: Check for stove/campfire (baking) - must be facing
-        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
-        if cooking_spot:
-            # Check if facing the cooking spot
-            source = cooking_spot.get('source')
-            if cooking_spot['type'] == 'stove':
-                # Stoves are interior - use local coords
-                target_x, target_y = source.x + 0.5, source.y + 0.5
-            else:  # campfire
-                # Campfires are exterior - use world coords
-                target_x, target_y = source[0] + 0.5, source[1] + 0.5
+        elif itype == 'cooking':
+            self.handle_bake_input()
+            return 'cooking_spot'
 
-            if player.is_facing_position(target_x, target_y):
-                self.handle_bake_input()
-                return 'cooking_spot'
+        elif itype == 'corpse':
+            gui_callbacks['open_inventory_with_corpse'](target)
+            return 'corpse'
 
-        # Priority 6: Check for barrel (must be facing)
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                # Use local coords for interior barrels, world coords for exterior
-                if barrel.zone is not None:
-                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                else:
-                    target_x, target_y = barrel.world_x, barrel.world_y
-                if player.is_facing_position(target_x, target_y):
-                    # Check if player can use this barrel
-                    if barrel.can_use(player):
-                        gui_callbacks['open_inventory_with_barrel'](barrel)
-                    else:
-                        self.state.log_action("Not your barrel")
-                    return 'barrel'
+        elif itype == 'barrel':
+            gui_callbacks['open_inventory_with_barrel'](target)
+            return 'barrel'
 
-        # Priority 7: Check for bed (must be facing) - not implemented
-        for bed in self.state.interactables.beds.values():
-            if bed.is_adjacent(player):
-                # Beds are interior - use local coords
-                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
-                    is_owned = bed.is_owned_by(player.name)
-                    if is_owned or not bed.is_owned():
-                        self.state.log_action("Sleep not implemented yet")
-                    else:
-                        self.state.log_action("Not your bed")
-                    return 'bed'
+        elif itype == 'bed':
+            # Not implemented
+            return 'bed'
 
-        # Priority 8: Check for tree (must be facing) - not implemented
-        for pos, tree in self.state.interactables.trees.items():
-            if tree.is_adjacent(player):
-                # Trees are exterior - use world coords (zone is None)
-                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
-                    self.state.log_action("Shaking trees not implemented yet")
-                    return 'tree'
+        elif itype == 'tree':
+            # Not implemented
+            return 'tree'
 
         return None
 

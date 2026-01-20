@@ -112,6 +112,11 @@ class EnvironmentMenu:
         if nearby_barrel:
             self._options.append(ENVIRONMENT_MENU_OPTIONS['PICK_UP_BARREL'])
 
+        # Check for nearby corpse (same zone, within distance)
+        nearby_corpse = self._get_nearby_corpse()
+        if nearby_corpse:
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['PICK_UP_CORPSE'])
+
         # Check for nearby tree (exterior only, within distance)
         nearby_tree = self._get_nearby_tree()
         if nearby_tree:
@@ -142,6 +147,13 @@ class EnvironmentMenu:
         if not player:
             return None
         return self.logic.get_nearby_barrel(player, max_distance=ENVIRONMENT_INTERACT_DISTANCE)
+
+    def _get_nearby_corpse(self):
+        """Find a corpse near the player in the same zone."""
+        player = self.state.player
+        if not player:
+            return None
+        return self.logic.get_nearby_corpse(player, max_distance=ENVIRONMENT_INTERACT_DISTANCE)
 
     def _get_nearby_tree(self):
         """Find a tree near the player (exterior only)."""
@@ -261,6 +273,14 @@ class EnvironmentMenu:
             if barrel:
                 player_name = self.state.player.get_display_name() if self.state.player else "Player"
                 self.state.log_action(f"{player_name} picked up {barrel.name} (not yet implemented)")
+            self.close()
+            return option
+
+        if option == ENVIRONMENT_MENU_OPTIONS['PICK_UP_CORPSE']:
+            corpse = self._get_nearby_corpse()
+            if corpse:
+                player_name = self.state.player.get_display_name() if self.state.player else "Player"
+                self.state.log_action(f"{player_name} picked up corpse (not yet implemented)")
             self.close()
             return option
 

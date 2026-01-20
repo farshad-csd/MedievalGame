@@ -702,19 +702,20 @@ class GameLogic:
         return None, None
     
     def get_adjacent_cooking_spot(self, char):
-        """Get any adjacent cooking spot (stove the char can use, or any campfire).
+        """Get any adjacent cooking spot (stove or campfire).
         Returns a dict with 'type' ('stove' or 'camp'), 'name', and source object.
         Returns None if no cooking spot is adjacent.
         """
-        # Check for stove first - must be one the character can use
+        # Check for stove first - return it even if char can't use it
+        # (ownership check is handled by caller for proper hint display)
         stove = self.state.interactables.get_adjacent_stove(char)
-        if stove and stove.can_use(char):
+        if stove:
             return {
                 'type': 'stove',
                 'name': stove.name,
                 'source': stove
             }
-        
+
         # Check for any campfire (anyone can use any campfire)
         camp_pos, camp_owner = self.get_adjacent_camp(char)
         if camp_pos:
@@ -724,7 +725,7 @@ class GameLogic:
                 'name': f"{owner_name}'s campfire",
                 'source': camp_pos
             }
-        
+
         return None
     
     def can_bake_bread(self, char):
@@ -1144,6 +1145,44 @@ class GameLogic:
             dist = math.sqrt(dx * dx + dy * dy)
             if dist <= max_distance:
                 return barrel
+
+        return None
+
+    def get_nearby_corpse(self, character, max_distance=1.5):
+        """
+        Find a corpse near the character in the same zone.
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Corpse object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        import math
+        char_zone = character.zone
+
+        for corpse in self.state.corpses:
+            # Must be in same zone
+            if corpse.zone != char_zone:
+                continue
+
+            # Calculate distance using appropriate coordinates
+            if char_zone is not None:
+                # Interior - use prevailing (local) coords
+                dx = character.prevailing_x - (corpse.x + 0.5)
+                dy = character.prevailing_y - (corpse.y + 0.5)
+            else:
+                # Exterior - use world coords
+                dx = character.x - (corpse.x + 0.5)
+                dy = character.y - (corpse.y + 0.5)
+
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return corpse
 
         return None
 
@@ -4017,10 +4056,9 @@ class GameLogic:
         self._process_deaths()
     
     def _process_deaths(self):
-        """Remove dead characters from game and store visual info for death animation"""
-        import time
-        current_time = time.time()
-        
+        """Remove dead characters from game and create corpse interactables"""
+        from static_interactables import Corpse
+
         dead_chars = [char for char in self.state.characters if char['health'] <= 0]
         for char in dead_chars:
             # Log death message
@@ -4035,29 +4073,43 @@ class GameLogic:
                     self.state.log_action(f"{dead_name} DIED from starvation!")
                 else:
                     self.state.log_action(f"{dead_name} DIED!")
-            
-            # Store visual info for death animation (GUI concern only)
-            # For interior deaths, store local coords for proper rendering
+
+            # Get position (interior coords if in interior, world coords if outside)
             if char.zone:
-                anim_x = char.prevailing_x  # Local coords
-                anim_y = char.prevailing_y
+                corpse_x = char.prevailing_x  # Local coords
+                corpse_y = char.prevailing_y
             else:
-                anim_x = char['x']  # World coords
-                anim_y = char['y']
-            
-            self.state.death_animations.append({
-                'x': anim_x,
-                'y': anim_y,
-                'zone': char.zone,  # Store zone so interior view persists after death
-                'name': char['name'],
-                'start_time': current_time,
-                'facing': char.get('facing', 'down'),
-                'job': char.get('job'),
-                'morality': char.get('morality', 5),
-                'is_player': char.is_player
-            })
-            
-            # Immediately remove from game - no more processing
+                corpse_x = char['x']  # World coords
+                corpse_y = char['y']
+
+            # Create corpse interactable with character's inventory
+            corpse_name = f"{char['name']}'s Corpse"
+            corpse = Corpse(
+                name=corpse_name,
+                character_name=char['name'],
+                x=corpse_x,
+                y=corpse_y,
+                zone=char.zone,
+                facing=char.get('facing', 'down'),
+                job=char.get('job'),
+                morality=char.get('morality', 5)
+            )
+
+            # Transfer inventory from character to corpse
+            for i, slot in enumerate(char.inventory):
+                if slot is not None:
+                    corpse.inventory[i] = {'type': slot['type'], 'amount': slot['amount']}
+
+            # Set interior projection params if in interior
+            if char.zone and hasattr(self.state, 'interiors'):
+                interior = self.state.interiors.get_interior(char.zone)
+                if interior:
+                    corpse.set_interior_projection(interior)
+
+            # Add corpse to game state
+            self.state.corpses.append(corpse)
+
+            # Immediately remove character from game - no more processing
             self.state.remove_character(char)
     
     def _process_stamina(self):

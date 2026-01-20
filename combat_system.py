@@ -254,8 +254,7 @@ class CombatSystem:
                                        crime_type='murder', victim=target)
                     self.logic.witness_crime(attacker, target, 'murder')
 
-                # Transfer items to attacker
-                attacker.transfer_all_items_from(target)
+                # Items remain in corpse (no automatic transfer)
 
                 # Clear intent if this was the target
                 if attacker.intent and attacker.intent.get('target') is target:
@@ -417,8 +416,7 @@ class CombatSystem:
                                    crime_type='murder', victim=target)
                 self.logic.witness_crime(attacker, target, 'murder')
 
-            # Transfer items to attacker
-            attacker.transfer_all_items_from(target)
+            # Items remain in corpse (no automatic transfer)
 
             # Clear intent if this was the target
             if attacker.intent and attacker.intent.get('target') is target:
