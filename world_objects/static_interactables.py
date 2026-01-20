@@ -2,14 +2,130 @@
 """
 Classes for static world objects that characters can interact with.
 
-Each class:
-- Holds its own state (position, home, owner, inventory)
-- Provides methods for interaction
-- Is instantiated by GameState during initialization
+ARCHITECTURE OVERVIEW
+=====================
+
+Base Classes:
+    Interactable: Base class for all world objects (position, adjacency, zone handling)
+    Ownable: Mixin for objects that can be owned (assign_owner, is_owned, etc.)
+    Container: Base class for inventory-holding objects (Barrel, Corpse)
+
+Manager:
+    InteractableManager: Manages collections of interactables with lookup methods
+
+
+ADDING A NEW CONTAINER TYPE
+============================
+
+To add a new specialized container (e.g., Chest, Sack, Quiver, Weapon Rack):
+
+1. Create the Container Class
+   -------------------------------
+   class Chest(Container, Ownable):  # Add Ownable if it can be owned
+       def __init__(self, name, x, y, home=None, owner=None, slots=24, zone=None):
+           Container.__init__(self, name, x, y, slots, container_type='chest', home=home, zone=zone)
+           Ownable.__init__(self)  # If using Ownable
+           self.owner = owner      # If using Ownable
+           # Add custom attributes here (e.g., lock status, key requirements)
+
+       def can_use(self, char):
+           '''Define who can access this chest.'''
+           # Custom logic (e.g., check for key in inventory)
+           return True
+
+2. Add to InteractableManager
+   ----------------------------
+   In InteractableManager.__init__:
+       self.chests = {}  # (x, y, zone) -> Chest
+
+   Add initialization method:
+       def init_chests(self, chest_defs):
+           self.chests = {}
+           for chest_def in chest_defs:
+               x, y = chest_def["position"]
+               zone = chest_def.get("zone")
+               chest = Chest(
+                   name=chest_def["name"],
+                   x=x, y=y,
+                   home=chest_def.get("home"),
+                   zone=zone,
+                   slots=chest_def.get("slots", 24)
+               )
+               self.chests[(x, y, zone)] = chest
+
+   Add lookup methods:
+       def get_chest_at(self, x, y, zone=None):
+           return self.chests.get((x, y, zone))
+
+3. Add UI Support in inventory_menu.py
+   ------------------------------------
+   The inventory menu uses container_type and display_type to automatically handle:
+       - Container name display: container.display_type (e.g., "Chest", "Barrel")
+       - Rendering logic: Check container.container_type in rendering code
+
+   For SIMPLE containers (grid storage like Barrel):
+       - No changes needed! UI handles it automatically via Container base class
+
+   For STRUCTURED containers (like Corpse with equipment slots):
+       - Add custom rendering in inventory_menu.py _render_container_inventory()
+       - Check container.container_type == 'chest' to apply custom layout
+       - Define slot positions, restrictions, visual layout
+
+   Example for structured container:
+       if self._viewing_container.container_type == 'chest':
+           # Custom layout for chest (e.g., top row for valuables, bottom for general)
+           valuable_slots = self._viewing_container.inventory[0:6]
+           general_slots = self._viewing_container.inventory[6:24]
+           # Render with custom positioning
+
+   Example for restricted container (Quiver):
+       class Quiver(Container):
+           def can_add_item(self, item_type, amount):
+               # Only allow arrows
+               if ITEMS[item_type].get('category') != 'arrow':
+                   return False
+               return super().can_add_item(item_type, amount)
+
+4. Add to Scenario Data
+   ---------------------
+   In scenario/scenario_world.py:
+       CHESTS = [
+           {"name": "Treasure Chest", "position": (10, 20), "home": "Castle", "zone": None},
+           # ... more chests
+       ]
+
+   In game_state.py initialization:
+       self.interactables.init_chests(CHESTS)
 """
 
 import math
 from constants import ITEMS, ADJACENCY_DISTANCE, INVENTORY_SLOTS, BARREL_SLOTS
+
+
+class Ownable:
+    """
+    Mixin for objects that can be owned by characters.
+    Provides consistent ownership interface across Barrel, Bed, Campfire.
+    """
+
+    def __init__(self):
+        self.owner = None
+
+    def is_owned(self):
+        """Check if this object has an owner."""
+        return self.owner is not None
+
+    def is_owned_by(self, char_name):
+        """Check if this object is owned by the given character."""
+        return self.owner == char_name
+
+    def assign_owner(self, owner_name):
+        """Assign an owner to this object."""
+        self.owner = owner_name
+
+    def unassign_owner(self):
+        """Remove owner from this object."""
+        self.owner = None
 
 
 class Interactable:
@@ -99,7 +215,13 @@ class Interactable:
         if char_zone != self.zone:
             return False
         return self.distance_to(char) <= ADJACENCY_DISTANCE
-    
+
+    def can_use(self, char):
+        """Check if character can use/interact with this object.
+        Default implementation: anyone can use. Override in subclasses for specific logic.
+        """
+        return True
+
     def __repr__(self):
         return f"<{self.__class__.__name__} '{self.name}' at ({self.x}, {self.y})>"
 
@@ -228,16 +350,17 @@ class Container(Interactable):
         return amount - remaining
 
 
-class Barrel(Container):
+class Barrel(Container, Ownable):
     """
     Storage container with inventory slots.
     Can be owned by a character and associated with a home area.
     """
 
     def __init__(self, name, x, y, home=None, owner=None, slots=BARREL_SLOTS, zone=None):
-        super().__init__(name, x, y, slots, container_type='barrel', home=home, zone=zone)
+        Container.__init__(self, name, x, y, slots, container_type='barrel', home=home, zone=zone)
+        Ownable.__init__(self)
         self.owner = owner
-    
+
     def can_use(self, char):
         """Check if character can use (take from) this barrel.
         Owner can always use it. Others can use if their home matches.
@@ -290,7 +413,7 @@ class Corpse(Container):
         return True
 
 
-class Bed(Interactable):
+class Bed(Interactable, Ownable):
     """
     Sleeping spot that can be owned by a character.
     Associated with a home area.
@@ -298,7 +421,8 @@ class Bed(Interactable):
     """
 
     def __init__(self, name, x, y, home=None, owner=None, zone=None, height=2):
-        super().__init__(name, x, y, home, zone=zone)
+        Interactable.__init__(self, name, x, y, home, zone=zone)
+        Ownable.__init__(self)
         self.owner = owner
         self.height = height  # Visual height (2 cells)
         # Collision padding - extends hitbox beyond visual bounds
@@ -306,12 +430,12 @@ class Bed(Interactable):
         self.collision_pad_bottom = 0.5  # Extend collision below bed (front)
         self.collision_pad_left = 0.2    # Extend collision left
         self.collision_pad_right = 0.2   # Extend collision right
-    
+
     @property
     def center(self):
         """Get center point (for distance calculations). Accounts for height."""
         return (self.x + 0.5, self.y + self.height / 2)
-    
+
     @property
     def collision_bounds(self):
         """Get expanded collision bounds (x_min, y_min, x_max, y_max)."""
@@ -321,27 +445,11 @@ class Bed(Interactable):
             self.x + 1 + self.collision_pad_right,
             self.y + self.height + self.collision_pad_bottom
         )
-    
+
     def contains_point(self, px, py):
         """Check if a point is within the bed's collision area."""
         x_min, y_min, x_max, y_max = self.collision_bounds
         return (x_min <= px < x_max and y_min <= py < y_max)
-    
-    def assign_owner(self, owner_name):
-        """Assign an owner to this bed."""
-        self.owner = owner_name
-    
-    def unassign_owner(self):
-        """Remove owner from this bed."""
-        self.owner = None
-    
-    def is_owned(self):
-        """Check if this bed has an owner."""
-        return self.owner is not None
-    
-    def is_owned_by(self, char_name):
-        """Check if this bed is owned by the given character."""
-        return self.owner == char_name
 
 
 class Stove(Interactable):
@@ -363,23 +471,20 @@ class Stove(Interactable):
         return char_home == self.home
 
 
-class Campfire(Interactable):
+class Campfire(Interactable, Ownable):
     """
     Temporary cooking/sleeping spot created by characters.
     Unlike other interactables, campfires are dynamically created.
     """
-    
+
     def __init__(self, x, y, owner_name=None, zone=None):
-        super().__init__(f"Campfire", x, y, home=None, zone=zone)
+        Interactable.__init__(self, f"Campfire", x, y, home=None, zone=zone)
+        Ownable.__init__(self)
         self.owner = owner_name
-    
+
     def can_use(self, char):
         """Anyone can use a campfire."""
         return True
-    
-    def is_owned_by(self, char_name):
-        """Check if this campfire is owned by the given character."""
-        return self.owner == char_name
 
 
 class Tree(Interactable):
@@ -567,14 +672,6 @@ class InteractableManager:
                 return barrel
         return None
     
-    def get_barrel_position(self, barrel):
-        """Get the (x, y) position of a barrel."""
-        return barrel.position if barrel else None
-    
-    def is_adjacent_to_barrel(self, char, barrel):
-        """Check if character is adjacent to the barrel."""
-        return barrel.is_adjacent(char) if barrel else False
-    
     # =========================================================================
     # BED LOOKUPS
     # =========================================================================
@@ -589,22 +686,13 @@ class InteractableManager:
             if bed.owner == owner_name:
                 return bed
         return None
-    
-    def get_bed_position(self, bed):
-        """Get the (x, y) position of a bed."""
-        return bed.position if bed else None
-    
+
     def get_unowned_bed_by_home(self, home):
         """Get an unowned bed in the given home area."""
         for bed in self.beds.values():
             if bed.home == home and bed.owner is None:
                 return bed
         return None
-    
-    def assign_bed_owner(self, bed, owner_name):
-        """Assign an owner to a bed."""
-        if bed:
-            bed.assign_owner(owner_name)
     
     def unassign_bed_owner(self, owner_name):
         """Remove bed ownership from a character. Returns the bed if found."""
@@ -621,25 +709,13 @@ class InteractableManager:
     def get_stove_at(self, x, y, zone=None):
         """Get stove at position in the given zone, if any."""
         return self.stoves.get((x, y, zone))
-    
-    def get_stove_position(self, stove):
-        """Get the (x, y) position of a stove."""
-        return stove.position if stove else None
-    
-    def is_adjacent_to_stove(self, char, stove):
-        """Check if character is adjacent to the stove."""
-        return stove.is_adjacent(char) if stove else False
-    
+
     def get_adjacent_stove(self, char):
         """Get any stove adjacent to the character, or None."""
         for stove in self.stoves.values():
             if stove.is_adjacent(char):
                 return stove
         return None
-    
-    def can_use_stove(self, char, stove):
-        """Check if character can use this stove."""
-        return stove.can_use(char) if stove else False
     
     def get_stoves_for_char(self, char):
         """Get all stoves this character can use (home matches and same zone)."""
@@ -696,11 +772,7 @@ class InteractableManager:
     def has_tree_at(self, x, y):
         """Check if there is a tree at the given position."""
         return (x, y) in self.trees
-    
-    def get_all_tree_positions(self):
-        """Get list of all tree positions."""
-        return list(self.trees.keys())
-    
+
     def remove_tree(self, x, y):
         """Remove tree at position."""
         if (x, y) in self.trees:
@@ -728,7 +800,3 @@ class InteractableManager:
     def get_houses_by_allegiance(self, allegiance):
         """Get all houses belonging to a specific allegiance."""
         return [h for h in self.houses.values() if h.allegiance == allegiance]
-    
-    def is_point_in_house(self, x, y):
-        """Check if a point is inside any house."""
-        return self.get_house_at(x, y) is not None

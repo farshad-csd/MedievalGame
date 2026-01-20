@@ -18,9 +18,7 @@ from constants import (
 from scenario.scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE, TREES, HOUSES
 from scenario.scenario_characters import CHARACTER_TEMPLATES
 from character import Character, create_character
-from static_interactables import InteractableManager
-from interiors import InteriorManager
-from ground_items import GroundItemManager
+from world_objects import InteractableManager, InteriorManager, GroundItemManager
 
 
 class GameState:
@@ -232,7 +230,7 @@ class GameState:
         # Assign an unowned bed in the home area
         bed = self.interactables.get_unowned_bed_by_home(home_area)
         if bed:
-            self.interactables.assign_bed_owner(bed, char_name)
+            bed.assign_owner(char_name)
         
         # Steward owns the barracks barrel
         if job == 'Steward':

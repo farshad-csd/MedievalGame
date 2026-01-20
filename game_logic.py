@@ -44,7 +44,7 @@ from scenario.scenario_world import SIZE
 from scenario.scenario_characters import CHARACTER_TEMPLATES
 from jobs import get_job
 from combat_system import CombatSystem
-from ground_items import find_valid_drop_position
+from world_objects import find_valid_drop_position
 
 
 class GameLogic:

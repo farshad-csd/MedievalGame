@@ -9,7 +9,7 @@ from constants import (
     UI_COLOR_SLOT_BORDER, UI_COLOR_SLOT_BORDER_SELECTED,
     UI_COLOR_OPTION_SELECTED
 )
-from ground_items import GroundItem, find_valid_drop_position
+from world_objects import GroundItem, find_valid_drop_position
 
 
 # =============================================================================
