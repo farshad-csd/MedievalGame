@@ -44,7 +44,6 @@ from scenario.scenario_world import SIZE
 from scenario.scenario_characters import CHARACTER_TEMPLATES
 from jobs import get_job
 from combat_system import CombatSystem
-from combat_engagement import CombatEngagementManager
 from ground_items import find_valid_drop_position
 
 
@@ -73,8 +72,7 @@ class GameLogic:
             state: GameState instance to operate on
         """
         self.state = state
-        # Initialize combat systems (extracted for organization)
-        self.combat_engagement = CombatEngagementManager(self)
+        # Initialize combat system
         self.combat_system = CombatSystem(self)
     
     
@@ -757,8 +755,6 @@ class GameLogic:
     def _process_npc_combat_mode(self):
         """Update combat mode for NPCs based on their intent.
 
-        DELEGATED TO: combat_engagement.update_npc_engagement()
-
         NPCs enter combat mode when:
         - Their intent is 'attack'
         - Their intent is 'flee' (defensive stance)
@@ -771,7 +767,36 @@ class GameLogic:
 
         Player combat mode is controlled manually via R key.
         """
-        self.combat_engagement.update_npc_engagement(self.state.characters)
+        for char in self.state.characters:
+            # Skip player - player controls their own combat mode
+            if char.is_player:
+                continue
+
+            # Skip dead characters
+            if char.health <= 0:
+                continue
+
+            intent = char.intent
+            if intent:
+                action = intent.get('action')
+                # Enter combat mode for attack or flee intents
+                if action in ('attack', 'flee'):
+                    if not char.get('combat_mode', False):
+                        char['combat_mode'] = True
+                        # Auto-equip strongest weapon when entering combat
+                        char.equip_strongest_weapon()
+                else:
+                    # Non-combat intent - exit combat mode
+                    if char.get('combat_mode', False):
+                        char['combat_mode'] = False
+                        # Unequip weapon when leaving combat
+                        char.equipped_weapon = None
+            else:
+                # No intent - exit combat mode
+                if char.get('combat_mode', False):
+                    char['combat_mode'] = False
+                    # Unequip weapon when leaving combat
+                    char.equipped_weapon = None
     
 
     def _process_pending_attacks(self):

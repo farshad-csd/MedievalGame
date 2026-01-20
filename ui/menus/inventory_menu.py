@@ -119,9 +119,8 @@ class InventoryMenu:
         self._nearby_ground_items = []  # List of GroundItem objects within range
         self._ground_pickup_radius = 1.0  # How close player must be to pick up
         
-        # Barrel/Corpse viewing state - when player interacts with a barrel or corpse
-        self._viewing_barrel = None  # Barrel object being viewed, or None
-        self._viewing_corpse = None  # Corpse object being viewed, or None
+        # Container viewing state - when player interacts with a barrel or corpse
+        self._viewing_container = None  # Container object being viewed, or None
         
         # Context menu state
         self.context_menu_open = False
@@ -181,27 +180,31 @@ class InventoryMenu:
         """Whether the menu is currently active."""
         return self._active
 
-    @property
-    def _viewing_container(self):
-        """Get the current viewing container (barrel or corpse), or None."""
-        return self._viewing_corpse if self._viewing_corpse else self._viewing_barrel
-
     # =========================================================================
     # MENU CONTROL
     # =========================================================================
 
-    def open(self, barrel=None, corpse=None):
+    def open(self, barrel=None, corpse=None, container=None):
         """Open the inventory menu.
 
         Args:
             barrel: Optional Barrel object to view. If provided, barrel inventory
-                   is shown instead of Ground section.
+                   is shown instead of Ground section. (Deprecated: use container)
             corpse: Optional Corpse object to view. If provided, corpse inventory
-                   is shown instead of Ground section.
+                   is shown instead of Ground section. (Deprecated: use container)
+            container: Optional Container object to view. If provided, container inventory
+                      is shown instead of Ground section.
         """
         self._active = True
-        self._viewing_barrel = barrel if not corpse else None
-        self._viewing_corpse = corpse
+        # Support both old (barrel/corpse) and new (container) parameters for backwards compatibility
+        if container is not None:
+            self._viewing_container = container
+        elif corpse is not None:
+            self._viewing_container = corpse
+        elif barrel is not None:
+            self._viewing_container = barrel
+        else:
+            self._viewing_container = None
         # Reset selection to inventory section
         self.selected_section = 'inventory'
         self.selected_slot = 0
@@ -227,8 +230,7 @@ class InventoryMenu:
             self._return_held_item_to_inventory()
         self.held_item = None
         self._held_was_equipped = False
-        self._viewing_barrel = None
-        self._viewing_corpse = None
+        self._viewing_container = None
         self._active = False
     
     def _return_held_item_to_inventory(self):
@@ -607,7 +609,7 @@ class InventoryMenu:
         
         # Move to Barrel/Corpse option when viewing a container
         if self._viewing_container:
-            container_name = 'Corpse' if self._viewing_corpse else 'Barrel'
+            container_name = self._viewing_container.display_type
             options.append(f'Move to {container_name}')
         
 
@@ -1226,7 +1228,7 @@ class InventoryMenu:
         # Calculate bottom section height (barrel/corpse or ground)
         barrel_rows = 0  # Initialize for corpse case
         if self._viewing_container:
-            if self._viewing_corpse:
+            if self._viewing_container.container_type == 'corpse':
                 # Corpse has complex layout: equipment + accessories + inventory
                 acc_slot_size = slot_size - 4
                 bottom_section_height = (
@@ -1710,7 +1712,7 @@ class InventoryMenu:
 
     def _draw_corpse_section(self, player, x, y, width, slot_size):
         """Draw corpse inventory as full character layout (equipment + accessories + inventory) in red box."""
-        corpse = self._viewing_corpse
+        corpse = self._viewing_container
         slot_gap = 4
         left_padding = 6
 
@@ -1783,7 +1785,7 @@ class InventoryMenu:
             return
 
         # Corpses show full character layout (equipment + accessories + inventory)
-        if self._viewing_corpse:
+        if self._viewing_container.container_type == 'corpse':
             self._draw_corpse_section(player, x, y, width, slot_size)
             return
 

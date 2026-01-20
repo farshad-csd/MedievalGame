@@ -104,181 +104,37 @@ class Interactable:
         return f"<{self.__class__.__name__} '{self.name}' at ({self.x}, {self.y})>"
 
 
-class Barrel(Interactable):
+class Container(Interactable):
     """
-    Storage container with inventory slots.
-    Can be owned by a character and associated with a home area.
-    """
-    
-    def __init__(self, name, x, y, home=None, owner=None, slots=BARREL_SLOTS, zone=None):
-        super().__init__(name, x, y, home, zone=zone)
-        self.owner = owner
-        self.inventory = [None] * slots
-    
-    def can_use(self, char):
-        """Check if character can use (take from) this barrel.
-        Owner can always use it. Others can use if their home matches.
-        """
-        if self.owner == char.name:
-            return True
-        return char.get('home') == self.home
-    
-    # =========================================================================
-    # INVENTORY METHODS
-    # =========================================================================
-    
-    def get_item(self, item_type):
-        """Get total amount of an item type in this barrel."""
-        total = 0
-        for slot in self.inventory:
-            if slot and slot['type'] == item_type:
-                total += slot['amount']
-        return total
-    
-    def can_add_item(self, item_type, amount):
-        """Check if barrel can add this much of an item."""
-        stack_size = ITEMS[item_type]["stack_size"]
-        
-        # None means unlimited stacking
-        if stack_size is None:
-            # Check for any same-type slot or empty slot
-            for slot in self.inventory:
-                if slot is None or slot['type'] == item_type:
-                    return True
-            return False
-        
-        space = 0
-        for slot in self.inventory:
-            if slot is None:
-                space += stack_size
-            elif slot['type'] == item_type and slot['amount'] < stack_size:
-                space += stack_size - slot['amount']
-        return space >= amount
-    
-    def add_item(self, item_type, amount):
-        """Add item to inventory. Returns amount actually added."""
-        stack_size = ITEMS[item_type]["stack_size"]
-        remaining = amount
-        
-        # Handle unlimited stacking (None)
-        if stack_size is None:
-            # First, try to add to existing stack of same type
-            for slot in self.inventory:
-                if slot and slot['type'] == item_type:
-                    slot['amount'] += remaining
-                    return amount
-            
-            # Then, use first empty slot
-            for i, slot in enumerate(self.inventory):
-                if slot is None:
-                    self.inventory[i] = {'type': item_type, 'amount': remaining}
-                    return amount
-            
-            return 0  # No space
-        
-        # Normal stacking with limit
-        # First, fill existing stacks
-        for slot in self.inventory:
-            if slot and slot['type'] == item_type and slot['amount'] < stack_size:
-                can_add = stack_size - slot['amount']
-                to_add = min(remaining, can_add)
-                slot['amount'] += to_add
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        # Then, use empty slots
-        for i, slot in enumerate(self.inventory):
-            if slot is None:
-                to_add = min(remaining, stack_size)
-                self.inventory[i] = {'type': item_type, 'amount': to_add}
-                remaining -= to_add
-                if remaining <= 0:
-                    return amount
-        
-        return amount - remaining
-    
-    def remove_item(self, item_type, amount):
-        """Remove item from inventory. Returns amount actually removed."""
-        remaining = amount
-        
-        # Remove from stacks (prefer smaller stacks first to consolidate)
-        item_slots = [(i, slot) for i, slot in enumerate(self.inventory) 
-                     if slot and slot['type'] == item_type]
-        item_slots.sort(key=lambda x: x[1]['amount'])
-        
-        for i, slot in item_slots:
-            to_remove = min(remaining, slot['amount'])
-            slot['amount'] -= to_remove
-            remaining -= to_remove
-            
-            # Remove empty slot
-            if slot['amount'] <= 0:
-                self.inventory[i] = None
-            
-            if remaining <= 0:
-                return amount
-        
-        return amount - remaining
-    
-    # Convenience methods for common items
-
-
-class Corpse(Interactable):
-    """
-    Corpse of a dead character with lootable inventory.
-    Remains indefinitely until looted/removed.
+    Base class for all containers with inventory (Barrel, Corpse, etc.).
+    Provides shared inventory management methods.
     """
 
-    def __init__(self, name, character_name, x, y, zone=None, facing='down', job=None, morality=5, inventory_size=None):
+    def __init__(self, name, x, y, slots, container_type='generic', **kwargs):
         """
         Args:
-            name: Display name (e.g., "John Smith's Corpse")
-            character_name: Name of the dead character
-            x: X position - EXACT float position where character died (not cell coords)
-            y: Y position - EXACT float position where character died (not cell coords)
-            zone: Interior name if inside, None if exterior
-            facing: Facing direction when died (for sprite)
-            job: Job of character (for sprite selection)
-            morality: Morality of character (for sprite selection)
-            inventory_size: Size of inventory (defaults to INVENTORY_SLOTS if not provided)
+            name: Display name
+            x: X position
+            y: Y position
+            slots: Number of inventory slots
+            container_type: Type identifier ('barrel', 'corpse', etc.)
+            **kwargs: Passed to Interactable (home, zone, etc.)
         """
-        # Store exact position (don't call super().__init__ which expects cell coords)
-        self.name = name
-        self.x = x  # Float position
-        self.y = y  # Float position
-        self.home = None
-        self.zone = zone
-
-        # Interior projection parameters
-        self._interior_proj_x = 0
-        self._interior_proj_y = 0
-        self._interior_scale_x = 1.0
-        self._interior_scale_y = 1.0
-
-        self.character_name = character_name
-        self.facing = facing
-        self.job = job
-        self.morality = morality
-        # Match the character's inventory size exactly
-        size = inventory_size if inventory_size is not None else INVENTORY_SLOTS
-        self.inventory = [None] * size
+        super().__init__(name, x, y, **kwargs)
+        self.inventory = [None] * slots
+        self.container_type = container_type
 
     @property
-    def center(self):
-        """Get center point (for distance calculations). Corpse uses exact position."""
-        return (self.x, self.y)
-
-    def can_use(self, char):
-        """Anyone can loot a corpse."""
-        return True
+    def display_type(self):
+        """Get the capitalized type name for UI display."""
+        return self.container_type.capitalize()
 
     # =========================================================================
-    # INVENTORY METHODS (identical to Barrel)
+    # INVENTORY METHODS - Shared by all containers
     # =========================================================================
 
     def get_item(self, item_type):
-        """Get total amount of an item type in this corpse."""
+        """Get total amount of an item type in this container."""
         total = 0
         for slot in self.inventory:
             if slot and slot['type'] == item_type:
@@ -286,7 +142,7 @@ class Corpse(Interactable):
         return total
 
     def can_add_item(self, item_type, amount):
-        """Check if corpse can add this much of an item."""
+        """Check if container can add this much of an item."""
         stack_size = ITEMS[item_type]["stack_size"]
 
         # None means unlimited stacking
@@ -370,6 +226,68 @@ class Corpse(Interactable):
                 return amount
 
         return amount - remaining
+
+
+class Barrel(Container):
+    """
+    Storage container with inventory slots.
+    Can be owned by a character and associated with a home area.
+    """
+
+    def __init__(self, name, x, y, home=None, owner=None, slots=BARREL_SLOTS, zone=None):
+        super().__init__(name, x, y, slots, container_type='barrel', home=home, zone=zone)
+        self.owner = owner
+    
+    def can_use(self, char):
+        """Check if character can use (take from) this barrel.
+        Owner can always use it. Others can use if their home matches.
+        """
+        if self.owner == char.name:
+            return True
+        return char.get('home') == self.home
+
+
+class Corpse(Container):
+    """
+    Corpse of a dead character with lootable inventory.
+    Remains indefinitely until looted/removed.
+    """
+
+    def __init__(self, name, character_name, x, y, zone=None, facing='down', job=None, morality=5, inventory_size=None):
+        """
+        Args:
+            name: Display name (e.g., "John Smith's Corpse")
+            character_name: Name of the dead character
+            x: X position - EXACT float position where character died (not cell coords)
+            y: Y position - EXACT float position where character died (not cell coords)
+            zone: Interior name if inside, None if exterior
+            facing: Facing direction when died (for sprite)
+            job: Job of character (for sprite selection)
+            morality: Morality of character (for sprite selection)
+            inventory_size: Size of inventory (defaults to INVENTORY_SLOTS if not provided)
+        """
+        # Match the character's inventory size exactly
+        size = inventory_size if inventory_size is not None else INVENTORY_SLOTS
+
+        # Note: Corpse stores EXACT float position, not cell coords
+        # So we initialize Container differently
+        Interactable.__init__(self, name, x, y, home=None, zone=zone)
+        self.inventory = [None] * size
+        self.container_type = 'corpse'
+
+        self.character_name = character_name
+        self.facing = facing
+        self.job = job
+        self.morality = morality
+
+    @property
+    def center(self):
+        """Get center point (for distance calculations). Corpse uses exact position."""
+        return (self.x, self.y)
+
+    def can_use(self, char):
+        """Anyone can loot a corpse."""
+        return True
 
 
 class Bed(Interactable):
