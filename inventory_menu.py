@@ -12,7 +12,7 @@ All item properties (sprites, colors, stack limits) come from constants.ITEMS.
 import os
 import pyray as rl
 from constants import (
-    SKILLS, ITEMS,
+    SKILLS, ITEMS, MAX_ENCUMBRANCE,
     UI_COLOR_BOX_BG, UI_COLOR_BOX_BG_MEDIUM, UI_COLOR_BOX_BG_LIGHT,
     UI_COLOR_BORDER, UI_COLOR_BORDER_INNER,
     UI_COLOR_TEXT, UI_COLOR_TEXT_DIM, UI_COLOR_TEXT_FAINT,
@@ -1355,8 +1355,12 @@ class InventoryMenu:
             
             # Encumbrance and Gold on bottom row
             bottom_y = y + 52
+            current_enc = player.get_encumbrance()
+            is_over_encumbered = current_enc >= MAX_ENCUMBRANCE
+            enc_color = rl.Color(255, 100, 100, 255) if is_over_encumbered else COLOR_TEXT_FAINT
             rl.draw_text("Wt", x + 8, bottom_y, 9, COLOR_TEXT_DIM)
-            rl.draw_text("0/100", x + 24, bottom_y, 9, COLOR_TEXT_FAINT)
+            enc_str = f"{current_enc:.1f}/{MAX_ENCUMBRANCE:.0f}"
+            rl.draw_text(enc_str, x + 24, bottom_y, 9, enc_color)
             
             gold = player.get_item('gold')
             gold_str = f"${gold:,}"
@@ -1404,8 +1408,12 @@ class InventoryMenu:
             
             # Encumbrance on second row
             enc_y = y + 32
+            current_enc = player.get_encumbrance()
+            is_over_encumbered = current_enc >= MAX_ENCUMBRANCE
+            enc_color = rl.Color(255, 100, 100, 255) if is_over_encumbered else COLOR_TEXT_FAINT
             rl.draw_text("Wt", x + 8, enc_y, 9, COLOR_TEXT_DIM)
-            rl.draw_text("0/100", x + 24, enc_y, 9, COLOR_TEXT_FAINT)
+            enc_str = f"{current_enc:.1f}/{MAX_ENCUMBRANCE:.0f}"
+            rl.draw_text(enc_str, x + 24, enc_y, 9, enc_color)
             
             # Gold - align with encumbrance row
             gold = player.get_item('gold')

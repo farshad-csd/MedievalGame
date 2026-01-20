@@ -17,7 +17,7 @@ This class does NOT:
 import math
 import time
 from constants import (
-    MOVEMENT_SPEED, SPRINT_SPEED, BLOCK_MOVEMENT_SPEED,
+    MOVEMENT_SPEED, SPRINT_SPEED, BLOCK_MOVEMENT_SPEED, ENCUMBERED_SPEED,
     CHARACTER_WIDTH, CHARACTER_HEIGHT,
     ATTACK_ANIMATION_DURATION, WEAPON_REACH,
     BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
@@ -88,8 +88,11 @@ class PlayerController:
         # Update facing based on input
         self._update_facing(player, dx, dy)
         
-        # Calculate speed (blocking overrides sprint)
-        if player.is_blocking:
+        # Calculate speed (encumbrance overrides all, then blocking overrides sprint)
+        if player.is_over_encumbered():
+            speed = ENCUMBERED_SPEED
+            player.is_sprinting = False
+        elif player.is_blocking:
             speed = BLOCK_MOVEMENT_SPEED
             player.is_sprinting = False
         elif sprinting:

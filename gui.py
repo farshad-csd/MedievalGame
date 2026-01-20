@@ -1044,12 +1044,17 @@ class BoardGUI:
     def _shoot_arrow(self, player, arrow_speed, arrow_range):
         """Spawn an arrow projectile in the direction player is aiming.
         
+        Applies accuracy spread based on bow draw progress - less draw = more deviation.
+        Uses Gaussian distribution so most shots are near center, with occasional wild shots.
+        
         Args:
             player: Player character
             arrow_speed: Speed of the arrow in cells/second
             arrow_range: Maximum range before arrow disappears
         """
         import math
+        import random
+        from constants import BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES
         
         attack_angle = player.get('attack_angle')
         if attack_angle is None:
@@ -1063,7 +1068,26 @@ class BoardGUI:
             start_x = player.x
             start_y = player.y
         
-        # Calculate direction vector
+        # Calculate accuracy spread based on draw progress
+        # Arrow speed scales linearly from min to max, so we can derive progress from it
+        from constants import ARROW_SPEED, ARROW_MIN_SPEED
+        if ARROW_SPEED > ARROW_MIN_SPEED:
+            draw_progress = (arrow_speed - ARROW_MIN_SPEED) / (ARROW_SPEED - ARROW_MIN_SPEED)
+        else:
+            draw_progress = 1.0
+        
+        # Get current spread angle (in degrees, one side of center)
+        spread_degrees = BOW_SPREAD_MAX_DEGREES - draw_progress * (BOW_SPREAD_MAX_DEGREES - BOW_SPREAD_MIN_DEGREES)
+        
+        # Apply Gaussian deviation if there's any spread
+        if spread_degrees > 0:
+            # Convert to radians
+            spread_radians = math.radians(spread_degrees)
+            # Gaussian with std dev = spread_degrees means ~68% of shots within ±spread, ~95% within ±2*spread
+            deviation = random.gauss(0, spread_radians)
+            attack_angle += deviation
+        
+        # Calculate direction vector from (possibly deviated) angle
         dx = math.cos(attack_angle)
         dy = math.sin(attack_angle)
         
@@ -1764,6 +1788,9 @@ class BoardGUI:
         # Draw aiming arc under player (before characters so it appears underneath)
         self._draw_player_aiming_arc()
         
+        # Draw bow accuracy cone when drawing bow
+        self._draw_bow_accuracy_cone()
+        
         # Draw all occluders (trees, houses, barrels, beds, stoves) and characters together, Y-sorted for proper depth
         self._draw_trees_and_characters()
         _cp_t4 = time.time()
@@ -1897,6 +1924,9 @@ class BoardGUI:
         
         # Draw aiming arc under player (before characters so it appears underneath)
         self._draw_player_aiming_arc()
+        
+        # Draw bow accuracy cone when drawing bow
+        self._draw_bow_accuracy_cone()
         
         # Draw characters and objects in interior using the unified rendering function
         # This reuses the same code path as exterior rendering - zone filtering handles the rest
@@ -3901,6 +3931,93 @@ void main() {
             rl.Vector2(tip_left_x, tip_left_y),
             rl.Vector2(tip_right_x, tip_right_y),
             chevron_color
+        )
+
+    def _draw_bow_accuracy_cone(self):
+        """Draw accuracy cone while player is drawing bow.
+        
+        Two thin lines extend from player to max arrow range, showing current
+        accuracy spread. Lines start opaque at zero draw and fade to transparent
+        at full draw (perfect accuracy).
+        """
+        from constants import (
+            BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES,
+            BOW_CONE_LINE_THICKNESS, BOW_CONE_OPACITY_START, BOW_CONE_OPACITY_END,
+            ARROW_MAX_RANGE
+        )
+        
+        player = self.state.player
+        if not player:
+            return
+        
+        # Only show while drawing bow
+        if not player.is_drawing_bow():
+            return
+        
+        # Get spread and draw progress
+        current_tick = self.state.ticks
+        spread_degrees = player.get_bow_spread_degrees(current_tick)
+        draw_progress = player.get_bow_draw_progress(current_tick)
+        
+        if spread_degrees is None or draw_progress is None:
+            return
+        
+        # Get the precise attack angle
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return
+        
+        cell_size = self._cam_cell_size
+        
+        # Get player screen position
+        if player.zone:
+            vis_x = player.prevailing_x
+            vis_y = player.prevailing_y
+        else:
+            vis_x = player.x
+            vis_y = player.y
+        
+        pixel_cx, pixel_cy = self._world_to_screen(vis_x, vis_y)
+        
+        # Cone extends to max arrow range
+        cone_length = ARROW_MAX_RANGE * cell_size
+        
+        # Convert spread to radians
+        spread_radians = math.radians(spread_degrees)
+        
+        # Calculate opacity based on draw progress (fades as draw progresses)
+        opacity = int(BOW_CONE_OPACITY_START + draw_progress * (BOW_CONE_OPACITY_END - BOW_CONE_OPACITY_START))
+        
+        # Don't draw if fully transparent
+        if opacity <= 0:
+            return
+        
+        # Line color (white with fading opacity)
+        line_color = rl.Color(255, 255, 255, opacity)
+        
+        # Calculate end points for both cone lines
+        # Left edge of cone
+        left_angle = attack_angle - spread_radians
+        left_end_x = pixel_cx + math.cos(left_angle) * cone_length
+        left_end_y = pixel_cy + math.sin(left_angle) * cone_length
+        
+        # Right edge of cone
+        right_angle = attack_angle + spread_radians
+        right_end_x = pixel_cx + math.cos(right_angle) * cone_length
+        right_end_y = pixel_cy + math.sin(right_angle) * cone_length
+        
+        # Draw the two cone lines
+        rl.draw_line_ex(
+            rl.Vector2(pixel_cx, pixel_cy),
+            rl.Vector2(left_end_x, left_end_y),
+            BOW_CONE_LINE_THICKNESS,
+            line_color
+        )
+        rl.draw_line_ex(
+            rl.Vector2(pixel_cx, pixel_cy),
+            rl.Vector2(right_end_x, right_end_y),
+            BOW_CONE_LINE_THICKNESS,
+            line_color
         )
 
     def _draw_character_ui(self, ui_info):

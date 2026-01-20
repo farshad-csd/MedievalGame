@@ -35,7 +35,8 @@ from constants import (
     DEBUG_TRIPLE_PLAYER_HEALTH,
     HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
     HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER,
-    BOW_DRAW_CHARGE_TICKS
+    BOW_DRAW_CHARGE_TICKS,
+    BOW_SPREAD_MAX_DEGREES, BOW_SPREAD_MIN_DEGREES
 )
 from scenario_characters import CHARACTER_TEMPLATES
 
@@ -650,6 +651,32 @@ class Character:
         """Get remaining wheat capacity (for backward compatibility)."""
         return self.get_item_space('wheat')
     
+    def get_encumbrance(self):
+        """Calculate total weight of all carried items.
+        
+        Returns:
+            Float representing total weight of inventory
+        """
+        total_weight = 0.0
+        for slot in self.inventory:
+            if slot is None:
+                continue
+            item_type = slot.get('type', '')
+            amount = slot.get('amount', 0)
+            item_info = ITEMS.get(item_type, {})
+            weight_per_unit = item_info.get('weight', 0)
+            total_weight += weight_per_unit * amount
+        return total_weight
+    
+    def is_over_encumbered(self):
+        """Check if character is at or over max encumbrance.
+        
+        Returns:
+            True if encumbrance >= MAX_ENCUMBRANCE
+        """
+        from constants import MAX_ENCUMBRANCE
+        return self.get_encumbrance() >= MAX_ENCUMBRANCE
+    
     def is_inventory_full(self):
         """Check if inventory is completely full (no empty slots, all stacks maxed)."""
         for slot in self.inventory:
@@ -1081,6 +1108,27 @@ class Character:
             True if drawing
         """
         return self.bow_drawing
+    
+    def get_bow_spread_degrees(self, current_tick):
+        """Get the current accuracy spread angle based on draw progress.
+        
+        At zero draw, spread is BOW_SPREAD_MAX_DEGREES (±30° = 60° cone).
+        At full draw, spread is BOW_SPREAD_MIN_DEGREES (0° = perfect accuracy).
+        Spread decreases linearly with draw progress.
+        
+        Args:
+            current_tick: Current game tick
+            
+        Returns:
+            Spread angle in degrees (one side of center), or None if not drawing
+        """
+        progress = self.get_bow_draw_progress(current_tick)
+        if progress is None:
+            return None
+        
+        # Linear interpolation from max to min spread
+        spread = BOW_SPREAD_MAX_DEGREES - progress * (BOW_SPREAD_MAX_DEGREES - BOW_SPREAD_MIN_DEGREES)
+        return spread
     
     # =========================================================================
     # ONGOING ACTIONS (Player timed actions)

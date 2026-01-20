@@ -166,10 +166,17 @@ ARROW_STUCK_DURATION = 5.0            # Seconds arrow stays stuck in ground befo
 ARROW_DROP_START = 0.6                # Progress (0-1) when arrow starts dropping (0.6 = last 40% of flight)
 ARROW_DROP_MAX_ANGLE = 20             # Maximum drop angle in degrees (toward ground)
 
+# Bow accuracy/spread settings
+BOW_SPREAD_MAX_DEGREES = 20.0         # Spread angle at zero draw (±30° = 60° total cone)
+BOW_SPREAD_MIN_DEGREES = 2.0          # Spread angle at full draw (0 = perfect accuracy)
+BOW_CONE_LINE_THICKNESS = 0.5         # Thickness of cone lines in pixels
+BOW_CONE_OPACITY_START = 100          # Cone line opacity at zero draw (0-255)
+BOW_CONE_OPACITY_END = 50              # Cone line opacity at full draw (0-255, 0 = invisible)
+
 # =============================================================================
 # DEBUG GAMEPLAY SETTINGS
 # =============================================================================
-DEBUG_TRIPLE_PLAYER_HEALTH = True    # Player starts with 300 HP instead of 100
+DEBUG_TRIPLE_PLAYER_HEALTH = False    # Player starts with 300 HP instead of 100
 
 # =============================================================================
 # IDLE/WANDERING SETTINGS
@@ -350,11 +357,13 @@ SKILLS = {
 # =============================================================================
 # Central item registry - all items and their properties
 # All item display info is here - inventory_menu.py reads from this
+# Weight is in abstract units - gold is weightless, other items have realistic relative weights
 ITEMS = {
     "wheat": {
         "name": "Wheat",
         "price": 5,
         "stack_size": 15,
+        "weight": 0.5,  # ~1 lb per unit (small bundle of wheat)
         "sprite": "Wheat.png",  # In sprites/items/
         "color": (245, 222, 130, 200),  # RGBA fallback color
         "icon": "W",  # Fallback text icon
@@ -363,6 +372,7 @@ ITEMS = {
         "name": "Gold",
         "price": 1,
         "stack_size": None,  # Infinite stacking
+        "weight": 0,  # Gold is weightless (game abstraction)
         "sprite": "Gold.png",
         "color": (218, 165, 32, 200),
         "icon": "$",
@@ -371,12 +381,19 @@ ITEMS = {
         "name": "Bread",
         "price": 7,
         "stack_size": 15,
+        "weight": 0.4,  # ~0.9 lb per loaf
         "hunger_value": 33,  # How much hunger restored per unit
         "sprite": "Bread.png",
         "color": (160, 82, 45, 200),
         "icon": "B",
     },
 }
+
+# =============================================================================
+# ENCUMBRANCE SETTINGS
+# =============================================================================
+MAX_ENCUMBRANCE = 50.0  # Maximum weight before becoming over-encumbered
+ENCUMBERED_SPEED = 0.01  # Movement speed when at or past max encumbrance (nearly immobile)
 
 INVENTORY_SLOTS = 5
 BARREL_SLOTS = 30
