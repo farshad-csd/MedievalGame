@@ -632,9 +632,9 @@ class Job:
             state.log_action(f"{char.get_display_name()} told {defender.get_display_name()} about {attacker.get_display_name()}'s attack!")
     
     def _do_fight_back(self, char, state, logic):
-        """Fight back against attacker."""
+        """Fight back against attacker using best available weapon."""
         attacker = char.get_active_attacker(state.ticks, state.characters)
-        
+
         # Also check attacked_by memory if no active attacker
         if not attacker:
             for memory in char.get_memories(memory_type='attacked_by'):
@@ -644,58 +644,143 @@ class Job:
                     if can_perceive:
                         attacker = potential
                         break
-        
+
         if not attacker:
             char['combat_track_target'] = None
+            char.cancel_bow_draw()
             return False
-        
+
         # Set attack intent if not already targeting this attacker
         if char.intent is None or char.intent.get('target') is not attacker:
             state.log_action(f"{char.get_display_name()} FIGHTING BACK against {attacker.get_display_name()}!")
             char.set_intent('attack', attacker, reason='self_defense', started_tick=state.ticks)
-        
-        # Calculate distance to target
-        dx = attacker.x - char.x
-        dy = attacker.y - char.y
-        dist = math.sqrt(dx * dx + dy * dy)
-        
-        # Attack if in melee range and off cooldown
-        if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
-            logic._do_attack(char, attacker)
-            return True
-        
-        # Set combat tracking target - movement system handles the rest
-        char['combat_track_target'] = attacker
-        char.goal = None
-        
-        return False
+
+        # Delegate to unified combat logic (handles both melee and ranged)
+        return self._do_combat(char, state, logic)
     
     def _do_combat(self, char, state, logic):
-        """Continue combat with target."""
+        """Continue combat with target using best weapon (melee or ranged)."""
         if char.intent is None or char.intent.get('action') != 'attack':
             char['combat_track_target'] = None
+            char.cancel_bow_draw()  # Cancel any bow draw if no longer in combat
             return False
-        
+
         target = char.intent.get('target')
         if not target or target not in state.characters or target.health <= 0:
             char.clear_intent()
             char['combat_track_target'] = None
+            char.cancel_bow_draw()
             return False
-        
+
         # Calculate distance to target
         dx = target.x - char.x
         dy = target.y - char.y
         dist = math.sqrt(dx * dx + dy * dy)
-        
+
+        # Determine which weapon to use based on expected damage
+        equipped_weapon_type = char.get_equipped_weapon_type()
+        melee_damage = char.get_weapon_expected_damage('melee')  # Includes fists if no melee weapon
+        ranged_damage = char.get_weapon_expected_damage('ranged')
+
+        # Use the weapon that does more damage
+        use_ranged = ranged_damage > melee_damage and equipped_weapon_type == 'ranged'
+
+        if use_ranged:
+            # RANGED COMBAT: Draw bow and shoot when ready
+            return self._do_ranged_combat(char, target, dist, state, logic)
+        else:
+            # MELEE COMBAT: Chase and attack
+            char.cancel_bow_draw()  # Cancel bow if we were drawing
+            return self._do_melee_combat(char, target, dist, state, logic)
+
+    def _do_melee_combat(self, char, target, dist, state, logic):
+        """Handle melee combat (original melee logic)."""
         # Attack if in melee range and off cooldown
         if dist <= MELEE_ATTACK_DISTANCE and logic.can_attack(char):
             logic._do_attack(char, target)
             return True
-        
+
         # Set combat tracking target - movement system handles the rest
         char['combat_track_target'] = target
         char.goal = None  # Clear any existing goal
-        
+
+        return False
+
+    def _do_ranged_combat(self, char, target, dist, state, logic):
+        """Handle ranged combat (bow drawing and shooting)."""
+        from constants import ITEMS
+        _bow = ITEMS["bow"]
+        bow_range = _bow["range"]
+        bow_min_range = _bow.get("min_effective_range", 3.0)  # Prefer not to shoot at point-blank
+
+        # If target is too close, back away to preferred range
+        if dist < bow_min_range:
+            # Back away while facing target
+            char['combat_track_target'] = None
+            # Calculate position away from target
+            away_x = char.x - (target.x - char.x) * 0.5
+            away_y = char.y - (target.y - char.y) * 0.5
+            char.goal = (away_x, away_y)
+            char['face_target'] = target
+            char.cancel_bow_draw()  # Don't shoot while backing up
+            return True
+
+        # If target is in range and we can see them, draw/shoot
+        if dist <= bow_range:
+            # Check if we're on cooldown from last shot
+            # For bows, cooldown = full draw time (can't spam arrows)
+            bow_draw_time = _bow["draw_time_ticks"]
+            last_attack_tick = char.get('last_attack_tick', -bow_draw_time)
+            ticks_since_last = state.ticks - last_attack_tick
+
+            if ticks_since_last < bow_draw_time:
+                # Still on cooldown - hold position and face target
+                char.vx = 0.0
+                char.vy = 0.0
+                char['combat_track_target'] = None
+                char.goal = None
+                logic._face_toward_target(char, target)
+                return True
+
+            # Start drawing if not already
+            if not char.is_drawing_bow():
+                char.start_bow_draw(state.ticks)
+
+            # Update draw progress
+            draw_progress = char.get_bow_draw_progress(state.ticks)
+
+            # Fire when fully drawn (or nearly fully drawn)
+            if draw_progress and draw_progress >= 0.9:
+                # Calculate angle to target
+                angle = math.atan2(target.y - char.y, target.x - char.x)
+
+                # Set attack angle for the arrow (similar to player)
+                char.attack_angle = angle
+
+                # Fire the arrow!
+                logic.shoot_arrow(char, angle, draw_progress)
+
+                # Release bow draw state
+                char.release_bow_draw(state.ticks)
+
+                # Record attack tick for cooldown (enforces draw time between shots)
+                char['last_attack_tick'] = state.ticks
+
+                return True
+
+            # Still drawing - hold position and face target
+            char.vx = 0.0
+            char.vy = 0.0
+            char['combat_track_target'] = None
+            char.goal = None
+            logic._face_toward_target(char, target)
+            return True
+
+        # Target out of range - chase them
+        char['combat_track_target'] = target
+        char.goal = None
+        char.cancel_bow_draw()  # Don't draw while chasing
+
         return False
     
     def _do_flee_criminal(self, char, state, logic):

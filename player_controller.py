@@ -343,129 +343,48 @@ class PlayerController:
     
     def handle_shoot_button_held(self, current_tick):
         """Handle shoot button being held down (update bow draw).
-        
+
         Args:
             current_tick: Current game tick
-            
+
         Returns:
             True if currently drawing
         """
         player = self.player
         if not player:
             return False
-        
+
         return player.update_bow_draw(current_tick)
-    
-    def handle_shoot_button_release(self, current_tick):
-        """Handle shoot button being released (fire arrow).
-        
-        Args:
-            current_tick: Current game tick
-            
-        Returns:
-            Tuple of (arrow_speed, arrow_max_range) based on draw progress,
-            or None if no arrow should be fired
-        """
-        player = self.player
-        if not player:
-            return None
-        
-        # Get draw progress and release
-        progress = player.release_bow_draw(current_tick)
-        
-        # Calculate speed and range based on draw progress
-        # Linear interpolation from min to max
-        arrow_speed = _BOW["min_speed"] + progress * (_BOW["max_speed"] - _BOW["min_speed"])
-        arrow_range = _BOW["min_range"] + progress * (_BOW["range"] - _BOW["min_range"])
-        
-        return (arrow_speed, arrow_range)
 
     def handle_bake_input(self):
         """Handle bake key press.
-        
+
         Returns:
             True if baked successfully
         """
         player = self.player
         if not player:
             return False
-        
-        name = player.get_display_name()
-        
-        # Check for adjacent cooking spot (requires world knowledge)
-        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
-        
-        if not cooking_spot:
-            # Give helpful feedback
-            stove = self.state.interactables.get_adjacent_stove(player)
-            if stove and not stove.can_use(player):
-                self.logic.log_bake_error(player, 'not_your_stove')
-            else:
-                self.logic.log_bake_error(player, 'no_stove')
-            return False
 
-        if player.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
-            self.logic.log_bake_error(player, 'no_wheat')
-            return False
-
-        if not player.can_add_item('bread', 1):
-            self.logic.log_bake_error(player, 'inventory_full')
-            return False
-        
-        # Bake through game logic (handles the actual conversion)
-        amount_baked = self.logic.bake_bread(player, 1)
+        # Game logic handles ALL validation and logging
+        amount_baked = self.logic.bake_bread(player, amount=1, log_errors=True)
         return amount_baked > 0
     
     def handle_barrel_input(self):
         """Handle barrel interaction key press.
-        
+
         Takes wheat from an adjacent barrel if possible.
-        
+
         Returns:
             True if successfully took wheat
         """
         player = self.player
         if not player:
             return False
-        
-        name = player.get_display_name()
-        
-        # Find adjacent barrel
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                if not barrel.can_use(player):
-                    self.logic.log_barrel_error(player, barrel, 'not_yours')
-                    return False
 
-                wheat_count = barrel.get_wheat()
-                if wheat_count <= 0:
-                    self.logic.log_barrel_error(player, barrel, 'empty')
-                    return False
-
-                # Take as much wheat as player can carry
-                can_take = min(wheat_count, 50)  # Take up to 50 at a time
-                if not player.can_add_item('wheat', 1):
-                    self.logic.log_barrel_error(player, barrel, 'inventory_full')
-                    return False
-
-                # Calculate how much we can actually take
-                taken = 0
-                for _ in range(can_take):
-                    if not player.can_add_item('wheat', 1):
-                        break
-                    if barrel.get_wheat() <= 0:
-                        break
-                    barrel.remove_wheat(1)
-                    player.add_item('wheat', 1)
-                    taken += 1
-
-                if taken > 0:
-                    self.logic.log_barrel_take(player, barrel, taken)
-                    return True
-
-                return False
-        
-        return False
+        # Game logic handles ALL validation and logging
+        amount_taken = self.logic.take_from_barrel(player, max_amount=50, log_errors=True)
+        return amount_taken > 0
     
     # =========================================================================
     # DOOR/BUILDING INTERACTION

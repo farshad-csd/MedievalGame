@@ -730,7 +730,7 @@ class Character:
                 self.add_item(item_type, amount)
 
     def get_strongest_weapon_slot(self):
-        """Find the inventory slot with the strongest melee weapon.
+        """Find the inventory slot with the strongest weapon (melee or ranged).
 
         Returns:
             Slot index of strongest weapon, or None if no weapons in inventory
@@ -745,8 +745,9 @@ class Character:
             item_type = slot.get('type', '')
             item_info = ITEMS.get(item_type, {})
 
-            # Only consider melee weapons (ranged weapons handled separately)
-            if item_info.get('weapon_type') != 'melee':
+            # Consider both melee and ranged weapons
+            weapon_type = item_info.get('weapon_type')
+            if weapon_type not in ('melee', 'ranged'):
                 continue
 
             # Calculate average damage for this weapon
@@ -761,7 +762,7 @@ class Character:
         return best_slot
 
     def equip_strongest_weapon(self):
-        """Equip the strongest melee weapon in inventory.
+        """Equip the strongest weapon (melee or ranged) in inventory.
 
         Returns:
             True if a weapon was equipped, False if no weapons available
@@ -773,6 +774,67 @@ class Character:
         else:
             self.equipped_weapon = None
             return False
+
+    def get_equipped_weapon_type(self):
+        """Get the weapon type of the currently equipped weapon.
+
+        Returns:
+            'melee', 'ranged', or None if no weapon equipped
+        """
+        if self.equipped_weapon is None:
+            return None
+
+        if self.equipped_weapon < 0 or self.equipped_weapon >= len(self.inventory):
+            return None
+
+        item = self.inventory[self.equipped_weapon]
+        if item is None:
+            return None
+
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+        return item_info.get('weapon_type')
+
+    def get_weapon_expected_damage(self, weapon_type):
+        """Calculate the expected average damage for a weapon type.
+
+        For melee weapons: returns average base damage (or fists if no melee weapon equipped).
+        For ranged weapons: returns average base damage (or 0 if no ranged weapon equipped).
+        For fists: returns fist damage.
+
+        Args:
+            weapon_type: 'melee', 'ranged', or None for fists
+
+        Returns:
+            Expected damage value
+        """
+        from constants import FISTS
+
+        if weapon_type is None:
+            # Fists
+            return (FISTS['base_damage_min'] + FISTS['base_damage_max']) / 2.0
+
+        # Check if we have an equipped weapon of this type
+        if self.equipped_weapon is not None:
+            if 0 <= self.equipped_weapon < len(self.inventory):
+                item = self.inventory[self.equipped_weapon]
+                if item is not None:
+                    item_type = item.get('type', '')
+                    item_info = ITEMS.get(item_type, {})
+
+                    # If equipped weapon matches the requested type, return its damage
+                    if item_info.get('weapon_type') == weapon_type:
+                        damage_min = item_info.get('base_damage_min', 0)
+                        damage_max = item_info.get('base_damage_max', 0)
+                        return (damage_min + damage_max) / 2.0
+
+        # No weapon of this type equipped
+        if weapon_type == 'melee':
+            # Fall back to fists for melee
+            return (FISTS['base_damage_min'] + FISTS['base_damage_max']) / 2.0
+        else:
+            # No ranged weapon available
+            return 0.0
 
     # =========================================================================
     # ACTIONS (used by both player and NPCs)

@@ -572,7 +572,7 @@ class GameLogic:
             
             # Check if target was a criminal
             target_was_criminal = self.is_known_criminal(target)
-            
+
             # If attacking an innocent, this is a crime
             if not target_was_criminal:
                 # Attacker records they committed a crime (only once)
@@ -583,7 +583,7 @@ class GameLogic:
                                        source='self',
                                        crime_type='assault', victim=target)
                     attacker_is_criminal = True
-                
+
                 # Witness EVERY attack against an innocent (not just first)
                 if target.health > 0:
                     self.witness_crime(attacker, target, 'assault')
@@ -753,7 +753,71 @@ class GameLogic:
             self.broadcast_violence(attacker, target)
         
         return result
-    
+
+    def shoot_arrow(self, char, target_angle, draw_progress):
+        """Spawn an arrow projectile for any character (player or NPC).
+
+        Applies accuracy spread based on draw progress - less draw = more deviation.
+        Uses Gaussian distribution so most shots are near center, with occasional wild shots.
+
+        Args:
+            char: Character shooting the arrow
+            target_angle: Angle to shoot in radians (0 = right, π/2 = down)
+            draw_progress: Draw power from 0.0 (no draw) to 1.0 (full draw)
+
+        Returns:
+            True if arrow was spawned successfully
+        """
+        import math
+        import random
+
+        _bow = ITEMS["bow"]
+
+        # Calculate speed and range based on draw progress
+        arrow_speed = _bow["min_speed"] + draw_progress * (_bow["max_speed"] - _bow["min_speed"])
+        arrow_range = _bow["min_range"] + draw_progress * (_bow["range"] - _bow["min_range"])
+
+        # Get character position
+        if char.zone:
+            start_x = char.prevailing_x
+            start_y = char.prevailing_y
+        else:
+            start_x = char.x
+            start_y = char.y
+
+        # Calculate accuracy spread based on draw progress
+        spread_max = _bow["spread_max_degrees"]
+        spread_min = _bow["spread_min_degrees"]
+        spread_degrees = spread_max - draw_progress * (spread_max - spread_min)
+
+        # Apply Gaussian deviation if there's any spread
+        if spread_degrees > 0:
+            # Convert to radians
+            spread_radians = math.radians(spread_degrees)
+            # Gaussian with std dev = spread_degrees means ~68% of shots within ±spread, ~95% within ±2*spread
+            deviation = random.gauss(0, spread_radians)
+            target_angle += deviation
+
+        # Calculate direction vector from (possibly deviated) angle
+        dx = math.cos(target_angle)
+        dy = math.sin(target_angle)
+
+        # Create arrow with speed and range from draw power
+        arrow = {
+            'x': start_x,
+            'y': start_y,
+            'dx': dx,
+            'dy': dy,
+            'distance': 0.0,
+            'owner': char,
+            'zone': char.zone,
+            'speed': arrow_speed,
+            'max_range': arrow_range,
+        }
+        self.state.arrows.append(arrow)
+
+        return True
+
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
         for other in self.state.characters:
@@ -989,23 +1053,50 @@ class GameLogic:
         
         return True
     
-    def bake_bread(self, char, amount=1):
+    def bake_bread(self, char, amount=1, log_errors=True):
         """Convert wheat into bread at a stove or campfire.
-        Character must be adjacent to a cooking spot they can use.
-        Returns the amount of bread actually baked.
+
+        Performs ALL validation and logging. This is the single source of truth for baking.
+
+        Args:
+            char: Character attempting to bake
+            amount: Number of bread to bake (default 1)
+            log_errors: If True, log detailed error messages for failures (default True)
+
+        Returns:
+            Amount of bread actually baked (0 if failed)
         """
+        # Check for adjacent cooking spot
         cooking_spot = self.get_adjacent_cooking_spot(char)
         if not cooking_spot:
+            if log_errors:
+                # Give helpful feedback - check if stove exists but can't use it
+                stove = self.state.interactables.get_adjacent_stove(char)
+                if stove and not stove.can_use(char):
+                    self.log_bake_error(char, 'not_your_stove')
+                else:
+                    self.log_bake_error(char, 'no_stove')
             return 0
-        
-        name = char.get_display_name()
+
+        # Check wheat availability
+        if char.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
+            if log_errors:
+                self.log_bake_error(char, 'no_wheat')
+            return 0
+
+        # Check inventory space
+        if not char.can_add_item('bread', 1):
+            if log_errors:
+                self.log_bake_error(char, 'inventory_full')
+            return 0
+
         wheat_available = char.get_item('wheat')
         max_from_wheat = wheat_available // WHEAT_TO_BREAD_RATIO
-        
+
         # Calculate how much we can actually bake
         # Limited by: requested amount, available wheat, inventory space
         to_bake = min(amount, max_from_wheat)
-        
+
         # Check inventory space iteratively (in case we can only fit some)
         actually_baked = 0
         for _ in range(to_bake):
@@ -1013,18 +1104,75 @@ class GameLogic:
                 break
             if char.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
                 break
-            
+
             # Convert wheat to bread
             char.remove_item('wheat', WHEAT_TO_BREAD_RATIO)
             char.add_item('bread', 1)
             actually_baked += 1
-        
+
         if actually_baked > 0:
             spot_name = cooking_spot['name']
-            self.state.log_action(f"{name} baked {actually_baked} bread at {spot_name}")
-        
+            self.state.log_action(f"{char.get_display_name()} baked {actually_baked} bread at {spot_name}")
+
         return actually_baked
-    
+
+    def take_from_barrel(self, char, max_amount=50, log_errors=True):
+        """Take wheat from an adjacent barrel.
+
+        Performs ALL validation and logging. Single source of truth for barrel interactions.
+
+        Args:
+            char: Character taking from barrel
+            max_amount: Maximum wheat to take at once (default 50)
+            log_errors: If True, log detailed error messages (default True)
+
+        Returns:
+            Amount of wheat actually taken (0 if failed)
+        """
+        # Find adjacent barrel
+        for barrel in self.state.interactables.barrels.values():
+            if not barrel.is_adjacent(char):
+                continue
+
+            # Found adjacent barrel - check permissions
+            if not barrel.can_use(char):
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'not_yours')
+                return 0
+
+            # Check barrel contents
+            wheat_count = barrel.get_wheat()
+            if wheat_count <= 0:
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'empty')
+                return 0
+
+            # Check inventory space
+            if not char.can_add_item('wheat', 1):
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'inventory_full')
+                return 0
+
+            # Take as much wheat as possible
+            can_take = min(wheat_count, max_amount)
+            taken = 0
+            for _ in range(can_take):
+                if not char.can_add_item('wheat', 1):
+                    break
+                if barrel.get_wheat() <= 0:
+                    break
+                barrel.remove_wheat(1)
+                char.add_item('wheat', 1)
+                taken += 1
+
+            if taken > 0:
+                self.log_barrel_take(char, barrel, taken)
+
+            return taken
+
+        # No adjacent barrel found
+        return 0
+
     def get_nearest_cooking_spot(self, char):
         """Find the nearest cooking spot the character can use (their stoves or any campfire).
         Returns (cooking_spot_dict, position) or (None, None).
@@ -2197,19 +2345,49 @@ class GameLogic:
             return False
         
         # Movement is handled by velocity system in _get_goal
-        # We just check if adjacent and can attack if so
-        
-        if self.is_adjacent(attacker, target):
-            # Check if can attack (not already animating)
-            if attacker.can_attack():
-                # Face the target before attacking
-                self._face_toward_target(attacker, target)
-                
-                # Start attack animation - damage dealt when animation completes
-                # (processed by _process_pending_attacks)
-                attacker.start_attack(target=target)
-                attacker.last_attack_tick = self.state.ticks
-        
+        # Check weapon type - ranged weapons can attack from distance, melee requires adjacency
+
+        weapon_type = attacker.get_equipped_weapon_type()
+
+        if weapon_type == 'ranged':
+            # Bow attack - can attack from range
+            # Check if already drawing bow
+            if attacker.is_drawing_bow():
+                # Continue drawing - check if fully drawn
+                if attacker.get_bow_draw_progress(self.state.ticks) >= 1.0:
+                    # Fully drawn - fire!
+                    # Calculate angle to target
+                    import math
+                    dx = target.prevailing_x - attacker.prevailing_x
+                    dy = target.prevailing_y - attacker.prevailing_y
+                    angle = math.atan2(dy, dx)
+
+                    # Release bow and get final draw progress
+                    draw_progress = attacker.release_bow_draw(self.state.ticks)
+
+                    # Fire arrow via centralized logic
+                    self.shoot_arrow(attacker, angle, draw_progress)
+            else:
+                # Not drawing - start drawing if can attack
+                if attacker.can_attack():
+                    # Face the target before drawing
+                    self._face_toward_target(attacker, target)
+
+                    # Start bow draw
+                    attacker.start_bow_draw(self.state.ticks)
+        else:
+            # Melee attack - requires adjacency
+            if self.is_adjacent(attacker, target):
+                # Check if can attack (not already animating)
+                if attacker.can_attack():
+                    # Face the target before attacking
+                    self._face_toward_target(attacker, target)
+
+                    # Start attack animation - damage dealt when animation completes
+                    # (processed by _process_pending_attacks)
+                    attacker.start_attack(target=target)
+                    attacker.last_attack_tick = self.state.ticks
+
         return True
     
     def _face_toward_target(self, char, target):
@@ -2863,7 +3041,7 @@ class GameLogic:
             # Check criminal status via memories
             attacker_is_criminal = self.is_known_criminal(owner)
             target_was_criminal = self.is_known_criminal(target)
-            
+
             # If attacking an innocent, this is a crime
             if not target_was_criminal:
                 # Attacker records they committed a crime (only once)
@@ -2874,7 +3052,7 @@ class GameLogic:
                                        source='self',
                                        crime_type='assault', victim=target)
                     attacker_is_criminal = True
-                
+
                 # Witness EVERY attack against an innocent (not just first)
                 if target.health > 0:
                     self.witness_crime(owner, target, 'assault')

@@ -68,7 +68,7 @@ CHARACTER_TEMPLATES = {
         "starting_allegiance": None,
         "starting_job": None,
         "starting_inventory": [
-            {"type": "longsword", "amount": 1},
+            None,
             {"type": "bow", "amount": 1},
             None,
             None,

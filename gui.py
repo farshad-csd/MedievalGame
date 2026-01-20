@@ -1015,10 +1015,14 @@ class BoardGUI:
                 # On attack button release, fire arrow
                 if self.input.attack_released:
                     if player.is_drawing_bow():
-                        result = self.player_controller.handle_shoot_button_release(current_tick)
-                        if result:
-                            arrow_speed, arrow_range = result
-                            self._shoot_arrow(player, arrow_speed, arrow_range)
+                        # Get draw progress and release
+                        draw_progress = player.release_bow_draw(current_tick)
+
+                        # Get attack angle (player aims with mouse/controller)
+                        attack_angle = player.get('attack_angle')
+                        if attack_angle is not None:
+                            # Fire arrow via centralized logic
+                            self.logic.shoot_arrow(player, attack_angle, draw_progress)
                     
                 # Cancel any melee charging if switching to bow
                 if player.is_charging_heavy_attack():
@@ -1189,72 +1193,6 @@ class BoardGUI:
         
         return FISTS["range"]
 
-    def _shoot_arrow(self, player, arrow_speed, arrow_range):
-        """Spawn an arrow projectile in the direction player is aiming.
-        
-        Applies accuracy spread based on bow draw progress - less draw = more deviation.
-        Uses Gaussian distribution so most shots are near center, with occasional wild shots.
-        
-        Args:
-            player: Player character
-            arrow_speed: Speed of the arrow in cells/second
-            arrow_range: Maximum range before arrow disappears
-        """
-        import math
-        import random
-        
-        _bow = ITEMS["bow"]
-        
-        attack_angle = player.get('attack_angle')
-        if attack_angle is None:
-            return
-        
-        # Get player position
-        if player.zone:
-            start_x = player.prevailing_x
-            start_y = player.prevailing_y
-        else:
-            start_x = player.x
-            start_y = player.y
-        
-        # Calculate accuracy spread based on draw progress
-        # Arrow speed scales linearly from min to max, so we can derive progress from it
-        if _bow["max_speed"] > _bow["min_speed"]:
-            draw_progress = (arrow_speed - _bow["min_speed"]) / (_bow["max_speed"] - _bow["min_speed"])
-        else:
-            draw_progress = 1.0
-        
-        # Get current spread angle (in degrees, one side of center)
-        spread_max = _bow["spread_max_degrees"]
-        spread_min = _bow["spread_min_degrees"]
-        spread_degrees = spread_max - draw_progress * (spread_max - spread_min)
-        
-        # Apply Gaussian deviation if there's any spread
-        if spread_degrees > 0:
-            # Convert to radians
-            spread_radians = math.radians(spread_degrees)
-            # Gaussian with std dev = spread_degrees means ~68% of shots within ±spread, ~95% within ±2*spread
-            deviation = random.gauss(0, spread_radians)
-            attack_angle += deviation
-        
-        # Calculate direction vector from (possibly deviated) angle
-        dx = math.cos(attack_angle)
-        dy = math.sin(attack_angle)
-        
-        # Create arrow with speed and range from draw power
-        arrow = {
-            'x': start_x,
-            'y': start_y,
-            'dx': dx,
-            'dy': dy,
-            'distance': 0.0,
-            'owner': player,
-            'zone': player.zone,
-            'speed': arrow_speed,
-            'max_range': arrow_range,
-        }
-        self.state.arrows.append(arrow)
-    
     def _handle_unified_interact(self):
         """Handle unified interact (E key / A button).
         
