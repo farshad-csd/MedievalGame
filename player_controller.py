@@ -399,17 +399,17 @@ class PlayerController:
             # Give helpful feedback
             stove = self.state.interactables.get_adjacent_stove(player)
             if stove and not stove.can_use(player):
-                self.state.log_action(f"{name} can't use this stove (not your home)")
+                self.logic.log_bake_error(player, 'not_your_stove')
             else:
-                self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
+                self.logic.log_bake_error(player, 'no_stove')
             return False
-        
+
         if player.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
-            self.state.log_action(f"{name} needs wheat to bake bread")
+            self.logic.log_bake_error(player, 'no_wheat')
             return False
-        
+
         if not player.can_add_item('bread', 1):
-            self.state.log_action(f"{name}'s inventory is full")
+            self.logic.log_bake_error(player, 'inventory_full')
             return False
         
         # Bake through game logic (handles the actual conversion)
@@ -434,20 +434,20 @@ class PlayerController:
         for barrel in self.state.interactables.barrels.values():
             if barrel.is_adjacent(player):
                 if not barrel.can_use(player):
-                    self.state.log_action(f"{name} can't use this barrel (not your home)")
+                    self.logic.log_barrel_error(player, barrel, 'not_yours')
                     return False
-                
+
                 wheat_count = barrel.get_wheat()
                 if wheat_count <= 0:
-                    self.state.log_action(f"{barrel.name} is empty")
+                    self.logic.log_barrel_error(player, barrel, 'empty')
                     return False
-                
+
                 # Take as much wheat as player can carry
                 can_take = min(wheat_count, 50)  # Take up to 50 at a time
                 if not player.can_add_item('wheat', 1):
-                    self.state.log_action(f"{name}'s inventory is full")
+                    self.logic.log_barrel_error(player, barrel, 'inventory_full')
                     return False
-                
+
                 # Calculate how much we can actually take
                 taken = 0
                 for _ in range(can_take):
@@ -458,11 +458,11 @@ class PlayerController:
                     barrel.remove_wheat(1)
                     player.add_item('wheat', 1)
                     taken += 1
-                
+
                 if taken > 0:
-                    self.state.log_action(f"{name} took {taken} wheat from {barrel.name}")
+                    self.logic.log_barrel_take(player, barrel, taken)
                     return True
-                
+
                 return False
         
         return False
@@ -504,19 +504,19 @@ class PlayerController:
         if not interior:
             self.state.log_action(f"{player.get_display_name()} can't enter {house.name}")
             return False
-        
+
         player.enter_interior(interior)
-        self.state.log_action(f"{player.get_display_name()} entered {house.name}")
+        self.logic.log_zone_transition(player, house.name, entering=True)
         return True
-    
+
     def _exit_building(self, player, house):
         """Exit a building interior to exterior."""
         interior = house.interior
         if not interior:
             return False
-        
+
         player.exit_interior(interior)
-        self.state.log_action(f"{player.get_display_name()} exited {house.name}")
+        self.logic.log_zone_transition(player, house.name, entering=False)
         return True
     
     # =========================================================================

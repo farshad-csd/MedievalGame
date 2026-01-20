@@ -259,7 +259,144 @@ class GameLogic:
             if interior.house.contains_point(world_x, world_y):
                 return interior.name
         return None
-    
+
+    # =========================================================================
+    # CENTRALIZED ACTION LOGGING
+    # =========================================================================
+    # These methods provide consistent logging for actions by both player and NPCs
+
+    def log_combat_mode_change(self, char, entering):
+        """Log combat mode toggle (same for player and NPCs).
+
+        Args:
+            char: Character toggling combat mode
+            entering: True if entering combat mode, False if exiting
+        """
+        name = char.get_display_name()
+        mode_str = "COMBAT MODE" if entering else "normal mode"
+        self.state.log_action(f"{name} entered {mode_str}")
+
+    def log_zone_transition(self, char, interior_name, entering):
+        """Log entering/exiting buildings (same for player and NPCs).
+
+        Args:
+            char: Character transitioning
+            interior_name: Name of the interior
+            entering: True if entering, False if exiting
+        """
+        name = char.get_display_name()
+        if entering:
+            self.state.log_action(f"{name} entered {interior_name}")
+        else:
+            self.state.log_action(f"{name} exited {interior_name}")
+
+    def log_barrel_error(self, char, barrel, error_type):
+        """Log barrel interaction errors (same for player and NPCs).
+
+        Args:
+            char: Character attempting interaction
+            barrel: Barrel object
+            error_type: 'not_yours', 'empty', 'inventory_full'
+        """
+        name = char.get_display_name()
+        if error_type == 'not_yours':
+            self.state.log_action(f"{name} can't use this barrel (not your home)")
+        elif error_type == 'empty':
+            self.state.log_action(f"{barrel.name} is empty")
+        elif error_type == 'inventory_full':
+            self.state.log_action(f"{name}'s inventory is full")
+
+    def log_barrel_take(self, char, barrel, amount):
+        """Log taking wheat from barrel (same for player and NPCs).
+
+        Args:
+            char: Character taking wheat
+            barrel: Barrel object
+            amount: Amount of wheat taken
+        """
+        name = char.get_display_name()
+        self.state.log_action(f"{name} took {amount} wheat from {barrel.name}")
+
+    def log_bake_error(self, char, error_type):
+        """Log baking errors (same for player and NPCs).
+
+        Args:
+            char: Character attempting to bake
+            error_type: 'no_stove', 'not_your_stove', 'no_wheat', 'inventory_full'
+        """
+        name = char.get_display_name()
+        if error_type == 'not_your_stove':
+            self.state.log_action(f"{name} can't use this stove (not your home)")
+        elif error_type == 'no_stove':
+            self.state.log_action(f"{name} needs to be near a stove or campfire to bake")
+        elif error_type == 'no_wheat':
+            self.state.log_action(f"{name} needs wheat to bake bread")
+        elif error_type == 'inventory_full':
+            self.state.log_action(f"{name}'s inventory is full")
+
+    def log_bed_error(self, char, error_type):
+        """Log bed interaction errors (same for player and NPCs).
+
+        Args:
+            char: Character attempting to sleep
+            error_type: 'not_yours', 'not_implemented'
+        """
+        name = char.get_display_name()
+        if error_type == 'not_yours':
+            self.state.log_action(f"{name} can't use this bed (not your home)")
+        elif error_type == 'not_implemented':
+            self.state.log_action("Sleep not implemented yet")
+
+    def log_harvest_plant_error(self, char, action, error_type):
+        """Log harvest/plant errors (same for player and NPCs).
+
+        Args:
+            char: Character attempting action
+            action: 'harvest' or 'plant'
+            error_type: 'cant_here', 'inventory_full', 'cancelled'
+        """
+        name = char.get_display_name()
+        if error_type == 'cant_here':
+            self.state.log_action(f"{name} couldn't {action} here.")
+        elif error_type == 'inventory_full':
+            self.state.log_action(f"{name}'s inventory is full!")
+        elif error_type == 'cancelled':
+            self.state.log_action(f"{name} couldn't {action} - something changed.")
+
+    def log_harvest_plant_start(self, char, action):
+        """Log starting harvest/plant (same for player and NPCs).
+
+        Args:
+            char: Character starting action
+            action: 'harvest' or 'plant'
+        """
+        name = char.get_display_name()
+        self.state.log_action(f"{name} started {action}ing...")
+
+    def log_harvest_plant_finish(self, char, action):
+        """Log finishing harvest/plant (same for player and NPCs).
+
+        Args:
+            char: Character finishing action
+            action: 'harvest' or 'plant'
+        """
+        name = char.get_display_name()
+        self.state.log_action(f"{name} finished {action}ing!")
+
+    def log_action_cancelled(self, char, action_name):
+        """Log action cancellation (same for player and NPCs).
+
+        Args:
+            char: Character whose action was cancelled
+            action_name: Name of the action (e.g., 'Harvest', 'Plant')
+        """
+        name = char.get_display_name()
+        self.state.log_action(f"{name} cancelled {action_name}")
+
+    # =========================================================================
+    # COMBAT METHODS
+    # =========================================================================
+
     def can_attack(self, char):
         """Check if character can attack (not on cooldown and in combat mode).
         Returns True if in combat mode and enough time has passed since last attack.
@@ -391,16 +528,19 @@ class GameLogic:
             # Calculate and apply damage (with multiplier for heavy attacks)
             base_damage = random.randint(damage_min, damage_max)
             damage = int(base_damage * damage_multiplier)
+            old_health = target.health
             target.health -= damage
-            
-            # Log with heavy attack indicator if multiplier > 1
+
+            # Log with weapon name and attack type (IDENTICAL format to resolve_melee_attack)
             if damage_multiplier > 1.01:
-                self.state.log_action(f"{attacker_name} HEAVY ATTACKS {target_name} for {damage}! (x{damage_multiplier:.1f}) HP: {target.health}")
+                # Heavy attack
+                self.state.log_action(f"{attacker_name} HEAVY ATTACKS {target_name} with {weapon_name} for {damage} damage! (x{damage_multiplier:.1f}) Health: {old_health} -> {target.health}")
             else:
+                # Normal attack - vary message based on weapon
                 if weapon_name == 'Fists':
-                    self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage}! HP: {target.health}")
+                    self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage} damage! Health: {old_health} -> {target.health}")
                 else:
-                    self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage}! HP: {target.health}")
+                    self.state.log_action(f"{attacker_name} ATTACKS {target_name} with {weapon_name} for {damage} damage! Health: {old_health} -> {target.health}")
             
             # Cancel ongoing action if player is hit
             if target.is_player and target.has_ongoing_action():
@@ -497,11 +637,15 @@ class GameLogic:
         
         attacker_name = attacker.get_display_name()
         target_name = target.get_display_name()
-        
+
+        # Get attacker's weapon stats for blocking cone calculation
+        attacker_weapon_stats = self.get_weapon_stats(attacker)
+        attacker_weapon_reach = attacker_weapon_stats.get('range', FISTS['range'])
+
         # Check if in melee attack range
         if not self.is_in_melee_range(attacker, target):
             return result
-        
+
         # Check if target is blocking
         if target.is_blocking:
             # Check if attacker is within target's block cone (same as attack cone)
@@ -511,16 +655,16 @@ class GameLogic:
                 rel_x = attacker.prevailing_x - target.prevailing_x
                 rel_y = attacker.prevailing_y - target.prevailing_y
                 distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
-                
+
                 if distance > 0:
                     angle_to_attacker = math.atan2(rel_y, rel_x)
-                    
+
                     # Use attack cone angles for block cone
                     half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
                     half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
-                    
+
                     # Interpolate cone angle based on distance (relative to attacker's weapon reach)
-                    t = min(distance / weapon_reach, 1.0)
+                    t = min(distance / attacker_weapon_reach, 1.0)
                     half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
                     
                     # Check if attacker is within block cone
@@ -537,12 +681,23 @@ class GameLogic:
                         return result
         
         result['hit'] = True
-        
+
+        # Get weapon stats (equipped weapon or fists)
+        weapon_stats = self.get_weapon_stats(attacker)
+        weapon_name = weapon_stats.get('name', 'Fists')
+        damage_min = weapon_stats.get('base_damage_min', 2)
+        damage_max = weapon_stats.get('base_damage_max', 5)
+
         # Apply damage
-        damage = random.randint(2, 5)
+        damage = random.randint(damage_min, damage_max)
         result['damage'] = damage
         target.health -= damage
-        self.state.log_action(f"{attacker_name} ATTACKS {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
+
+        # Log with weapon name
+        if weapon_name == 'Fists':
+            self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
+        else:
+            self.state.log_action(f"{attacker_name} ATTACKS {target_name} with {weapon_name} for {damage} damage! Health: {target.health + damage} -> {target.health}")
         
         # Set hit flash for visual feedback
         target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
@@ -2512,13 +2667,12 @@ class GameLogic:
     def _do_enter_interior(self, char, interior):
         """Handle character entering an interior."""
         char.enter_interior(interior)
-        name = char.get_display_name()
-        self.state.log_action(f"{name} entered {interior.name}")
-    
+        self.log_zone_transition(char, interior.name, entering=True)
+
     def _do_exit_interior(self, char, interior):
         """Handle character exiting an interior."""
         char.exit_interior(interior)
-        
+
         # If exit position is blocked (another char just exited), find nearby spot
         if self.state.is_position_blocked(char.prevailing_x, char.prevailing_y, exclude_char=char):
             exit_x, exit_y = interior.get_exit_position()
@@ -2530,9 +2684,8 @@ class GameLogic:
                     char.prevailing_x = test_x
                     char.prevailing_y = test_y
                     break
-        
-        name = char.get_display_name()
-        self.state.log_action(f"{name} exited {interior.name}")
+
+        self.log_zone_transition(char, interior.name, entering=False)
     
     def update_npc_positions(self, dt):
         """Update NPC positions based on velocity. Called every frame for smooth movement.
@@ -3851,25 +4004,28 @@ class GameLogic:
     
     def _process_npc_combat_mode(self):
         """Update combat mode for NPCs based on their intent.
-        
+
         NPCs enter combat mode when:
         - Their intent is 'attack'
         - Their intent is 'flee' (defensive stance)
-        
+
         NPCs exit combat mode when:
         - They have no intent or a non-combat intent
-        
+
+        When entering combat mode, NPCs auto-equip their strongest weapon.
+        When exiting combat mode, NPCs unequip weapons.
+
         Player combat mode is controlled manually via R key.
         """
         for char in self.state.characters:
             # Skip player - player controls their own combat mode
             if char.is_player:
                 continue
-            
+
             # Skip dead characters
             if char.get('health', 100) <= 0:
                 continue
-            
+
             intent = char.intent
             if intent:
                 action = intent.get('action')
@@ -3877,14 +4033,20 @@ class GameLogic:
                 if action in ('attack', 'flee'):
                     if not char.get('combat_mode', False):
                         char['combat_mode'] = True
+                        # Auto-equip strongest weapon when entering combat
+                        char.equip_strongest_weapon()
                 else:
                     # Non-combat intent - exit combat mode
                     if char.get('combat_mode', False):
                         char['combat_mode'] = False
+                        # Unequip weapon when leaving combat
+                        char.equipped_weapon = None
             else:
                 # No intent - exit combat mode
                 if char.get('combat_mode', False):
                     char['combat_mode'] = False
+                    # Unequip weapon when leaving combat
+                    char.equipped_weapon = None
     
     def _process_pending_attacks(self):
         """Process pending attacks when their animations complete.

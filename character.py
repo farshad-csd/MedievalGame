@@ -729,6 +729,51 @@ class Character:
                 other.remove_item(item_type, amount)
                 self.add_item(item_type, amount)
 
+    def get_strongest_weapon_slot(self):
+        """Find the inventory slot with the strongest melee weapon.
+
+        Returns:
+            Slot index of strongest weapon, or None if no weapons in inventory
+        """
+        best_slot = None
+        best_damage = -1
+
+        for i, slot in enumerate(self.inventory):
+            if slot is None:
+                continue
+
+            item_type = slot.get('type', '')
+            item_info = ITEMS.get(item_type, {})
+
+            # Only consider melee weapons (ranged weapons handled separately)
+            if item_info.get('weapon_type') != 'melee':
+                continue
+
+            # Calculate average damage for this weapon
+            damage_min = item_info.get('base_damage_min', 0)
+            damage_max = item_info.get('base_damage_max', 0)
+            avg_damage = (damage_min + damage_max) / 2.0
+
+            if avg_damage > best_damage:
+                best_damage = avg_damage
+                best_slot = i
+
+        return best_slot
+
+    def equip_strongest_weapon(self):
+        """Equip the strongest melee weapon in inventory.
+
+        Returns:
+            True if a weapon was equipped, False if no weapons available
+        """
+        slot = self.get_strongest_weapon_slot()
+        if slot is not None:
+            self.equipped_weapon = slot
+            return True
+        else:
+            self.equipped_weapon = None
+            return False
+
     # =========================================================================
     # ACTIONS (used by both player and NPCs)
     # =========================================================================

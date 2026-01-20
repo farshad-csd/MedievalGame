@@ -48,8 +48,8 @@ from game_logic import GameLogic
 from player_controller import PlayerController
 from sprites import get_sprite_manager
 from dialogue import DialogueSystem
-from environment_menu import EnvironmentMenu
-from inventory_menu import InventoryMenu
+from menus.environment_menu import EnvironmentMenu
+from menus.inventory_menu import InventoryMenu
 
 
 # =============================================================================
@@ -349,7 +349,7 @@ class BoardGUI:
         self.is_muted = START_MUTED
         
         # Load and play background music
-        music_path = os.path.join(self.script_dir, "Forest__8-Bit_Music_.mp3")
+        music_path = os.path.join(self.script_dir, "music/Forest__8-Bit_Music_.mp3")
         self.music = None
         if os.path.exists(music_path):
             self.music = rl.load_music_stream(music_path)
@@ -365,27 +365,27 @@ class BoardGUI:
         # Load world sprites
         self.world_textures = {}
         sprite_files = {
-            'tree': 'sprites/Tree.png',
+            'tree': 'sprites/environment/Tree.png',
             'road': 'sprites/Road.png',
-            'barrel': 'sprites/Barrel.png',
-            'campfire': 'sprites/Campfire.png',
-            'house_s': 'sprites/House_S.png',
-            'house_m': 'sprites/House_M.png',
-            'grass': 'sprites/Grass_BG.png',
+            'barrel': 'sprites/objects/Barrel.png',
+            'campfire': 'sprites/objects/Campfire.png',
+            'house_s': 'sprites/buildings/House_S.png',
+            'house_m': 'sprites/buildings/House_M.png',
+            'grass': 'sprites/environment/Grass_BG.png',
             # Interior sprites
-            'interior_floor': 'sprites/Interior_Floor.png',
-            'interior_back_wall': 'sprites/Interior_BackWall.png',
-            'interior_back_wall_window': 'sprites/Interior_BackWallWindow.png',
-            'interior_south_wall': 'sprites/Interior_SouthWall.png',
-            'interior_east_wall': 'sprites/Interior_EastWall.png',
-            'interior_west_wall': 'sprites/Interior_WestWall.png',
+            'interior_floor': 'sprites/interiors/Interior_Floor.png',
+            'interior_back_wall': 'sprites/interiors/Interior_BackWall.png',
+            'interior_back_wall_window': 'sprites/interiors/Interior_BackWallWindow.png',
+            'interior_south_wall': 'sprites/interiors/Interior_SouthWall.png',
+            'interior_east_wall': 'sprites/interiors/Interior_EastWall.png',
+            'interior_west_wall': 'sprites/interiors/Interior_WestWall.png',
             # Object sprites
-            'bed': 'sprites/Bed.png',
-            'stove': 'sprites/Stove.png',
+            'bed': 'sprites/objects/Bed.png',
+            'stove': 'sprites/objects/Stove.png',
             # Projectile sprites
-            'arrow': 'sprites/Arrow.png',
+            'arrow': 'sprites/combat/Arrow.png',
             # UI sprites
-            'shield': 'sprites/shield.png',
+            'shield': 'sprites/combat/Shield.png',
         }
         
         for name, filename in sprite_files.items():
@@ -544,40 +544,40 @@ class BoardGUI:
             farm_cell = self.state.farm_cells.get((cell_x, cell_y))
             
             if not farm_cell or farm_cell.get('state') != 'ready':
-                self.state.log_action(f"{name} couldn't harvest here.")
+                self.logic.log_harvest_plant_error(player, 'harvest', 'cant_here')
                 return
-            
+
             # Check inventory space
             from constants import FARM_CELL_YIELD
             if not player.can_add_item('wheat', FARM_CELL_YIELD):
-                self.state.log_action(f"{name}'s inventory is full!")
+                self.logic.log_harvest_plant_error(player, 'harvest', 'inventory_full')
                 return
-            
+
             # Start ongoing harvest action
             player.start_ongoing_action(
-                'harvest', 
+                'harvest',
                 ONGOING_ACTION_HARVEST_DURATION,
                 {'cell': (cell_x, cell_y)}
             )
-            self.state.log_action(f"{name} started harvesting...")
+            self.logic.log_harvest_plant_start(player, 'harvest')
         
         elif action == "Plant":
             # Check if planting is possible first
             cell_x = int(player.x)
             cell_y = int(player.y)
             farm_cell = self.state.farm_cells.get((cell_x, cell_y))
-            
+
             if not farm_cell or farm_cell.get('state') != 'replanting':
-                self.state.log_action(f"{name} couldn't plant here.")
+                self.logic.log_harvest_plant_error(player, 'plant', 'cant_here')
                 return
-            
+
             # Start ongoing plant action
             player.start_ongoing_action(
                 'plant',
                 ONGOING_ACTION_PLANT_DURATION,
                 {'cell': (cell_x, cell_y)}
             )
-            self.state.log_action(f"{name} started planting...")
+            self.logic.log_harvest_plant_start(player, 'plant')
         
         elif action == "Build Campfire":
             # Build a campfire at current location (instant action)
@@ -607,23 +607,23 @@ class BoardGUI:
                 if cell:
                     success = self.logic.player_harvest_cell(player)
                     if success:
-                        self.state.log_action(f"{name} finished harvesting!")
+                        self.logic.log_harvest_plant_finish(player, 'harvest')
                     else:
-                        self.state.log_action(f"{name} couldn't harvest - something changed.")
-            
+                        self.logic.log_harvest_plant_error(player, 'harvest', 'cancelled')
+
             elif action_type == 'plant':
                 # Complete the planting
                 cell = action_data.get('cell')
                 if cell:
                     success = self.logic.player_plant_cell(player)
                     if success:
-                        self.state.log_action(f"{name} finished planting!")
+                        self.logic.log_harvest_plant_finish(player, 'plant')
                     else:
-                        self.state.log_action(f"{name} couldn't plant - something changed.")
-            
+                        self.logic.log_harvest_plant_error(player, 'plant', 'cancelled')
+
             elif action_type == 'chop':
                 # Complete tree chopping (future feature)
-                self.state.log_action(f"{name} finished chopping!")
+                self.logic.log_harvest_plant_finish(player, 'chop')
             
             # Clear the ongoing action
             player.cancel_ongoing_action()
@@ -690,7 +690,7 @@ class BoardGUI:
                 cancelled = player.cancel_ongoing_action()
                 if cancelled:
                     action_name = cancelled['action'].title()
-                    self.state.log_action(f"{player.get_display_name()} cancelled {action_name}")
+                    self.logic.log_action_cancelled(player, action_name)
             
             # Check for pause (Escape still works)
             if rl.is_key_pressed(rl.KEY_ESCAPE):
@@ -1120,30 +1120,66 @@ class BoardGUI:
         item_info = ITEMS.get(item_type, {})
         return item_info.get('weapon_type')
     
+    def _get_character_weapon_stats(self, char):
+        """Get the weapon stats for any character's equipped weapon.
+
+        Returns weapon stats dict from equipped melee weapon, or FISTS if unarmed.
+
+        Args:
+            char: Character to get weapon stats for
+
+        Returns:
+            Dict with weapon stats (from ITEMS entry or FISTS constant)
+        """
+        equipped_slot = getattr(char, 'equipped_weapon', None)
+
+        if equipped_slot is not None:
+            inventory = getattr(char, 'inventory', [])
+            if 0 <= equipped_slot < len(inventory):
+                item = inventory[equipped_slot]
+                if item is not None:
+                    item_type = item.get('type', '')
+                    item_info = ITEMS.get(item_type, {})
+                    # Only use if it's a melee weapon
+                    if item_info.get('weapon_type') == 'melee':
+                        return item_info
+
+        # Fall back to fists (unarmed combat)
+        return FISTS
+
     def _get_player_weapon_reach(self):
         """Get the weapon reach for player's currently equipped melee weapon.
-        
+
         Returns weapon reach from equipped melee weapon, or FISTS range if unarmed.
-        
+
         Returns:
             Float range in cells
         """
         player = self.state.player
         if not player:
             return FISTS["range"]
-        
+
+        weapon_stats = self._get_character_weapon_stats(player)
+        return weapon_stats.get('range', FISTS['range'])
+
+    def _get_player_weapon_reach_OLD(self):
+        """DEPRECATED: Old implementation, replaced by _get_character_weapon_stats."""
+        player = self.state.player
+        if not player:
+            return FISTS["range"]
+
         equipped_slot = getattr(player, 'equipped_weapon', None)
         if equipped_slot is None:
             return FISTS["range"]
-        
+
         inventory = player.inventory
         if equipped_slot < 0 or equipped_slot >= len(inventory):
             return FISTS["range"]
-        
+
         item = inventory[equipped_slot]
         if item is None:
             return FISTS["range"]
-        
+
         item_type = item.get('type', '')
         item_info = ITEMS.get(item_type, {})
         
@@ -1408,9 +1444,18 @@ class BoardGUI:
         # Toggle combat mode
         if self.input.combat_mode_toggle:
             if player:
-                player['combat_mode'] = not player.get('combat_mode', False)
-                mode_str = "COMBAT MODE" if player['combat_mode'] else "normal mode"
-                self.state.log_action(f"{player.get_display_name()} entered {mode_str}")
+                entering_combat = not player.get('combat_mode', False)
+                player['combat_mode'] = entering_combat
+
+                if entering_combat:
+                    # Entering combat mode - auto-equip strongest weapon
+                    player.equip_strongest_weapon()
+                else:
+                    # Exiting combat mode - unequip weapon
+                    player.equipped_weapon = None
+
+                # Use centralized logging
+                self.logic.log_combat_mode_change(player, entering_combat)
         
         # Update block state (only in combat mode AND with sword equipped)
         if player:
@@ -3670,8 +3715,9 @@ void main() {
             
             # Draw attack range (orange)
             if SHOW_ATTACK_RANGE:
-                # Use longsword range as default display (could check equipped weapon)
-                attack_radius_px = ITEMS["longsword"]["range"] * cell_size
+                # Get actual weapon stats from character's equipped weapon or fists
+                weapon_stats = self._get_character_weapon_stats(char)
+                attack_radius_px = weapon_stats.get('range', FISTS['range']) * cell_size
                 rl.draw_circle_lines(
                     int(pixel_cx), int(pixel_cy),
                     attack_radius_px,

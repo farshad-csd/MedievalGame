@@ -409,6 +409,21 @@ ITEMS = {
         "range": 1.4,  # Melee weapon reach in cells
         "attack_speed": 5,  # Ticks between attacks
     },
+    "warhammer": {
+        "name": "Warhammer",
+        "price": 35,
+        "stack_size": 1,  # Weapons don't stack
+        "weight": 2.0,  # ~4.5 lbs (typical warhammer)
+        "sprite": "warhammer.png",  # In sprites/items/
+        "color": (128, 128, 128, 200),  # Dark gray (iron)
+        "icon": "T",  # ASCII hammer representation
+        "category": "weapon",
+        "weapon_type": "melee",
+        "base_damage_min": 2,
+        "base_damage_max": 5,
+        "range": 1.4,  # Melee weapon reach in cells
+        "attack_speed": 5,  # Ticks between attacks
+    },
 }
 
 # =============================================================================

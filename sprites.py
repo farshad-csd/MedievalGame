@@ -90,12 +90,12 @@ class SpriteManager:
         # Map action names to filenames
         # Base sprites (unarmed / bow - no visible weapon)
         sprite_files = {
-            'Walk': 'sprites/Civilian1_Move.png',
-            'Attack': 'sprites/Civilian1_Attack.png',
-            'Death': 'sprites/Civilian1_Faint.png',
+            'Walk': 'sprites/characters/Civilian1_Move.png',
+            'Attack': 'sprites/characters/Civilian1_Attack.png',
+            'Death': 'sprites/characters/Civilian1_Faint.png',
             # Sword-specific sprites (longsword equipped)
-            'WalkSword': 'sprites/Civilian1_Move_swordsword.png',
-            'AttackSword': 'sprites/Civilian1_Attack_longsword.png',
+            'WalkSword': 'sprites/characters/Civilian1_Move_longsword.png',
+            'AttackSword': 'sprites/characters/Civilian1_Attack_longsword.png',
         }
         
         for action, filename in sprite_files.items():
