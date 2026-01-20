@@ -23,6 +23,8 @@ from constants import (
     BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
     WHEAT_TO_BREAD_RATIO,
     DIRECTION_TO_FACINGS, OPPOSITE_DIRECTIONS,
+    INTERACT_DISTANCE, FISTS,
+    ATTACK_CONE_BASE_ANGLE, ATTACK_CONE_ANGLE,
 )
 from scenario_world import SIZE
 
@@ -548,3 +550,481 @@ class PlayerController:
                 player.prevailing_x = new_x
             elif not self.state.is_position_blocked(player.prevailing_x, new_y, exclude_char=player, zone=zone):
                 player.prevailing_y = new_y
+
+    # =========================================================================
+    # INTERACT / E KEY
+    # =========================================================================
+
+    def get_facing_npc(self):
+        """Get nearest NPC that player is facing within interact distance.
+
+        Returns:
+            Character or None
+        """
+        player = self.player
+        if not player:
+            return None
+
+        nearest_npc = None
+        nearest_dist = float('inf')
+
+        for char in self.state.characters:
+            if char == player:
+                continue
+            if char.get('health', 100) <= 0:
+                continue
+            if char.zone != player.zone:
+                continue
+
+            # Get positions in local coords (prevailing when interior, x/y when exterior)
+            if player.zone:
+                px, py = player.prevailing_x, player.prevailing_y
+                cx, cy = char.prevailing_x, char.prevailing_y
+            else:
+                px, py = player.x, player.y
+                cx, cy = char.x, char.y
+
+            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
+
+            # Must be within interact distance AND player facing them
+            if dist <= INTERACT_DISTANCE and dist < nearest_dist:
+                if player.is_facing_position(cx, cy):
+                    nearest_npc = char
+                    nearest_dist = dist
+
+        return nearest_npc
+
+    def handle_interact(self, gui_callbacks):
+        """Handle unified interact (E key / A button).
+
+        Checks for interactables in priority order:
+        1. If window viewing → toggle off
+        2. Door → enter/exit building (first so player can escape combat)
+        3. NPC → start dialogue (must be facing them)
+        4. Window → start window viewing
+        5. Stove/campfire → bake bread
+        6. Barrel → take wheat
+        7. Bed → sleep (not implemented)
+        8. Tree → chop (not implemented)
+
+        Args:
+            gui_callbacks: Dict with callbacks for GUI operations:
+                - 'is_window_viewing': lambda: bool
+                - 'toggle_window_view_off': lambda: None
+                - 'update_camera': lambda x, y: None
+                - 'get_facing_npc': lambda player: Character or None
+                - 'can_start_dialogue': lambda npc: bool
+                - 'start_dialogue': lambda npc: None
+                - 'start_window_viewing': lambda window: None
+                - 'open_inventory_with_barrel': lambda barrel: None
+
+        Returns:
+            str describing what was interacted with, or None
+        """
+        player = self.player
+        if not player:
+            return None
+
+        # Priority 1: If currently window viewing, toggle it off
+        if gui_callbacks['is_window_viewing']():
+            gui_callbacks['toggle_window_view_off']()
+            return 'window_view_off'
+
+        # Priority 2: Check for door FIRST (allows escaping combat)
+        house = self.state.get_adjacent_door(player)
+        if house:
+            if self.handle_door_input():
+                # Successfully entered/exited - update camera
+                gui_callbacks['update_camera'](player.x, player.y)
+                return 'door'
+
+        # Priority 3: Check for nearby NPC (must be facing them)
+        npc = gui_callbacks['get_facing_npc'](player)
+        if npc:
+            if gui_callbacks['can_start_dialogue'](npc):
+                gui_callbacks['start_dialogue'](npc)
+                return 'npc'
+            else:
+                self.state.log_action(f"{npc.get_display_name()} is busy!")
+                return 'npc_busy'
+
+        # Priority 4: Check for window
+        window = self.handle_window_input()
+        if window:
+            gui_callbacks['start_window_viewing'](window)
+            return 'window'
+
+        # Priority 5: Check for stove/campfire (baking) - must be facing
+        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
+        if cooking_spot:
+            # Check if facing the cooking spot
+            source = cooking_spot.get('source')
+            if cooking_spot['type'] == 'stove':
+                # Stoves are interior - use local coords
+                target_x, target_y = source.x + 0.5, source.y + 0.5
+            else:  # campfire
+                # Campfires are exterior - use world coords
+                target_x, target_y = source[0] + 0.5, source[1] + 0.5
+
+            if player.is_facing_position(target_x, target_y):
+                self.handle_bake_input()
+                return 'cooking_spot'
+
+        # Priority 6: Check for barrel (must be facing)
+        for barrel in self.state.interactables.barrels.values():
+            if barrel.is_adjacent(player):
+                # Use local coords for interior barrels, world coords for exterior
+                if barrel.zone is not None:
+                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
+                else:
+                    target_x, target_y = barrel.world_x, barrel.world_y
+                if player.is_facing_position(target_x, target_y):
+                    # Check if player can use this barrel
+                    if barrel.can_use(player):
+                        gui_callbacks['open_inventory_with_barrel'](barrel)
+                    else:
+                        self.state.log_action("Not your barrel")
+                    return 'barrel'
+
+        # Priority 7: Check for bed (must be facing) - not implemented
+        for bed in self.state.interactables.beds.values():
+            if bed.is_adjacent(player):
+                # Beds are interior - use local coords
+                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
+                    is_owned = bed.is_owned_by(player.name)
+                    if is_owned or not bed.is_owned():
+                        self.state.log_action("Sleep not implemented yet")
+                    else:
+                        self.state.log_action("Not your bed")
+                    return 'bed'
+
+        # Priority 8: Check for tree (must be facing) - not implemented
+        for pos, tree in self.state.interactables.trees.items():
+            if tree.is_adjacent(player):
+                # Trees are exterior - use world coords (zone is None)
+                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
+                    self.state.log_action("Shaking trees not implemented yet")
+                    return 'tree'
+
+        return None
+
+    # =========================================================================
+    # COMBAT INPUT
+    # =========================================================================
+
+    def handle_combat_input(self, attack, attack_held, attack_released, current_tick):
+        """Handle all combat input (melee, ranged, fists) based on equipped weapon.
+
+        Args:
+            attack: True if attack button pressed this frame
+            attack_held: True if attack button is held down
+            attack_released: True if attack button released this frame
+            current_tick: Current game tick
+
+        Returns:
+            dict with 'action' (None, 'melee_attack', 'ranged_shot', 'bow_charging'),
+                     'bow_released' (bool), 'draw_progress' (float 0-1)
+        """
+        player = self.player
+        if not player:
+            return {'action': None, 'bow_released': False, 'draw_progress': 0.0}
+
+        # Get equipped weapon type to determine attack behavior
+        equipped_weapon_type = player.get_equipped_weapon_type()
+
+        result = {'action': None, 'bow_released': False, 'draw_progress': 0.0}
+
+        if equipped_weapon_type == 'ranged':
+            # BOW: Click to draw, release to shoot
+            # On attack button press, start drawing bow
+            if attack:
+                self.handle_shoot_button_down(current_tick)
+
+            # While attack button is held, update draw
+            if attack_held:
+                self.handle_shoot_button_held(current_tick)
+                if player.is_drawing_bow():
+                    result['action'] = 'bow_charging'
+
+            # On attack button release, fire arrow
+            if attack_released:
+                if player.is_drawing_bow():
+                    # Get draw progress and release
+                    draw_progress = player.release_bow_draw(current_tick)
+                    result['bow_released'] = True
+                    result['draw_progress'] = draw_progress
+                    result['action'] = 'ranged_shot'
+
+            # Cancel any melee charging if switching to bow
+            if player.is_charging_heavy_attack():
+                player.cancel_heavy_attack()
+
+        elif equipped_weapon_type == 'melee' or equipped_weapon_type is None:
+            # SWORD or FISTS: Click for quick attack, hold for heavy attack
+            # On attack button press, start tracking
+            if attack:
+                self.handle_attack_button_down(current_tick)
+
+            # While attack button is held, update charge
+            if attack_held:
+                self.handle_attack_button_held(current_tick)
+
+            # On attack button release, execute attack
+            if attack_released:
+                self.handle_attack_button_release(current_tick)
+                result['action'] = 'melee_attack'
+
+            # Cancel any bow drawing
+            if player.is_drawing_bow():
+                player.cancel_bow_draw()
+
+        return result
+
+    # =========================================================================
+    # PLAYER STATE QUERIES
+    # =========================================================================
+
+    def get_weapon_reach(self):
+        """Get the weapon reach for player's currently equipped melee weapon.
+
+        Returns weapon reach from equipped melee weapon, or FISTS range if unarmed.
+
+        Returns:
+            Float range in cells
+        """
+        player = self.player
+        if not player:
+            return FISTS["range"]
+
+        weapon_stats = player.get_weapon_stats()
+        return weapon_stats.get('range', FISTS['range'])
+
+    def update_facing_to_mouse(self, mouse_x, mouse_y, screen_to_world_func):
+        """Update player facing direction to face the mouse cursor.
+
+        Also stores the precise angle for 360° attack aiming.
+
+        Args:
+            mouse_x: Mouse X position in screen coordinates
+            mouse_y: Mouse Y position in screen coordinates
+            screen_to_world_func: Callback to convert screen to world coords
+        """
+        player = self.player
+        if not player:
+            return
+
+        # Convert mouse position to world coords
+        world_x, world_y = screen_to_world_func(mouse_x, mouse_y)
+
+        # Calculate direction from player to mouse
+        # Use prevailing coords when in interior (camera space matches interior)
+        if player.zone:
+            dx = world_x - player.prevailing_x
+            dy = world_y - player.prevailing_y
+        else:
+            dx = world_x - player.x
+            dy = world_y - player.y
+
+        # Calculate precise angle and store it for 360° aiming
+        angle = math.atan2(dy, dx)
+        player.attack_angle = angle
+
+        # Determine 8-direction facing (for sprite animation)
+        if angle >= -math.pi/8 and angle < math.pi/8:
+            player.facing = 'right'
+        elif angle >= math.pi/8 and angle < 3*math.pi/8:
+            player.facing = 'down-right'
+        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
+            player.facing = 'down'
+        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
+            player.facing = 'down-left'
+        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
+            player.facing = 'left'
+        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
+            player.facing = 'up-left'
+        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
+            player.facing = 'up'
+        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
+            player.facing = 'up-right'
+
+    def update_backpedal_state(self, move_dx, move_dy):
+        """Check if player is backpedaling (moving opposite to facing).
+
+        Args:
+            move_dx: Movement direction X
+            move_dy: Movement direction Y
+
+        Returns:
+            Dot product of movement and facing vectors (negative = backpedaling)
+        """
+        player = self.player
+        if not player:
+            return 0
+
+        facing = player.get('facing', 'down')
+
+        facing_vectors = {
+            'right': (1, 0),
+            'left': (-1, 0),
+            'up': (0, -1),
+            'down': (0, 1),
+            'up-right': (1, -1),
+            'up-left': (-1, -1),
+            'down-right': (1, 1),
+            'down-left': (-1, 1),
+        }
+
+        face_dx, face_dy = facing_vectors.get(facing, (0, 1))
+
+        # Normalize
+        move_mag = math.sqrt(move_dx * move_dx + move_dy * move_dy)
+        if move_mag > 0:
+            move_dx_norm = move_dx / move_mag
+            move_dy_norm = move_dy / move_mag
+        else:
+            move_dx_norm, move_dy_norm = 0, 0
+
+        face_mag = math.sqrt(face_dx * face_dx + face_dy * face_dy)
+        if face_mag > 0:
+            face_dx_norm = face_dx / face_mag
+            face_dy_norm = face_dy / face_mag
+        else:
+            face_dx_norm, face_dy_norm = 0, 1
+
+        dot = move_dx_norm * face_dx_norm + move_dy_norm * face_dy_norm
+        player['is_backpedaling'] = dot < 0
+
+        return dot
+
+    def handle_movement_no_facing(self, dx, dy, sprinting=False, movement_dot=0):
+        """Handle movement input without changing facing direction.
+
+        Used in combat mode to allow strafing while maintaining aim.
+
+        Args:
+            dx: -1, 0, or 1 for horizontal direction
+            dy: -1, 0, or 1 for vertical direction
+            sprinting: True if sprint key is held
+            movement_dot: Dot product of movement and facing (for backpedaling)
+
+        Returns:
+            True if movement was applied
+        """
+        player = self.player
+        if not player:
+            return False
+
+        if player.is_frozen:
+            player.vx = 0.0
+            player.vy = 0.0
+            return False
+
+        # Calculate speed (encumbrance overrides all, then blocking)
+        if player.is_over_encumbered():
+            speed = ENCUMBERED_SPEED
+            player.is_sprinting = False
+        elif player.is_blocking:
+            speed = BLOCK_MOVEMENT_SPEED
+            player.is_sprinting = False
+        elif sprinting:
+            # Only allow sprinting forward (not backpedaling)
+            if movement_dot >= 0:
+                speed = SPRINT_SPEED
+                player.is_sprinting = True
+            else:
+                speed = MOVEMENT_SPEED
+                player.is_sprinting = False
+        else:
+            speed = MOVEMENT_SPEED
+            player.is_sprinting = False
+
+        # Normalize diagonal movement
+        if dx != 0 and dy != 0:
+            diagonal_factor = 1.0 / math.sqrt(2)
+            player.vx = dx * speed * diagonal_factor
+            player.vy = dy * speed * diagonal_factor
+        else:
+            player.vx = dx * speed
+            player.vy = dy * speed
+
+        return True
+
+    def is_char_in_attack_cone(self, char):
+        """Check if a character is in the player's attack cone.
+
+        Uses 360° angle-based cone detection matching resolve_attack() in game_logic.py.
+        Cone interpolates from BASE_ANGLE at player to full ANGLE at weapon reach.
+
+        Args:
+            char: Character to check
+
+        Returns:
+            True if character is in the attack cone
+        """
+        player = self.player
+        if not player or char is player:
+            return False
+
+        # Skip dead characters
+        if char.get('health', 100) <= 0:
+            return False
+
+        # Must be in same zone
+        if char.zone != player.zone:
+            return False
+
+        # Get the precise attack angle (360° aiming)
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return False
+
+        # Get weapon reach based on equipped weapon
+        weapon_reach = self.get_weapon_reach()
+
+        # Calculate relative position using prevailing coords (local when in interior)
+        rel_x = char.prevailing_x - player.prevailing_x
+        rel_y = char.prevailing_y - player.prevailing_y
+
+        # Calculate distance to target
+        distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+
+        # Must be within weapon reach and not at same position
+        if distance <= 0 or distance > weapon_reach:
+            return False
+
+        # Interpolate cone half-angle based on distance (wider at range)
+        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
+        t = distance / weapon_reach  # 0 at player, 1 at max range
+        half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
+
+        # Calculate angle to target
+        angle_to_target = math.atan2(rel_y, rel_x)
+
+        # Calculate angular difference (handle wraparound)
+        angle_diff = angle_to_target - attack_angle
+        # Normalize to [-pi, pi]
+        while angle_diff > math.pi:
+            angle_diff -= 2 * math.pi
+        while angle_diff < -math.pi:
+            angle_diff += 2 * math.pi
+
+        # Check if within interpolated cone angle
+        return abs(angle_diff) <= half_cone_rad
+
+    def get_chars_in_attack_cone(self):
+        """Get all characters currently in the player's attack cone.
+
+        Returns:
+            Set of character ids that are in the attack cone
+        """
+        player = self.player
+        if not player:
+            return set()
+
+        chars_in_cone = set()
+        for char in self.state.characters:
+            if self.is_char_in_attack_cone(char):
+                chars_in_cone.add(id(char))
+
+        return chars_in_cone

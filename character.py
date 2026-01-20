@@ -821,6 +821,29 @@ class Character:
         item_info = ITEMS.get(item_type, {})
         return item_info.get('weapon_type')
 
+    def get_weapon_stats(self):
+        """Get the weapon stats for this character's equipped weapon.
+
+        Returns weapon stats dict from equipped melee weapon, or FISTS if unarmed.
+
+        Returns:
+            Dict with weapon stats (from ITEMS entry or FISTS constant)
+        """
+        from constants import FISTS
+
+        if self.equipped_weapon is not None:
+            if 0 <= self.equipped_weapon < len(self.inventory):
+                item = self.inventory[self.equipped_weapon]
+                if item is not None:
+                    item_type = item.get('type', '')
+                    item_info = ITEMS.get(item_type, {})
+                    # Only use if it's a melee weapon
+                    if item_info.get('weapon_type') == 'melee':
+                        return item_info
+
+        # Fall back to fists (unarmed combat)
+        return FISTS
+
     def get_weapon_expected_damage(self, weapon_type):
         """Calculate the expected average damage for a weapon type.
 
@@ -1361,12 +1384,69 @@ class Character:
     
     def has_ongoing_action(self):
         """Check if player has an ongoing action in progress.
-        
+
         Returns:
             True if an ongoing action is in progress
         """
         return self.ongoing_action is not None
-    
+
+    # =========================================================================
+    # SPATIAL QUERIES
+    # =========================================================================
+
+    def is_facing_position(self, target_x, target_y):
+        """Check if character is roughly facing toward a target position.
+
+        Uses a generous ~53-degree cone in the facing direction.
+        Automatically uses correct coordinate system (prevailing for interiors, x/y for exterior).
+
+        Args:
+            target_x: Target X in local coords
+            target_y: Target Y in local coords
+
+        Returns:
+            True if facing toward the target
+        """
+        # Use zone to determine coordinate system
+        if self.zone is not None:
+            # Interior - use local/prevailing coords
+            px, py = self.prevailing_x, self.prevailing_y
+        else:
+            # Exterior - use world coords
+            px, py = self.x, self.y
+
+        # Direction to target
+        dx = target_x - px
+        dy = target_y - py
+
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return True  # On top of target, always valid
+
+        # Get facing direction vector
+        facing_vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        fx, fy = facing_vectors.get(self.facing, (0, 1))
+
+        # Normalize direction to target
+        dist = math.sqrt(dx*dx + dy*dy)
+        dx /= dist
+        dy /= dist
+
+        # Dot product gives cosine of angle between vectors
+        # cos(45°) ≈ 0.707, cos(53°) ≈ 0.6, cos(60°) = 0.5, cos(90°) = 0
+        dot = dx * fx + dy * fy
+
+        # Require ~53 degree cone (dot > 0.6) for tighter targeting
+        return dot > 0.6
+
     # =========================================================================
     # DICT-LIKE ACCESS (backward compatibility)
     # =========================================================================

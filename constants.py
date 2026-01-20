@@ -309,8 +309,6 @@ ITEMS = {
         "stack_size": 1,  # Weapons don't stack
         "weight": 2.0,  # ~4.5 lbs (typical longsword)
         "sprite": "longsword.png",  # In sprites/items/
-        "color": (192, 192, 192, 200),  # Silver/steel
-        "icon": "/",  # ASCII sword representation
         "category": "weapon",
         "weapon_type": "melee",
         "base_damage_min": 2,
@@ -324,8 +322,6 @@ ITEMS = {
         "stack_size": 1,  # Weapons don't stack
         "weight": 2.0,  # ~4.5 lbs (typical warhammer)
         "sprite": "warhammer.png",  # In sprites/items/
-        "color": (128, 128, 128, 200),  # Dark gray (iron)
-        "icon": "T",  # ASCII hammer representation
         "category": "weapon",
         "weapon_type": "melee",
         "base_damage_min": 2,

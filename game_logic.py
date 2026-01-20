@@ -2513,7 +2513,51 @@ class GameLogic:
                     criminal = crime_memory['subject']
                     if criminal in self.state.characters:
                         self.report_crime_to(char, other, crime_memory)
-    
+
+    # =========================================================================
+    # ONGOING ACTIONS (Player timed actions)
+    # =========================================================================
+
+    def update_ongoing_actions(self):
+        """Update ongoing actions and complete them when finished."""
+        player = self.state.player
+        if not player or not player.has_ongoing_action():
+            return
+
+        # Check if action is complete
+        if player.is_ongoing_action_complete():
+            action = player.ongoing_action
+            action_type = action['action']
+            action_data = action['data']
+            name = player.get_display_name()
+
+            if action_type == 'harvest':
+                # Complete the harvest
+                cell = action_data.get('cell')
+                if cell:
+                    success = self.player_harvest_cell(player)
+                    if success:
+                        self.log_harvest_plant_finish(player, 'harvest')
+                    else:
+                        self.log_harvest_plant_error(player, 'harvest', 'cancelled')
+
+            elif action_type == 'plant':
+                # Complete the planting
+                cell = action_data.get('cell')
+                if cell:
+                    success = self.player_plant_cell(player)
+                    if success:
+                        self.log_harvest_plant_finish(player, 'plant')
+                    else:
+                        self.log_harvest_plant_error(player, 'plant', 'cancelled')
+
+            elif action_type == 'chop':
+                # Complete tree chopping (future feature)
+                self.log_harvest_plant_finish(player, 'chop')
+
+            # Clear the ongoing action
+            player.cancel_ongoing_action()
+
     # =========================================================================
     # MOVEMENT SYSTEM
     # =========================================================================

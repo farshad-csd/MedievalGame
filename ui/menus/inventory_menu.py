@@ -30,7 +30,7 @@ def get_item_sprite_path(item_type):
     info = get_item_info(item_type)
     sprite_name = info.get('sprite')
     if sprite_name:
-        return os.path.join('sprites', 'items', sprite_name)
+        return os.path.join('ui', 'sprites', 'Items', sprite_name)
     return None
 
 def get_item_color(item_type):

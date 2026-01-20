@@ -46,10 +46,10 @@ from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
-from sprites import get_sprite_manager
-from menus.dialogue_menu import DialogueMenu
-from menus.environment_menu import EnvironmentMenu
-from menus.inventory_menu import InventoryMenu
+from ui.sprites import get_sprite_manager
+from ui.menus.dialogue_menu import DialogueMenu
+from ui.menus.environment_menu import EnvironmentMenu
+from ui.menus.inventory_menu import InventoryMenu
 
 
 # =============================================================================
@@ -178,10 +178,7 @@ class InputState:
         self.attack_released = False  # True on frame attack button is released
         self.combat_mode_toggle = False
         self.block = False  # Held while spacebar is down
-        self.shoot = False  # F key pressed this frame (start draw)
-        self.shoot_held = False  # True while F key is held down
-        self.shoot_released = False  # True on frame F key is released
-        self.interact = False       # Unified: NPC dialogue, doors, windows, stoves
+        self.interact = False  # Unified: NPC dialogue, doors, windows, stoves
         
         # Camera
         self.pan_x = 0.0
@@ -518,13 +515,21 @@ class BoardGUI:
         
         rl.close_audio_device()
         rl.close_window()
-    
+
+    # =========================================================================
+    # AUDIO MANAGEMENT
+    # =========================================================================
+
     def _toggle_mute(self):
         """Toggle music mute state"""
         self.is_muted = not self.is_muted
         if self.music:
             rl.set_music_volume(self.music, 0.0 if self.is_muted else 0.3)
-    
+
+    # =========================================================================
+    # ENVIRONMENT MENU ACTIONS
+    # =========================================================================
+
     def _handle_environment_action(self, action):
         """Handle an action selected from the environment menu.
         
@@ -588,58 +593,27 @@ class BoardGUI:
             # TODO: Open build menu (future feature)
             self.state.log_action(f"{name} looks around for building materials...")
     
-    def _update_ongoing_actions(self):
-        """Update ongoing actions and complete them when finished."""
-        player = self.state.player
-        if not player or not player.has_ongoing_action():
-            return
-        
-        # Check if action is complete
-        if player.is_ongoing_action_complete():
-            action = player.ongoing_action
-            action_type = action['action']
-            action_data = action['data']
-            name = player.get_display_name()
-            
-            if action_type == 'harvest':
-                # Complete the harvest
-                cell = action_data.get('cell')
-                if cell:
-                    success = self.logic.player_harvest_cell(player)
-                    if success:
-                        self.logic.log_harvest_plant_finish(player, 'harvest')
-                    else:
-                        self.logic.log_harvest_plant_error(player, 'harvest', 'cancelled')
-
-            elif action_type == 'plant':
-                # Complete the planting
-                cell = action_data.get('cell')
-                if cell:
-                    success = self.logic.player_plant_cell(player)
-                    if success:
-                        self.logic.log_harvest_plant_finish(player, 'plant')
-                    else:
-                        self.logic.log_harvest_plant_error(player, 'plant', 'cancelled')
-
-            elif action_type == 'chop':
-                # Complete tree chopping (future feature)
-                self.logic.log_harvest_plant_finish(player, 'chop')
-            
-            # Clear the ongoing action
-            player.cancel_ongoing_action()
-    
     # =========================================================================
     # INPUT HANDLING
     # =========================================================================
-    
+    # Input is processed in priority order:
+    # 1. Dialogue/Menus (blocks all other input)
+    # 2. Ongoing actions (blocks most input, allows cancel/pause)
+    # 3. UI inputs (pause, inventory) - HIGHEST game input priority
+    # 4. Movement inputs
+    # 5. Action inputs (combat, interact)
+    # 6. Camera inputs - LOWEST priority
+
     def _handle_input(self):
-        """Handle all input sources (keyboard, mouse, gamepad)"""
+        """Handle all input sources (keyboard, mouse, gamepad).
+
+        Orchestrates input gathering and application in priority order.
+        Menus and ongoing actions can block normal game input.
+        """
         # Reset per-frame input state
         self.input.attack = False
         self.input.attack_released = False  # Reset release flag each frame
         self.input.combat_mode_toggle = False
-        self.input.shoot = False
-        self.input.shoot_released = False  # Reset release flag each frame
         self.input.pause = False
         self.input.inventory_toggle = False
         self.input.environment_menu_toggle = False
@@ -724,9 +698,13 @@ class BoardGUI:
         self._apply_movement_input()
         self._apply_action_input()
         self._apply_camera_input()
-    
+
+    # -------------------------------------------------------------------------
+    # Input Gathering (from hardware devices)
+    # -------------------------------------------------------------------------
+
     def _handle_keyboard_input(self):
-        """Handle keyboard input"""
+        """Gather keyboard input into InputState"""
         # Movement (WASD)
         move_x = 0.0
         move_y = 0.0
@@ -792,12 +770,6 @@ class BoardGUI:
         self.input.block = rl.is_key_down(rl.KEY_SPACE)
         
         # Shoot arrow (F key) - track pressed/held/released like attack
-        if rl.is_key_pressed(rl.KEY_F):
-            self.input.shoot = True
-        self.input.shoot_held = rl.is_key_down(rl.KEY_F)
-        if rl.is_key_released(rl.KEY_F):
-            self.input.shoot_released = True
-    
     def _handle_mouse_input(self):
         """Handle mouse input"""
         self.input.mouse_x = rl.get_mouse_x()
@@ -894,9 +866,22 @@ class BoardGUI:
         # Select/Back - Inventory toggle
         if rl.is_gamepad_button_pressed(gamepad_id, rl.GAMEPAD_BUTTON_MIDDLE_LEFT):
             self.input.inventory_toggle = True
-    
+
+    # -------------------------------------------------------------------------
+    # Input Application (to game state) - Priority Order
+    # -------------------------------------------------------------------------
+    # These methods apply gathered input in priority order:
+    # 1. _apply_ui_input() - Pause, inventory (highest priority)
+    # 2. _apply_movement_input() - Player movement
+    # 3. _apply_action_input() - Combat, interact
+    # 4. _apply_camera_input() - Zoom, pan (lowest priority)
+
     def _apply_movement_input(self):
-        """Apply movement input to player"""
+        """Apply movement input to player.
+
+        Handles both normal movement (WASD) and combat mode strafing.
+        Movement is blocked when player is frozen or in dialogue.
+        """
         player = self.state.player
         if not player:
             return
@@ -936,7 +921,7 @@ class BoardGUI:
                 self.player_moving = False
             # Still allow facing updates while charging
             if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
-                self._update_player_facing_to_mouse()
+                self.player_controller.update_facing_to_mouse(self.input.mouse_x, self.input.mouse_y, self._screen_to_world)
             return
         
         # Block movement while drawing bow
@@ -946,12 +931,12 @@ class BoardGUI:
                 self.player_moving = False
             # Still allow facing updates while drawing
             if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
-                self._update_player_facing_to_mouse()
+                self.player_controller.update_facing_to_mouse(self.input.mouse_x, self.input.mouse_y, self._screen_to_world)
             return
         
         # Update player facing based on mouse (when using keyboard/mouse)
         if not self.input.gamepad_connected or (self.input.move_x == 0 and self.input.move_y == 0):
-            self._update_player_facing_to_mouse()
+            self.player_controller.update_facing_to_mouse(self.input.mouse_x, self.input.mouse_y, self._screen_to_world)
         
         dx = self.input.move_x
         dy = self.input.move_y
@@ -964,10 +949,10 @@ class BoardGUI:
                 dy /= magnitude
             
             # Calculate backpedal state
-            movement_dot = self._update_backpedal_state(dx, dy)
-            
+            movement_dot = self.player_controller.update_backpedal_state(dx, dy)
+
             # Apply movement
-            self._handle_movement_no_facing(dx, dy, self.input.sprint, movement_dot)
+            self.player_controller.handle_movement_no_facing(dx, dy, self.input.sprint, movement_dot)
             self.player_moving = True
         else:
             if self.player_moving:
@@ -985,83 +970,43 @@ class BoardGUI:
         # Block actions when inventory is open
         if self.inventory_menu.is_active:
             return
-        
+
         # Unified interact (E key / A button) - handles NPC, door, window, stove
         if self.input.interact:
-            self._handle_unified_interact()
-        
+            # Build callbacks dict for GUI-specific operations
+            gui_callbacks = {
+                'is_window_viewing': lambda: self.window_viewing,
+                'toggle_window_view_off': self._toggle_window_view_off,
+                'update_camera': lambda x, y: (setattr(self, 'camera_x', x), setattr(self, 'camera_y', y)),
+                'get_facing_npc': lambda p: self.player_controller.get_facing_npc(),
+                'can_start_dialogue': self.dialogue.can_start_dialogue,
+                'start_dialogue': self.dialogue.start_dialogue,
+                'start_window_viewing': self._start_window_viewing,
+                'open_inventory_with_barrel': lambda barrel: self.inventory_menu.open(barrel=barrel),
+            }
+            self.player_controller.handle_interact(gui_callbacks)
+
         player = self.state.player
         if not player:
             return
-        
+
         in_combat_mode = player.get('combat_mode', False)
         current_tick = self.state.ticks
-        
-        # Get equipped weapon type to determine attack behavior
-        equipped_weapon_type = self._get_equipped_weapon_type()
-        
+
         # Combat input handling (combat mode required)
         if in_combat_mode:
-            if equipped_weapon_type == 'ranged':
-                # BOW: Click to draw, release to shoot
-                # On attack button press, start drawing bow
-                if self.input.attack:
-                    self.player_controller.handle_shoot_button_down(current_tick)
-                
-                # While attack button is held, update draw
-                if self.input.attack_held:
-                    self.player_controller.handle_shoot_button_held(current_tick)
-                
-                # On attack button release, fire arrow
-                if self.input.attack_released:
-                    if player.is_drawing_bow():
-                        # Get draw progress and release
-                        draw_progress = player.release_bow_draw(current_tick)
+            result = self.player_controller.handle_combat_input(
+                attack=self.input.attack,
+                attack_held=self.input.attack_held,
+                attack_released=self.input.attack_released,
+                current_tick=current_tick
+            )
 
-                        # Get attack angle (player aims with mouse/controller)
-                        attack_angle = player.get('attack_angle')
-                        if attack_angle is not None:
-                            # Fire arrow via centralized logic
-                            self.logic.shoot_arrow(player, attack_angle, draw_progress)
-                    
-                # Cancel any melee charging if switching to bow
-                if player.is_charging_heavy_attack():
-                    player.cancel_heavy_attack()
-                    
-            elif equipped_weapon_type == 'melee':
-                # SWORD: Click for quick attack, hold for heavy attack
-                # On attack button press, start tracking
-                if self.input.attack:
-                    self.player_controller.handle_attack_button_down(current_tick)
-                
-                # While attack button is held, update charge
-                if self.input.attack_held:
-                    self.player_controller.handle_attack_button_held(current_tick)
-                
-                # On attack button release, execute attack
-                if self.input.attack_released:
-                    self.player_controller.handle_attack_button_release(current_tick)
-                
-                # Cancel any bow drawing if switching to sword
-                if player.is_drawing_bow():
-                    player.cancel_bow_draw()
-            else:
-                # No weapon equipped - use FISTS (unarmed melee combat)
-                # On attack button press, start tracking
-                if self.input.attack:
-                    self.player_controller.handle_attack_button_down(current_tick)
-                
-                # While attack button is held, update charge
-                if self.input.attack_held:
-                    self.player_controller.handle_attack_button_held(current_tick)
-                
-                # On attack button release, execute attack
-                if self.input.attack_released:
-                    self.player_controller.handle_attack_button_release(current_tick)
-                
-                # Cancel any bow drawing
-                if player.is_drawing_bow():
-                    player.cancel_bow_draw()
+            # Handle ranged shot (arrow release)
+            if result['bow_released']:
+                attack_angle = player.get('attack_angle')
+                if attack_angle is not None:
+                    self.logic.shoot_arrow(player, attack_angle, result['draw_progress'])
         else:
             # Not in combat mode - cancel any combat actions
             if player.is_drawing_bow():
@@ -1069,262 +1014,6 @@ class BoardGUI:
             if player.is_charging_heavy_attack():
                 player.cancel_heavy_attack()
     
-    def _player_has_weapon_type_equipped(self, weapon_type):
-        """Check if player has a specific type of weapon equipped.
-        
-        Args:
-            weapon_type: 'melee' or 'ranged'
-            
-        Returns:
-            True if player has that weapon type equipped
-        """
-        player = self.state.player
-        if not player:
-            return False
-        
-        equipped_slot = getattr(player, 'equipped_weapon', None)
-        if equipped_slot is None:
-            return False
-        
-        inventory = player.inventory
-        if equipped_slot < 0 or equipped_slot >= len(inventory):
-            return False
-        
-        item = inventory[equipped_slot]
-        if item is None:
-            return False
-        
-        item_type = item.get('type', '')
-        item_info = ITEMS.get(item_type, {})
-        return item_info.get('weapon_type') == weapon_type
-    
-    def _get_equipped_weapon_type(self):
-        """Get the weapon type of currently equipped weapon.
-        
-        Returns:
-            'melee', 'ranged', or None if no weapon equipped
-        """
-        player = self.state.player
-        if not player:
-            return None
-        
-        equipped_slot = getattr(player, 'equipped_weapon', None)
-        if equipped_slot is None:
-            return None
-        
-        inventory = player.inventory
-        if equipped_slot < 0 or equipped_slot >= len(inventory):
-            return None
-        
-        item = inventory[equipped_slot]
-        if item is None:
-            return None
-        
-        item_type = item.get('type', '')
-        item_info = ITEMS.get(item_type, {})
-        return item_info.get('weapon_type')
-    
-    def _get_character_weapon_stats(self, char):
-        """Get the weapon stats for any character's equipped weapon.
-
-        Returns weapon stats dict from equipped melee weapon, or FISTS if unarmed.
-
-        Args:
-            char: Character to get weapon stats for
-
-        Returns:
-            Dict with weapon stats (from ITEMS entry or FISTS constant)
-        """
-        equipped_slot = getattr(char, 'equipped_weapon', None)
-
-        if equipped_slot is not None:
-            inventory = getattr(char, 'inventory', [])
-            if 0 <= equipped_slot < len(inventory):
-                item = inventory[equipped_slot]
-                if item is not None:
-                    item_type = item.get('type', '')
-                    item_info = ITEMS.get(item_type, {})
-                    # Only use if it's a melee weapon
-                    if item_info.get('weapon_type') == 'melee':
-                        return item_info
-
-        # Fall back to fists (unarmed combat)
-        return FISTS
-
-    def _get_player_weapon_reach(self):
-        """Get the weapon reach for player's currently equipped melee weapon.
-
-        Returns weapon reach from equipped melee weapon, or FISTS range if unarmed.
-
-        Returns:
-            Float range in cells
-        """
-        player = self.state.player
-        if not player:
-            return FISTS["range"]
-
-        weapon_stats = self._get_character_weapon_stats(player)
-        return weapon_stats.get('range', FISTS['range'])
-
-    def _get_player_weapon_reach_OLD(self):
-        """DEPRECATED: Old implementation, replaced by _get_character_weapon_stats."""
-        player = self.state.player
-        if not player:
-            return FISTS["range"]
-
-        equipped_slot = getattr(player, 'equipped_weapon', None)
-        if equipped_slot is None:
-            return FISTS["range"]
-
-        inventory = player.inventory
-        if equipped_slot < 0 or equipped_slot >= len(inventory):
-            return FISTS["range"]
-
-        item = inventory[equipped_slot]
-        if item is None:
-            return FISTS["range"]
-
-        item_type = item.get('type', '')
-        item_info = ITEMS.get(item_type, {})
-        
-        # Only return range for melee weapons
-        if item_info.get('weapon_type') == 'melee':
-            return item_info.get('range', FISTS["range"])
-        
-        return FISTS["range"]
-
-    def _handle_unified_interact(self):
-        """Handle unified interact (E key / A button).
-        
-        Checks for interactables in priority order:
-        1. If window viewing → toggle off
-        2. Door → enter/exit building (first so player can escape combat)
-        3. NPC → start dialogue (must be facing them)
-        4. Window → start window viewing
-        5. Stove/campfire → bake bread
-        6. Barrel → take wheat
-        7. Bed → sleep (not implemented)
-        8. Tree → chop (not implemented)
-        """
-        player = self.state.player
-        if not player:
-            return
-        
-        # Priority 1: If currently window viewing, toggle it off
-        if self.window_viewing:
-            self._toggle_window_view_off()
-            return
-        
-        # Priority 2: Check for door FIRST (allows escaping combat)
-        house = self.state.get_adjacent_door(player)
-        if house:
-            if self.player_controller.handle_door_input():
-                # Successfully entered/exited - update camera
-                self.camera_x = player.x
-                self.camera_y = player.y
-                return
-        
-        # Priority 3: Check for nearby NPC (must be facing them)
-        npc = self._get_facing_npc(player)
-        if npc:
-            if self.dialogue.can_start_dialogue(npc):
-                self.dialogue.start_dialogue(npc)
-                return
-            else:
-                self.state.log_action(f"{npc.get_display_name()} is busy!")
-                return
-        
-        # Priority 4: Check for window
-        window = self.player_controller.handle_window_input()
-        if window:
-            self._start_window_viewing(window)
-            return
-        
-        # Priority 5: Check for stove/campfire (baking) - must be facing
-        cooking_spot = self.logic.get_adjacent_cooking_spot(player)
-        if cooking_spot:
-            # Check if facing the cooking spot
-            source = cooking_spot.get('source')
-            if cooking_spot['type'] == 'stove':
-                # Stoves are interior - use local coords
-                target_x, target_y = source.x + 0.5, source.y + 0.5
-                target_zone = source.zone
-            else:  # campfire
-                # Campfires are exterior - use world coords
-                target_x, target_y = source[0] + 0.5, source[1] + 0.5
-                target_zone = None
-            
-            if self._is_facing_position(player, target_x, target_y, target_zone):
-                self.player_controller.handle_bake_input()
-                return
-        
-        # Priority 6: Check for barrel (must be facing)
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                # Use local coords for interior barrels, world coords for exterior
-                if barrel.zone is not None:
-                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                else:
-                    target_x, target_y = barrel.world_x, barrel.world_y
-                if self._is_facing_position(player, target_x, target_y, barrel.zone):
-                    # Check if player can use this barrel
-                    if barrel.can_use(player):
-                        self.inventory_menu.open(barrel=barrel)
-                    else:
-                        self.state.log_action("Not your barrel")
-                    return
-        
-        # Priority 7: Check for bed (must be facing) - not implemented
-        for bed in self.state.interactables.beds.values():
-            if bed.is_adjacent(player):
-                # Beds are interior - use local coords
-                if self._is_facing_position(player, bed.x + 0.5, bed.y + 0.5, bed.zone):
-                    is_owned = bed.is_owned_by(player.name)
-                    if is_owned or not bed.is_owned():
-                        self.state.log_action("Sleep not implemented yet")
-                    else:
-                        self.state.log_action("Not your bed")
-                    return
-        
-        # Priority 8: Check for tree (must be facing) - not implemented
-        for pos, tree in self.state.interactables.trees.items():
-            if tree.is_adjacent(player):
-                # Trees are exterior - use world coords (zone is None)
-                if self._is_facing_position(player, tree.x + 0.5, tree.y + 0.5, None):
-                    self.state.log_action("Shaking trees not implemented yet")
-                    return
-    
-    def _get_facing_npc(self, player):
-        """Get nearest NPC that player is facing within interact distance."""
-        nearest_npc = None
-        nearest_dist = float('inf')
-        
-        for char in self.state.characters:
-            if char == player:
-                continue
-            if char.get('health', 100) <= 0:
-                continue
-            if char.zone != player.zone:
-                continue
-            
-            # Get positions in local coords (prevailing when interior, x/y when exterior)
-            if player.zone:
-                px, py = player.prevailing_x, player.prevailing_y
-                cx, cy = char.prevailing_x, char.prevailing_y
-            else:
-                px, py = player.x, player.y
-                cx, cy = char.x, char.y
-            
-            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-            
-            # Must be within interact distance AND player facing them
-            if dist <= INTERACT_DISTANCE and dist < nearest_dist:
-                # Pass zone so _is_facing_position uses correct player coords
-                if self._is_facing_position(player, cx, cy, player.zone):
-                    nearest_npc = char
-                    nearest_dist = dist
-        
-        return nearest_npc
     
     def _toggle_window_view_off(self):
         """Stop window viewing and recenter on player."""
@@ -1369,9 +1058,17 @@ class BoardGUI:
         self.window_viewing = True
         self.window_viewing_window = window
         self.camera_following_player = False
-    
+
+    # =========================================================================
+    # COORDINATE CONVERSION & CAMERA
+    # =========================================================================
+
     def _apply_camera_input(self):
-        """Apply camera control input"""
+        """Apply camera control input.
+
+        Handles combat mode toggle, zoom in/out.
+        Camera changes are blocked during window viewing.
+        """
         player = self.state.player
         
         # Don't allow camera changes while window viewing
@@ -1397,7 +1094,7 @@ class BoardGUI:
         
         # Update block state (only in combat mode AND with sword equipped)
         if player:
-            has_sword_equipped = self._player_has_weapon_type_equipped('melee')
+            has_sword_equipped = (player.get_equipped_weapon_type() == 'melee')
             player.is_blocking = self.input.block and player.get('combat_mode', False) and has_sword_equipped
         
         # Manual panning
@@ -1555,137 +1252,6 @@ class BoardGUI:
         world_y = (screen_y - canvas_center_y) / cell_size + self.camera_y
         return world_x, world_y
     
-    def _update_player_facing_to_mouse(self):
-        """Update player facing direction to face the mouse cursor.
-        
-        Also stores the precise angle for 360° attack aiming.
-        """
-        player = self.state.player
-        if not player:
-            return
-        
-        # Convert mouse position to world coords
-        world_x, world_y = self._screen_to_world(self.input.mouse_x, self.input.mouse_y)
-        
-        # Calculate direction from player to mouse
-        # Use prevailing coords when in interior (camera space matches interior)
-        if player.zone:
-            dx = world_x - player.prevailing_x
-            dy = world_y - player.prevailing_y
-        else:
-            dx = world_x - player.x
-            dy = world_y - player.y
-        
-        # Calculate precise angle and store it for 360° aiming
-        angle = math.atan2(dy, dx)
-        player.attack_angle = angle
-        
-        # Determine 8-direction facing (for sprite animation)
-        if angle >= -math.pi/8 and angle < math.pi/8:
-            player.facing = 'right'
-        elif angle >= math.pi/8 and angle < 3*math.pi/8:
-            player.facing = 'down-right'
-        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
-            player.facing = 'down'
-        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
-            player.facing = 'down-left'
-        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
-            player.facing = 'left'
-        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
-            player.facing = 'up-left'
-        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
-            player.facing = 'up'
-        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
-            player.facing = 'up-right'
-    
-    def _update_backpedal_state(self, move_dx, move_dy):
-        """Check if player is backpedaling (moving opposite to facing)."""
-        player = self.state.player
-        if not player:
-            return 0
-        
-        facing = player.get('facing', 'down')
-        
-        facing_vectors = {
-            'right': (1, 0),
-            'left': (-1, 0),
-            'up': (0, -1),
-            'down': (0, 1),
-            'up-right': (1, -1),
-            'up-left': (-1, -1),
-            'down-right': (1, 1),
-            'down-left': (-1, 1),
-        }
-        
-        face_dx, face_dy = facing_vectors.get(facing, (0, 1))
-        
-        # Normalize
-        move_mag = math.sqrt(move_dx * move_dx + move_dy * move_dy)
-        if move_mag > 0:
-            move_dx_norm = move_dx / move_mag
-            move_dy_norm = move_dy / move_mag
-        else:
-            move_dx_norm, move_dy_norm = 0, 0
-        
-        face_mag = math.sqrt(face_dx * face_dx + face_dy * face_dy)
-        if face_mag > 0:
-            face_dx_norm = face_dx / face_mag
-            face_dy_norm = face_dy / face_mag
-        else:
-            face_dx_norm, face_dy_norm = 0, 1
-        
-        dot = move_dx_norm * face_dx_norm + move_dy_norm * face_dy_norm
-        player['is_backpedaling'] = dot < 0
-        
-        return dot
-    
-    def _handle_movement_no_facing(self, dx, dy, sprinting=False, movement_dot=0):
-        """Handle movement input without changing facing direction."""
-        player = self.state.player
-        if not player:
-            return False
-        
-        if player.is_frozen:
-            player.vx = 0.0
-            player.vy = 0.0
-            return False
-        
-        # Blocking overrides sprint and slows movement
-        if player.is_blocking:
-            from constants import BLOCK_MOVEMENT_SPEED
-            speed = BLOCK_MOVEMENT_SPEED
-            player.is_sprinting = False
-        else:
-            # Check stamina for sprinting (Skyrim-style)
-            if sprinting:
-                # Check if player can sprint (has stamina)
-                if player.is_sprinting:
-                    # Already sprinting - check if can continue
-                    if not player.can_continue_sprint():
-                        sprinting = False
-                else:
-                    # Trying to start sprinting - check if can start
-                    if not player.can_start_sprint():
-                        sprinting = False
-            
-            if movement_dot > 0:
-                speed = SPRINT_SPEED if sprinting else MOVEMENT_SPEED
-                player.is_sprinting = sprinting
-            else:
-                speed = MOVEMENT_SPEED * 0.9
-                player.is_sprinting = False
-        
-        # Normalize diagonal movement
-        if dx != 0 and dy != 0:
-            diagonal_factor = 1.0 / math.sqrt(2)
-            player.vx = dx * speed * diagonal_factor
-            player.vy = dy * speed * diagonal_factor
-        else:
-            player.vx = dx * speed
-            player.vy = dy * speed
-        
-        return True
-    
     # =========================================================================
     # GAME LOOP
     # =========================================================================
@@ -1748,9 +1314,9 @@ class BoardGUI:
         
         # Update environment menu
         self.environment_menu.update(dt)
-        
+
         # Update ongoing actions (player timed actions)
-        self._update_ongoing_actions()
+        self.logic.update_ongoing_actions()
     
     # =========================================================================
     # RENDERING
@@ -2239,17 +1805,23 @@ class BoardGUI:
         self._draw_arrows(rendering_zone)
         
         # Draw red outlines for characters in player's attack cone (when in combat mode)
-        chars_in_attack_cone = self._get_chars_in_attack_cone()
+        chars_in_attack_cone = self.player_controller.get_chars_in_attack_cone()
         if chars_in_attack_cone:
             self._draw_combat_target_outlines(chars_in_attack_cone)
         
         # Draw deferred UI on top of everything
         for ui_info in self._deferred_ui_cache:
             self._draw_character_ui(ui_info)
-    
+
+    # =========================================================================
+    # OCCLUSION SYSTEM
+    # =========================================================================
+    # Handles depth sorting and occlusion detection for trees, barrels, etc.
+    # Methods are scattered throughout rendering code for performance reasons.
+
     def _get_visible_occluders(self, zone):
         """Get only occluders within the visible area. Cached per frame.
-        
+
         Returns list of (occluder_type, pos, data, sort_y) tuples.
         
         Uses spatial hashing for trees to avoid iterating all trees in the world.
@@ -2376,13 +1948,23 @@ class BoardGUI:
             if char_y < obj_sort_y and char_y > obj_y - occlusion_height:
                 if abs(char_x - obj_center_x) < occlusion_width:
                     return True
-        
+
         return False
-    
+
+    # =========================================================================
+    # PERCEPTION & VISION SYSTEM
+    # =========================================================================
+
     def _is_character_perceived(self, char):
         """Check if a character is within the player's perception (vision cone or sound radius).
-        
+
         Delegates to game_logic.can_perceive_character() for centralized perception logic.
+
+        Args:
+            char: Character to check
+
+        Returns:
+            True if player can perceive the character
         """
         player = self.state.player
         if not player or char is player:
@@ -2932,11 +2514,19 @@ class BoardGUI:
                     # Check horizontal overlap
                     if abs(char_x - obj_center_x) < occlusion_width:
                         occluding.append((occluder_type, pos, config))
-        
+
         return occluding
-    
+
+    # =========================================================================
+    # SHADER MANAGEMENT
+    # =========================================================================
+
     def _init_composite_shader(self):
-        """Initialize shader that composites outline with tree mask."""
+        """Initialize shader that composites outline with tree mask.
+
+        Returns:
+            Shader object for compositing
+        """
         if hasattr(self, '_composite_shader'):
             return self._composite_shader
         
@@ -3119,12 +2709,16 @@ void main() {
         self._red_outline_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
         self._red_outline_texture_size_loc = rl.get_shader_location(self._red_outline_shader, "textureSize")
         self._red_outline_width_loc = rl.get_shader_location(self._red_outline_shader, "outlineWidth")
-        
+
         return self._red_outline_shader
-    
+
+    # =========================================================================
+    # COMBAT VISUALIZATION
+    # =========================================================================
+
     def _draw_combat_target_outlines(self, chars_in_attack_cone):
         """Draw red outlines around characters in the player's attack cone.
-        
+
         Args:
             chars_in_attack_cone: Set of character ids that are in the attack cone
         """
@@ -3196,85 +2790,6 @@ void main() {
             rl.draw_texture_pro(recolored_texture, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
             rl.end_shader_mode()
     
-    def _draw_single_tree(self, tree, pos):
-        """Draw a single tree (legacy - now use _draw_single_occluder)"""
-        self._draw_single_occluder('tree', pos, tree)
-    
-    def _draw_trees(self):
-        """Draw all trees (legacy - now handled by _draw_trees_and_characters)"""
-        for pos, tree in self.state.interactables.trees.items():
-            self._draw_single_occluder('tree', pos, tree)
-    
-    def _draw_barrels(self):
-        """Draw all barrels (legacy - now handled by _draw_trees_and_characters)"""
-        cell_size = self._cam_cell_size
-        barrel_tex = self.world_textures.get('barrel')
-        
-        for barrel in self.state.interactables.barrels.values():
-            x, y = barrel.x, barrel.y
-            screen_x, screen_y = self._world_to_screen(x, y)
-            
-            if barrel_tex:
-                barrel_size = int(cell_size * 0.8)
-                blit_x = screen_x + (cell_size - barrel_size) / 2
-                blit_y = screen_y + (cell_size - barrel_size) / 2
-                
-                source = rl.Rectangle(0, 0, barrel_tex.width, barrel_tex.height)
-                dest = rl.Rectangle(blit_x, blit_y, barrel_size, barrel_size)
-                rl.draw_texture_pro(barrel_tex, source, dest, rl.Vector2(0, 0), 0, rl.WHITE)
-            else:
-                padding = int(5 * self.zoom)
-                rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                                 int(cell_size - 2*padding), int(cell_size - 2*padding),
-                                 hex_to_color("#8B4513"))
-    
-    def _draw_beds(self):
-        """Draw all beds (legacy - now handled by _draw_trees_and_characters)"""
-        cell_size = self._cam_cell_size
-        
-        for bed in self.state.interactables.beds.values():
-            x, y = bed.x, bed.y
-            screen_x, screen_y = self._world_to_screen(x, y)
-            
-            padding = int(4 * self.zoom)
-            bed_size = int(cell_size - 2*padding)
-            
-            # Bed base (blue)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             bed_size, bed_size, hex_to_color("#4169E1"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   bed_size, bed_size, hex_to_color("#2a4494"))
-            
-            # Pillow
-            pillow_height = int(8 * self.zoom)
-            pillow_margin = int(3 * self.zoom)
-            rl.draw_rectangle(int(screen_x + padding + pillow_margin),
-                             int(screen_y + padding + 2*self.zoom),
-                             bed_size - 2*pillow_margin, pillow_height,
-                             rl.WHITE)
-    
-    def _draw_stoves(self):
-        """Draw all stoves (legacy - now handled by _draw_trees_and_characters)"""
-        cell_size = self._cam_cell_size
-        
-        for stove in self.state.interactables.stoves.values():
-            x, y = stove.x, stove.y
-            screen_x, screen_y = self._world_to_screen(x, y)
-            
-            padding = int(4 * self.zoom)
-            stove_size = int(cell_size - 2*padding)
-            
-            # Stove base (dark gray)
-            rl.draw_rectangle(int(screen_x + padding), int(screen_y + padding),
-                             stove_size, stove_size, hex_to_color("#444444"))
-            rl.draw_rectangle_lines(int(screen_x + padding), int(screen_y + padding),
-                                   stove_size, stove_size, hex_to_color("#222222"))
-            
-            # Draw "S" text
-            text_x = int(screen_x + cell_size / 2 - 4)
-            text_y = int(screen_y + cell_size / 2 - 8)
-            rl.draw_text("S", text_x, text_y, 16, rl.Color(255, 150, 50, 255))
-    
     def _draw_camps(self):
         """Draw all campfires"""
         cell_size = self._cam_cell_size
@@ -3313,9 +2828,17 @@ void main() {
                     rl.draw_circle(fire_cx, fire_cy, r1, rl.Color(255, 100, 0, 255))
                     rl.draw_circle(fire_cx, fire_cy, r2, rl.Color(255, 200, 0, 255))
                     rl.draw_circle(fire_cx, fire_cy, r3, rl.Color(255, 255, 100, 255))
-    
+
+    # =========================================================================
+    # CHARACTER RENDERING
+    # =========================================================================
+
     def _get_character_color(self, char):
-        """Get the display color for a character"""
+        """Get the display color for a character based on state.
+
+        Returns:
+            Hex color string for character tint
+        """
         if char.get('is_frozen', False):
             return "#FF0000"
         
@@ -3654,7 +3177,7 @@ void main() {
             # Draw attack range (orange)
             if SHOW_ATTACK_RANGE:
                 # Get actual weapon stats from character's equipped weapon or fists
-                weapon_stats = self._get_character_weapon_stats(char)
+                weapon_stats = char.get_weapon_stats()
                 attack_radius_px = weapon_stats.get('range', FISTS['range']) * cell_size
                 rl.draw_circle_lines(
                     int(pixel_cx), int(pixel_cy),
@@ -3708,89 +3231,6 @@ void main() {
             if SHOW_ATTACK_CONE and char.is_player and char.get('combat_mode', False):
                 self._draw_player_attack_cone(char, pixel_cx, pixel_cy, cell_size)
 
-    def _is_char_in_player_attack_cone(self, char):
-        """Check if a character is in the player's attack cone.
-        
-        Uses 360° angle-based cone detection matching resolve_attack() in game_logic.py.
-        Cone interpolates from BASE_ANGLE at player to full ANGLE at weapon reach.
-        
-        Args:
-            char: Character to check
-            
-        Returns:
-            True if character is in the attack cone
-        """
-        player = self.state.player
-        if not player or char is player:
-            return False
-        
-        # Skip dead characters
-        if char.get('health', 100) <= 0:
-            return False
-        
-        # Must be in same zone
-        if char.zone != player.zone:
-            return False
-        
-        # Get the precise attack angle (360° aiming)
-        attack_angle = player.get('attack_angle')
-        if attack_angle is None:
-            return False
-        
-        # Get weapon reach based on equipped weapon
-        weapon_reach = self._get_player_weapon_reach()
-        
-        # Calculate relative position using prevailing coords (local when in interior)
-        rel_x = char.prevailing_x - player.prevailing_x
-        rel_y = char.prevailing_y - player.prevailing_y
-        
-        # Calculate distance to target
-        distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
-        
-        # Must be within weapon reach and not at same position
-        if distance <= 0 or distance > weapon_reach:
-            return False
-        
-        # Interpolate cone half-angle based on distance (wider at range)
-        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
-        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
-        t = distance / weapon_reach  # 0 at player, 1 at max range
-        half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
-        
-        # Calculate angle to target
-        angle_to_target = math.atan2(rel_y, rel_x)
-        
-        # Calculate angular difference (handle wraparound)
-        angle_diff = angle_to_target - attack_angle
-        # Normalize to [-pi, pi]
-        while angle_diff > math.pi:
-            angle_diff -= 2 * math.pi
-        while angle_diff < -math.pi:
-            angle_diff += 2 * math.pi
-        
-        # Check if within interpolated cone angle
-        return abs(angle_diff) <= half_cone_rad
-    
-    def _get_chars_in_attack_cone(self):
-        """Get all characters currently in the player's attack cone.
-        
-        Returns:
-            Set of character ids that are in the attack cone
-        """
-        player = self.state.player
-        if not player:
-            return set()
-        
-        # Only check when player is in combat mode
-        if not player.get('combat_mode', False):
-            return set()
-        
-        targets = set()
-        for char in self.state.characters:
-            if self._is_char_in_player_attack_cone(char):
-                targets.add(id(char))
-        
-        return targets
     
     def _draw_player_attack_cone(self, player, pixel_cx, pixel_cy, cell_size):
         """Draw the player's directional attack cone as a truncated wedge.
@@ -3812,7 +3252,7 @@ void main() {
             return
         
         # Get weapon reach based on equipped weapon
-        weapon_reach = self._get_player_weapon_reach()
+        weapon_reach = self.player_controller.get_weapon_reach()
         
         # Convert dimensions to pixels
         reach_px = weapon_reach * cell_size
@@ -4300,23 +3740,6 @@ void main() {
                 if charge_fill_width > 0:
                     rl.draw_rectangle(bar_x, charge_bar_y, charge_fill_width, bar_height, 
                                      rl.Color(70, 130, 220, 220))
-    
-    def _draw_single_character(self, char):
-        """Draw a single character (legacy - calls sprite + UI)"""
-        if not hasattr(self, '_character_ui_cache'):
-            self._character_ui_cache = []
-        self._draw_single_character_sprite(char)
-        # For legacy calls, draw UI immediately
-        if self._character_ui_cache:
-            ui_info = self._character_ui_cache[-1]
-            self._draw_character_ui(ui_info)
-    
-    def _draw_characters(self):
-        """Draw all characters (legacy - now handled by _draw_trees_and_characters)"""
-        if not hasattr(self, '_character_ui_cache'):
-            self._character_ui_cache = []
-        for char in self.state.characters:
-            self._draw_single_character(char)
     
     def _draw_death_animations(self):
         """Draw death animations"""
@@ -5118,7 +4541,7 @@ void main() {
             
             # Must be within interact distance AND player facing them
             if dist <= INTERACT_DISTANCE and dist < nearest_npc_dist:
-                if self._is_facing_position(player, cx, cy, player.zone):
+                if player.is_facing_position(cx, cy):
                     nearest_npc = char
                     nearest_npc_dist = dist
         
@@ -5162,7 +4585,7 @@ void main() {
         stove = self.state.interactables.get_adjacent_stove(player)
         if stove:
             # Check if facing the stove - use local coords for interior
-            if self._is_facing_position(player, stove.x + 0.5, stove.y + 0.5, stove.zone):
+            if player.is_facing_position(stove.x + 0.5, stove.y + 0.5):
                 if stove.can_use(player):
                     return {
                         'type': 'Stove',
@@ -5181,7 +4604,7 @@ void main() {
             camp_pos = other_char.get('camp_position')
             if camp_pos and self.state.interactables.is_adjacent_to_camp(player, camp_pos):
                 # Check if facing the campfire - exterior so no zone
-                if self._is_facing_position(player, camp_pos[0] + 0.5, camp_pos[1] + 0.5, None):
+                if player.is_facing_position(camp_pos[0] + 0.5, camp_pos[1] + 0.5):
                     owner_name = other_char.get_display_name()
                     return {
                         'type': 'Campfire',
@@ -5197,7 +4620,7 @@ void main() {
                     target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
                 else:
                     target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                if self._is_facing_position(player, target_x, target_y, barrel.zone):
+                if player.is_facing_position(target_x, target_y):
                     if barrel.can_use(player):
                         return {
                             'type': 'Barrel',
@@ -5215,7 +4638,7 @@ void main() {
         for bed in self.state.interactables.beds.values():
             if bed.is_adjacent(player):
                 # Check if facing the bed - use local coords for interior
-                if self._is_facing_position(player, bed.x + 0.5, bed.y + 0.5, bed.zone):
+                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
                     is_owned = bed.is_owned_by(player.name)
                     if is_owned or not bed.is_owned():
                         return {
@@ -5234,7 +4657,7 @@ void main() {
         for pos, tree in self.state.interactables.trees.items():
             if tree.is_adjacent(player):
                 # Check if facing the tree - exterior so no zone
-                if self._is_facing_position(player, tree.x + 0.5, tree.y + 0.5, None):
+                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
                     return {
                         'type': 'Tree',
                         'name': 'Tree',
@@ -5242,62 +4665,6 @@ void main() {
                     }
         
         return None
-    
-    def _is_facing_position(self, player, target_x, target_y, target_zone=None):
-        """Check if player is roughly facing toward a target position.
-        
-        Uses a generous 90-degree cone in the facing direction.
-        
-        For objects that passed is_adjacent, they're in the same zone as player.
-        Just use player.zone to determine coordinate system.
-        
-        Args:
-            player: Player character
-            target_x: Target X in local coords (object.x + 0.5)
-            target_y: Target Y in local coords (object.y + 0.5)
-            target_zone: Unused, kept for compatibility
-        """
-        # Use player.zone to determine coordinate system
-        # Objects that passed is_adjacent are guaranteed to be in same zone
-        if player.zone is not None:
-            # Interior - use local/prevailing coords
-            px, py = player.prevailing_x, player.prevailing_y
-        else:
-            # Exterior - use world coords
-            px, py = player.x, player.y
-        
-        # Direction to target
-        dx = target_x - px
-        dy = target_y - py
-        
-        if abs(dx) < 0.01 and abs(dy) < 0.01:
-            return True  # On top of target, always valid
-        
-        # Get facing direction vector
-        facing = player.get('facing', 'down')
-        facing_vectors = {
-            'up': (0, -1),
-            'down': (0, 1),
-            'left': (-1, 0),
-            'right': (1, 0),
-            'up-left': (-0.707, -0.707),
-            'up-right': (0.707, -0.707),
-            'down-left': (-0.707, 0.707),
-            'down-right': (0.707, 0.707),
-        }
-        fx, fy = facing_vectors.get(facing, (0, 1))
-        
-        # Normalize direction to target
-        dist = math.sqrt(dx*dx + dy*dy)
-        dx /= dist
-        dy /= dist
-        
-        # Dot product gives cosine of angle between vectors
-        # cos(45°) ≈ 0.707, cos(53°) ≈ 0.6, cos(60°) = 0.5, cos(90°) = 0
-        dot = dx * fx + dy * fy
-        
-        # Require ~53 degree cone (dot > 0.6) for tighter targeting
-        return dot > 0.6
     
     def _is_player_facing_window(self, player, window):
         """Check if player is facing toward a window from outside."""

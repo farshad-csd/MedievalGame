@@ -10,7 +10,7 @@ if sys.platform == 'darwin':
     except RuntimeError:
         pass  # Already set
 
-from gui import BoardGUI
+from ui.gui import BoardGUI
 
 
 def main():
