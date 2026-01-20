@@ -1083,12 +1083,8 @@ class BoardGUI:
                 entering_combat = not player.get('combat_mode', False)
                 player['combat_mode'] = entering_combat
 
-                if entering_combat:
-                    # Entering combat mode - auto-equip strongest weapon
-                    player.equip_strongest_weapon()
-                else:
-                    # Exiting combat mode - unequip weapon
-                    player.equipped_weapon = None
+                # Player's equipped weapon persists regardless of combat mode state
+                # No auto-equip or auto-unequip for player
 
                 # Use centralized logging
                 self.logic.log_combat_mode_change(player, entering_combat)

@@ -526,22 +526,9 @@ class DialogueMenu:
             
             # Determine text color based on option type
             is_selected = (i == self._selected_option)
-            text_color = self._get_option_color(option, is_selected)
+            text_color = COLOR_TEXT if is_selected else COLOR_TEXT_DIM
             
             rl.draw_text(option, text_x, text_y, 14, text_color)
-    
-    def _get_option_color(self, option, is_selected):
-        """
-        Get the appropriate color for a menu option.
-        
-        Args:
-            option: The option text
-            is_selected: Whether this option is currently selected
-            
-        Returns:
-            Raylib Color for the option text
-        """
-        return COLOR_TEXT if is_selected else COLOR_TEXT_DIM
     
     def _draw_wrapped_text(self, text, x, y, max_width, font_size, color):
         """Draw text with word wrapping."""

@@ -92,7 +92,7 @@ class CombatEngagementManager:
         """
         Helper to explicitly enter combat mode.
 
-        Currently just sets the flag and equips weapon.
+        Currently just sets the flag and equips weapon (NPCs only - player equips manually).
         In the future, could:
         - Track engagement start time
         - Record engagement reason
@@ -107,13 +107,16 @@ class CombatEngagementManager:
             return  # Already in combat
 
         char['combat_mode'] = True
-        char.equip_strongest_weapon()
+
+        # NPCs auto-equip strongest weapon, player equips manually
+        if not char.is_player:
+            char.equip_strongest_weapon()
 
     def exit_combat(self, char):
         """
         Helper to explicitly exit combat mode.
 
-        Currently just clears the flag and unequips weapon.
+        Currently just clears the flag and unequips weapon (NPCs only - player keeps equipped weapon).
         In the future, could:
         - Clear engagement timers
         - Reset combat-specific state
@@ -126,7 +129,6 @@ class CombatEngagementManager:
             return  # Not in combat
 
         char['combat_mode'] = False
-        char.equipped_weapon = None
 
     def is_in_combat(self, char):
         """

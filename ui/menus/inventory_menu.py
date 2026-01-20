@@ -2915,7 +2915,6 @@ class InventoryMenu:
             else:
                 hints = [
                     ("Click", "Select"),
-                    ("Esc", "Cancel"),
                 ]
         elif self._confirm_popup_open:
             # Confirmation popup is open
@@ -2929,7 +2928,6 @@ class InventoryMenu:
                 hints = [
                     ("Arrow keys", "Choose"),
                     ("Click", "Confirm"),
-                    ("Esc", "Cancel"),
                 ]
         elif self.held_item:
             # Holding an item
@@ -2943,7 +2941,6 @@ class InventoryMenu:
                 hints = [
                     ("Click", "Place all"),
                     ("Right Click", "Place one"),
-                    ("Esc", "Cancel"),
                 ]
         else:
             # Normal state - no item held
@@ -2955,8 +2952,9 @@ class InventoryMenu:
                 ]
             else:
                 hints = [
-                    ("Click", "Pick up"),
-                    ("Shift+Click", "Item menu"),
+                    ("Left Click", "Pick up"),
+                    ("Right Click", "Item menu"),
+                    ("Shift+Click", "Quick-move"),
                     ("Tab", "Close"),
                 ]
 
