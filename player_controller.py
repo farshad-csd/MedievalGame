@@ -691,75 +691,54 @@ class PlayerController:
                 }
 
         # Priority 6: Corpse (must be facing)
-        for corpse in self.state.corpses:
-            if corpse.zone != player.zone:
-                continue
-
-            if player.zone is not None:
-                px, py = player.prevailing_x, player.prevailing_y
-            else:
-                px, py = player.x, player.y
-
-            cx, cy = corpse.center
-
-            import math
-            dist = math.sqrt((px - cx)**2 + (py - cy)**2)
-
-            if dist <= INTERACT_DISTANCE:
-                if player.is_facing_position(cx, cy):
-                    return {
-                        'type': 'corpse',
-                        'name': f"{corpse.character_name}'s Corpse",
-                        'label': 'Loot',
-                        'target': corpse,
-                        'can_interact': True
-                    }
+        corpse = self.logic.get_player_nearby_corpse(player)
+        if corpse:
+            return {
+                'type': 'corpse',
+                'name': f"{corpse.character_name}'s Corpse",
+                'label': 'Loot',
+                'target': corpse,
+                'can_interact': True
+            }
 
         # Priority 7: Barrel (must be facing)
-        for barrel in self.state.interactables.barrels.values():
-            if barrel.is_adjacent(player):
-                if barrel.zone is not None:
-                    target_x, target_y = barrel.x + 0.5, barrel.y + 0.5
-                else:
-                    target_x, target_y = barrel.world_x, barrel.world_y
-                if player.is_facing_position(target_x, target_y):
-                    can_use = barrel.can_use(player)
-                    return {
-                        'type': 'barrel',
-                        'name': barrel.name,
-                        'label': 'Open',
-                        'target': barrel,
-                        'can_interact': can_use,
-                        'blocked_reason': 'Not your barrel' if not can_use else None
-                    }
+        barrel = self.logic.get_player_nearby_barrel(player)
+        if barrel:
+            can_use = barrel.can_use(player)
+            return {
+                'type': 'barrel',
+                'name': barrel.name,
+                'label': 'Open',
+                'target': barrel,
+                'can_interact': can_use,
+                'blocked_reason': 'Not your barrel' if not can_use else None
+            }
 
         # Priority 8: Bed (must be facing)
-        for bed in self.state.interactables.beds.values():
-            if bed.is_adjacent(player):
-                if player.is_facing_position(bed.x + 0.5, bed.y + 0.5):
-                    is_owned = bed.is_owned_by(player.name)
-                    can_use = is_owned or not bed.is_owned()
-                    return {
-                        'type': 'bed',
-                        'name': bed.name,
-                        'label': 'Sleep',
-                        'target': bed,
-                        'can_interact': False,  # Not implemented
-                        'blocked_reason': 'Sleep not implemented yet' if can_use else 'Not your bed'
-                    }
+        bed = self.logic.get_player_nearby_bed(player)
+        if bed:
+            is_owned = bed.is_owned_by(player.name)
+            can_use = is_owned or not bed.is_owned()
+            return {
+                'type': 'bed',
+                'name': bed.name,
+                'label': 'Sleep',
+                'target': bed,
+                'can_interact': False,  # Not implemented
+                'blocked_reason': 'Sleep not implemented yet' if can_use else 'Not your bed'
+            }
 
         # Priority 9: Tree (must be facing)
-        for pos, tree in self.state.interactables.trees.items():
-            if tree.is_adjacent(player):
-                if player.is_facing_position(tree.x + 0.5, tree.y + 0.5):
-                    return {
-                        'type': 'tree',
-                        'name': 'Tree',
-                        'label': 'Shake',
-                        'target': tree,
-                        'can_interact': False,  # Not implemented
-                        'blocked_reason': 'Shaking trees not implemented yet'
-                    }
+        tree = self.logic.get_player_nearby_tree(player)
+        if tree:
+            return {
+                'type': 'tree',
+                'name': 'Tree',
+                'label': 'Shake',
+                'target': tree,
+                'can_interact': False,  # Not implemented
+                'blocked_reason': 'Shaking trees not implemented yet'
+            }
 
         return None
 
@@ -908,21 +887,6 @@ class PlayerController:
     # =========================================================================
     # PLAYER STATE QUERIES
     # =========================================================================
-
-    def get_weapon_reach(self):
-        """Get the weapon reach for player's currently equipped melee weapon.
-
-        Returns weapon reach from equipped melee weapon, or FISTS range if unarmed.
-
-        Returns:
-            Float range in cells
-        """
-        player = self.player
-        if not player:
-            return FISTS["range"]
-
-        weapon_stats = player.get_weapon_stats()
-        return weapon_stats.get('range', FISTS['range'])
 
     def update_facing_to_mouse(self, mouse_x, mouse_y, screen_to_world_func):
         """Update player facing direction to face the mouse cursor.
@@ -1077,9 +1041,6 @@ class PlayerController:
     def is_char_in_attack_cone(self, char):
         """Check if a character is in the player's attack cone.
 
-        Uses 360° angle-based cone detection matching resolve_attack() in game_logic.py.
-        Cone interpolates from BASE_ANGLE at player to full ANGLE at weapon reach.
-
         Args:
             char: Character to check
 
@@ -1087,55 +1048,14 @@ class PlayerController:
             True if character is in the attack cone
         """
         player = self.player
-        if not player or char is player:
+        if not player:
             return False
 
-        # Skip dead characters
-        if char.get('health', 100) <= 0:
-            return False
-
-        # Must be in same zone
-        if char.zone != player.zone:
-            return False
-
-        # Get the precise attack angle (360° aiming)
         attack_angle = player.get('attack_angle')
         if attack_angle is None:
             return False
 
-        # Get weapon reach based on equipped weapon
-        weapon_reach = self.get_weapon_reach()
-
-        # Calculate relative position using prevailing coords (local when in interior)
-        rel_x = char.prevailing_x - player.prevailing_x
-        rel_y = char.prevailing_y - player.prevailing_y
-
-        # Calculate distance to target
-        distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
-
-        # Must be within weapon reach and not at same position
-        if distance <= 0 or distance > weapon_reach:
-            return False
-
-        # Interpolate cone half-angle based on distance (wider at range)
-        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
-        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
-        t = distance / weapon_reach  # 0 at player, 1 at max range
-        half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
-
-        # Calculate angle to target
-        angle_to_target = math.atan2(rel_y, rel_x)
-
-        # Calculate angular difference (handle wraparound)
-        angle_diff = angle_to_target - attack_angle
-        # Normalize to [-pi, pi]
-        while angle_diff > math.pi:
-            angle_diff -= 2 * math.pi
-        while angle_diff < -math.pi:
-            angle_diff += 2 * math.pi
-
-        # Check if within interpolated cone angle
-        return abs(angle_diff) <= half_cone_rad
+        return self.logic.is_char_in_attack_cone(player, char, attack_angle)
 
     def get_chars_in_attack_cone(self):
         """Get all characters currently in the player's attack cone.
@@ -1147,9 +1067,9 @@ class PlayerController:
         if not player:
             return set()
 
-        chars_in_cone = set()
-        for char in self.state.characters:
-            if self.is_char_in_attack_cone(char):
-                chars_in_cone.add(id(char))
+        attack_angle = player.get('attack_angle')
+        if attack_angle is None:
+            return set()
 
-        return chars_in_cone
+        chars_in_cone = self.logic.get_chars_in_attack_cone(player, attack_angle)
+        return {id(char) for char in chars_in_cone}
