@@ -2,7 +2,7 @@
 # Edit this file to create a new map within the same simulation structure
 # Objects (barrels, beds, stoves) are generated programmatically from area data
 
-from town_gen import generate_areas
+from scenario.town_gen import generate_areas
 import json
 
 

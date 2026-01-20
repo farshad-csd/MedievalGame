@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext
 import multiprocessing
 from constants import TICKS_PER_YEAR, TICKS_PER_DAY, SKILLS, SPEED_OPTIONS, UPDATE_INTERVAL
-from scenario_characters import CHARACTER_TEMPLATES
+from scenario.scenario_characters import CHARACTER_TEMPLATES
 
 
 class DebugWindowProcess:

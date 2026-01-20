@@ -4,7 +4,7 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 
-from town_gen import TownGenerator
+from scenario.town_gen import TownGenerator
 
 
 def render_town(data, filename='town.png'):

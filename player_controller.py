@@ -26,7 +26,7 @@ from constants import (
     INTERACT_DISTANCE, FISTS,
     ATTACK_CONE_BASE_ANGLE, ATTACK_CONE_ANGLE,
 )
-from scenario_world import SIZE
+from scenario.scenario_world import SIZE
 
 # Get bow stats from ITEMS
 _BOW = ITEMS["bow"]

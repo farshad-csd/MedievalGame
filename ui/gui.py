@@ -37,12 +37,11 @@ from constants import (
     DEBUG_COLOR_ATTACK, DEBUG_COLOR_POSITION, DEBUG_COLOR_ATTACK_CONE,
     CHARACTER_COLLISION_RADIUS, FISTS,
     # Ongoing action constants
-    ONGOING_ACTION_HARVEST_DURATION, ONGOING_ACTION_PLANT_DURATION,
     ONGOING_ACTION_CHOP_DURATION, UI_COLOR_PROGRESS_BAR,
     # Block/shield
     SHIELD_COLOR
 )
-from scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
+from scenario.scenario_world import AREAS, BARRELS, BEDS, VILLAGE_NAME, SIZE, ROADS
 from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
@@ -543,46 +542,14 @@ class BoardGUI:
         name = player.get_display_name()
 
         if action == "Harvest":
-            # Check if harvest is possible first
-            cell_x = int(player.x)
-            cell_y = int(player.y)
-            farm_cell = self.state.farm_cells.get((cell_x, cell_y))
-            
-            if not farm_cell or farm_cell.get('state') != 'ready':
-                self.logic.log_harvest_plant_error(player, 'harvest', 'cant_here')
-                return
+            # Delegate to game logic
+            if self.logic.start_harvest_action(player):
+                self.logic.log_harvest_plant_start(player, 'harvest')
 
-            # Check inventory space
-            from constants import FARM_CELL_YIELD
-            if not player.can_add_item('wheat', FARM_CELL_YIELD):
-                self.logic.log_harvest_plant_error(player, 'harvest', 'inventory_full')
-                return
-
-            # Start ongoing harvest action
-            player.start_ongoing_action(
-                'harvest',
-                ONGOING_ACTION_HARVEST_DURATION,
-                {'cell': (cell_x, cell_y)}
-            )
-            self.logic.log_harvest_plant_start(player, 'harvest')
-        
         elif action == "Plant":
-            # Check if planting is possible first
-            cell_x = int(player.x)
-            cell_y = int(player.y)
-            farm_cell = self.state.farm_cells.get((cell_x, cell_y))
-
-            if not farm_cell or farm_cell.get('state') != 'replanting':
-                self.logic.log_harvest_plant_error(player, 'plant', 'cant_here')
-                return
-
-            # Start ongoing plant action
-            player.start_ongoing_action(
-                'plant',
-                ONGOING_ACTION_PLANT_DURATION,
-                {'cell': (cell_x, cell_y)}
-            )
-            self.logic.log_harvest_plant_start(player, 'plant')
+            # Delegate to game logic
+            if self.logic.start_plant_action(player):
+                self.logic.log_harvest_plant_start(player, 'plant')
         
         elif action == "Build Campfire":
             # Build a campfire at current location (instant action)

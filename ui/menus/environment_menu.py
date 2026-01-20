@@ -123,19 +123,13 @@ class EnvironmentMenu:
             self._options.append(ENVIRONMENT_MENU_OPTIONS['CHOP_TREE'])
 
         # Check farm cell state at player position
-        cell_x = int(player.x)
-        cell_y = int(player.y)
-        farm_cell = self.state.farm_cells.get((cell_x, cell_y))
-
-        if farm_cell:
-            state = farm_cell.get('state', '')
-            if state == 'ready':
-                self._options.append(ENVIRONMENT_MENU_OPTIONS['HARVEST'])
-            elif state == 'replanting':
-                self._options.append(ENVIRONMENT_MENU_OPTIONS['PLANT'])
+        if self.logic.can_harvest_at(player):
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['HARVEST'])
+        elif self.logic.can_plant_at(player):
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['PLANT'])
 
         # Check if can build campfire (outside village, not in interior)
-        if self._can_build_campfire():
+        if self.logic.can_build_campfire(player) and self.logic.can_make_camp_at(player.x, player.y):
             self._options.append(ENVIRONMENT_MENU_OPTIONS['BUILD_CAMPFIRE'])
 
         # Always add base options
@@ -161,23 +155,6 @@ class EnvironmentMenu:
         if not player:
             return None
         return self.logic.get_nearby_tree(player, max_distance=ENVIRONMENT_INTERACT_DISTANCE)
-    
-    def _can_build_campfire(self):
-        """Check if player can build a campfire at current location."""
-        player = self.state.player
-        if not player:
-            return False
-        
-        # Can't build campfire in interior
-        if player.zone is not None:
-            return False
-        
-        # Can't build campfire if already has one
-        if player.get('camp_position'):
-            return False
-        
-        # Check using game logic's method
-        return self.logic.can_make_camp_at(player.x, player.y)
     
     # =========================================================================
     # INPUT HANDLING

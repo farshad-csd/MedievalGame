@@ -36,7 +36,7 @@ from constants import (
     HEAVY_ATTACK_THRESHOLD_TICKS, HEAVY_ATTACK_CHARGE_TICKS,
     HEAVY_ATTACK_MIN_MULTIPLIER, HEAVY_ATTACK_MAX_MULTIPLIER,
 )
-from scenario_characters import CHARACTER_TEMPLATES
+from scenario.scenario_characters import CHARACTER_TEMPLATES
 
 # Get bow stats from ITEMS
 _BOW = ITEMS["bow"]

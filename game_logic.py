@@ -40,11 +40,12 @@ from constants import (
     SOUND_RADIUS, VISION_RANGE, VISION_CONE_ANGLE,
     DOOR_THRESHOLD
 )
-from scenario_world import SIZE
-from scenario_characters import CHARACTER_TEMPLATES
+from scenario.scenario_world import SIZE
+from scenario.scenario_characters import CHARACTER_TEMPLATES
 from jobs import get_job
 from combat_system import CombatSystem
 from combat_engagement import CombatEngagementManager
+from ground_items import find_valid_drop_position
 
 
 class GameLogic:
@@ -59,6 +60,13 @@ class GameLogic:
     - Does NOT contain rendering code (that's in gui.py)
     """
     
+
+    # =============================================================================
+    # INITIALIZATION & STATE MANAGEMENT
+    # =============================================================================
+    # Core initialization and state reset methods
+    # =============================================================================
+
     def __init__(self, state):
         """
         Args:
@@ -69,84 +77,14 @@ class GameLogic:
         self.combat_engagement = CombatEngagementManager(self)
         self.combat_system = CombatSystem(self)
     
-    # =========================================================================
-    # HELPER METHODS
-    # =========================================================================
     
-    def is_adjacent(self, char1, char2):
-        """Check if two characters are adjacent (close enough to interact).
-        Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
-        Uses prevailing coords (local when in interior) for same-zone checks.
-        """
-        # Must be in same zone to be adjacent
-        if char1.zone != char2.zone:
-            return False
-        # Use prevailing coords - these are local interior coords when inside,
-        # or world coords when in exterior
-        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
-                        (char1.prevailing_y - char2.prevailing_y) ** 2)
-        return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
-    
-    def is_in_combat_range(self, char1, char2):
-        """Check if two characters are within weapon reach of each other.
-        Uses attacker's weapon reach for hit detection range.
-        Uses prevailing coords (local when in interior) for same-zone checks.
-        """
-        # Must be in same zone to fight
-        if char1.zone != char2.zone:
-            return False
-        # Use prevailing coords - these are local interior coords when inside,
-        # or world coords when in exterior
-        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
-                        (char1.prevailing_y - char2.prevailing_y) ** 2)
-        weapon_stats = self.get_weapon_stats(char1)
-        return dist <= weapon_stats.get('range', FISTS['range'])
-    
-    def is_in_melee_range(self, char1, char2):
-        """Check if two characters are close enough for NPC to decide to attack.
-        Uses MELEE_ATTACK_DISTANCE - the range at which NPCs will swing.
-        Uses prevailing coords (local when in interior) for same-zone checks.
-        """
-        # Must be in same zone to fight
-        if char1.zone != char2.zone:
-            return False
-        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
-                        (char1.prevailing_y - char2.prevailing_y) ** 2)
-        return dist <= MELEE_ATTACK_DISTANCE and dist > 0
-    
-    def get_weapon_stats(self, char):
-        """Get the weapon stats for a character's current melee weapon.
-        
-        Returns stats dict with: name, weapon_type, base_damage_min, base_damage_max, range
-        Falls back to FISTS if no weapon equipped or for NPCs (no equip system yet).
-        
-        Args:
-            char: Character to get weapon stats for
-            
-        Returns:
-            Dict with weapon stats (from ITEMS entry or FISTS constant)
-        """
-        # Check if character has an equipped weapon
-        equipped_slot = getattr(char, 'equipped_weapon', None)
-        
-        if equipped_slot is not None:
-            inventory = getattr(char, 'inventory', [])
-            if 0 <= equipped_slot < len(inventory):
-                item = inventory[equipped_slot]
-                if item is not None:
-                    item_type = item.get('type', '')
-                    item_info = ITEMS.get(item_type, {})
-                    # Only use if it's a melee weapon
-                    if item_info.get('weapon_type') == 'melee':
-                        return item_info
-        
-        # Fall back to fists (unarmed combat)
-        return FISTS
 
-    # =========================================================================
-    # GOAL-SETTING HELPERS (cross-zone navigation)
-    # =========================================================================
-    
+    # =============================================================================
+    # STATE & GOAL MANAGEMENT
+    # =============================================================================
+    # Goal setting and state management helpers
+    # =============================================================================
+
     def set_goal_to_character(self, char, target):
         """Set goal to another character's position (cross-zone capable).
         
@@ -157,6 +95,7 @@ class GameLogic:
         char.goal = (target.x, target.y)  # x,y are always world coords
         char.goal_zone = target.zone
     
+
     def set_goal_to_object(self, char, obj):
         """Set goal to an object's position (cross-zone capable).
         
@@ -167,6 +106,7 @@ class GameLogic:
         char.goal = (obj.world_x, obj.world_y)
         char.goal_zone = obj.zone
     
+
     def set_goal_to_position(self, char, x, y, zone=None):
         """Set goal to explicit world position in a specific zone.
         
@@ -178,6 +118,20 @@ class GameLogic:
         char.goal = (x, y)
         char.goal_zone = zone
     
+
+    def clear_goal(self, char):
+        """Clear character's goal."""
+        char.goal = None
+        char.goal_zone = None
+    
+    
+
+    # =============================================================================
+    # ZONE & POSITION MANAGEMENT
+    # =============================================================================
+    # Zone queries, accessibility checks, and position validation
+    # =============================================================================
+
     def set_goal_same_zone(self, char, x, y):
         """Set goal to a position in char's current zone.
         
@@ -188,15 +142,7 @@ class GameLogic:
         char.goal = (x, y)
         char.goal_zone = char.zone
     
-    def clear_goal(self, char):
-        """Clear character's goal."""
-        char.goal = None
-        char.goal_zone = None
-    
-    # =========================================================================
-    # ACCESSIBILITY HELPERS (same-zone navigation checks)
-    # =========================================================================
-    
+
     def is_position_accessible_same_zone(self, x, y, from_zone):
         """
         Check if a world position is accessible from the given zone WITHOUT zone transitions.
@@ -254,6 +200,7 @@ class GameLogic:
             
             return True
     
+
     def get_zone_at_world_position(self, world_x, world_y):
         """
         Determine which zone contains a world position.
@@ -266,10 +213,55 @@ class GameLogic:
                 return interior.name
         return None
 
-    # =========================================================================
     # CENTRALIZED ACTION LOGGING
-    # =========================================================================
     # These methods provide consistent logging for actions by both player and NPCs
+
+
+    def get_window_for_cross_zone_vision(self, observer, target):
+        """Check if observer can see target through a window.
+        
+        Args:
+            observer: Character doing the looking
+            target: Character being looked at
+            
+        Returns:
+            (window, looking_in) tuple, or (None, None) if no valid window
+            looking_in: True if observer is outside looking in, False if inside looking out
+        """
+        # Must be in different zones
+        if observer.zone == target.zone:
+            return (None, None)
+        
+        observer_interior = self.state.interiors.get_interior(observer.zone) if observer.zone else None
+        target_interior = self.state.interiors.get_interior(target.zone) if target.zone else None
+        
+        if observer_interior and target.zone is None:
+            # Observer inside, target outside
+            # Check if observer is near a window and facing outward
+            for window in observer_interior.windows:
+                if window.is_character_near(observer.prevailing_x, observer.prevailing_y):
+                    # Must be facing the window's direction (outward)
+                    if self._is_facing_direction(observer, window.facing):
+                        return (window, False)  # looking out
+        
+        if target_interior and observer.zone is None:
+            # Observer outside, target inside
+            # Check if observer is near window's exterior AND facing toward building
+            for window in target_interior.windows:
+                if window.is_character_near_exterior(observer.x, observer.y):
+                    # Must be facing opposite of window direction (into building)
+                    inward_dir = self._get_opposite_direction(window.facing)
+                    if self._is_facing_direction(observer, inward_dir):
+                        return (window, True)  # looking in
+        
+        return (None, None)
+    
+
+    # =============================================================================
+    # CENTRALIZED ACTION LOGGING
+    # =============================================================================
+    # Unified logging for player and NPC actions
+    # =============================================================================
 
     def log_combat_mode_change(self, char, entering):
         """Log combat mode toggle (same for player and NPCs).
@@ -281,6 +273,7 @@ class GameLogic:
         name = char.get_display_name()
         mode_str = "COMBAT MODE" if entering else "normal mode"
         self.state.log_action(f"{name} entered {mode_str}")
+
 
     def log_zone_transition(self, char, interior_name, entering):
         """Log entering/exiting buildings (same for player and NPCs).
@@ -295,6 +288,7 @@ class GameLogic:
             self.state.log_action(f"{name} entered {interior_name}")
         else:
             self.state.log_action(f"{name} exited {interior_name}")
+
 
     def log_barrel_error(self, char, barrel, error_type):
         """Log barrel interaction errors (same for player and NPCs).
@@ -312,6 +306,7 @@ class GameLogic:
         elif error_type == 'inventory_full':
             self.state.log_action(f"{name}'s inventory is full")
 
+
     def log_barrel_take(self, char, barrel, amount):
         """Log taking wheat from barrel (same for player and NPCs).
 
@@ -322,6 +317,7 @@ class GameLogic:
         """
         name = char.get_display_name()
         self.state.log_action(f"{name} took {amount} wheat from {barrel.name}")
+
 
     def log_bake_error(self, char, error_type):
         """Log baking errors (same for player and NPCs).
@@ -340,6 +336,7 @@ class GameLogic:
         elif error_type == 'inventory_full':
             self.state.log_action(f"{name}'s inventory is full")
 
+
     def log_bed_error(self, char, error_type):
         """Log bed interaction errors (same for player and NPCs).
 
@@ -352,6 +349,7 @@ class GameLogic:
             self.state.log_action(f"{name} can't use this bed (not your home)")
         elif error_type == 'not_implemented':
             self.state.log_action("Sleep not implemented yet")
+
 
     def log_harvest_plant_error(self, char, action, error_type):
         """Log harvest/plant errors (same for player and NPCs).
@@ -369,6 +367,7 @@ class GameLogic:
         elif error_type == 'cancelled':
             self.state.log_action(f"{name} couldn't {action} - something changed.")
 
+
     def log_harvest_plant_start(self, char, action):
         """Log starting harvest/plant (same for player and NPCs).
 
@@ -378,6 +377,7 @@ class GameLogic:
         """
         name = char.get_display_name()
         self.state.log_action(f"{name} started {action}ing...")
+
 
     def log_harvest_plant_finish(self, char, action):
         """Log finishing harvest/plant (same for player and NPCs).
@@ -389,6 +389,7 @@ class GameLogic:
         name = char.get_display_name()
         self.state.log_action(f"{name} finished {action}ing!")
 
+
     def log_action_cancelled(self, char, action_name):
         """Log action cancellation (same for player and NPCs).
 
@@ -399,9 +400,94 @@ class GameLogic:
         name = char.get_display_name()
         self.state.log_action(f"{name} cancelled {action_name}")
 
-    # =========================================================================
-    # COMBAT METHODS
-    # =========================================================================
+
+
+    # =============================================================================
+    # AI & NPC BEHAVIOR HELPERS
+    # =============================================================================
+    # Distance checks and basic AI decision helpers
+    # =============================================================================
+
+    def is_adjacent(self, char1, char2):
+        """Check if two characters are adjacent (close enough to interact).
+        Uses float-based Euclidean distance with ADJACENCY_DISTANCE threshold.
+        Uses prevailing coords (local when in interior) for same-zone checks.
+        """
+        # Must be in same zone to be adjacent
+        if char1.zone != char2.zone:
+            return False
+        # Use prevailing coords - these are local interior coords when inside,
+        # or world coords when in exterior
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
+        return dist <= ADJACENCY_DISTANCE and dist > 0  # Must be close but not same position
+    
+
+    def is_in_melee_range(self, char1, char2):
+        """Check if two characters are close enough for NPC to decide to attack.
+        Uses MELEE_ATTACK_DISTANCE - the range at which NPCs will swing.
+        Uses prevailing coords (local when in interior) for same-zone checks.
+        """
+        # Must be in same zone to fight
+        if char1.zone != char2.zone:
+            return False
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
+        return dist <= MELEE_ATTACK_DISTANCE and dist > 0
+    
+
+    # =============================================================================
+    # COMBAT SYSTEM
+    # =============================================================================
+    # Attack resolution, damage calculation, and combat mechanics
+    # =============================================================================
+
+    def is_in_combat_range(self, char1, char2):
+        """Check if two characters are within weapon reach of each other.
+        Uses attacker's weapon reach for hit detection range.
+        Uses prevailing coords (local when in interior) for same-zone checks.
+        """
+        # Must be in same zone to fight
+        if char1.zone != char2.zone:
+            return False
+        # Use prevailing coords - these are local interior coords when inside,
+        # or world coords when in exterior
+        dist = math.sqrt((char1.prevailing_x - char2.prevailing_x) ** 2 + 
+                        (char1.prevailing_y - char2.prevailing_y) ** 2)
+        weapon_stats = self.get_weapon_stats(char1)
+        return dist <= weapon_stats.get('range', FISTS['range'])
+    
+
+    def get_weapon_stats(self, char):
+        """Get the weapon stats for a character's current melee weapon.
+        
+        Returns stats dict with: name, weapon_type, base_damage_min, base_damage_max, range
+        Falls back to FISTS if no weapon equipped or for NPCs (no equip system yet).
+        
+        Args:
+            char: Character to get weapon stats for
+            
+        Returns:
+            Dict with weapon stats (from ITEMS entry or FISTS constant)
+        """
+        # Check if character has an equipped weapon
+        equipped_slot = getattr(char, 'equipped_weapon', None)
+        
+        if equipped_slot is not None:
+            inventory = getattr(char, 'inventory', [])
+            if 0 <= equipped_slot < len(inventory):
+                item = inventory[equipped_slot]
+                if item is not None:
+                    item_type = item.get('type', '')
+                    item_info = ITEMS.get(item_type, {})
+                    # Only use if it's a melee weapon
+                    if item_info.get('weapon_type') == 'melee':
+                        return item_info
+        
+        # Fall back to fists (unarmed combat)
+        return FISTS
+
+    
 
     def can_attack(self, char):
         """Check if character can attack (not on cooldown and in combat mode).
@@ -411,6 +497,7 @@ class GameLogic:
         """
         return self.combat_system.can_attack(char)
     
+
     def resolve_attack(self, attacker, attack_direction=None, damage_multiplier=1.0):
         """Resolve an attack from a character.
         
@@ -431,6 +518,7 @@ class GameLogic:
         """
         return self.combat_system.resolve_attack(attacker, attack_direction, damage_multiplier)
     
+
     def resolve_melee_attack(self, attacker, target):
         """Resolve a direct melee attack against a specific target.
         
@@ -447,6 +535,7 @@ class GameLogic:
         """
         return self.combat_system.resolve_melee_attack(attacker, target)
     
+
     def shoot_arrow(self, char, target_angle, draw_progress):
         """Spawn an arrow projectile for any character (player or NPC).
 
@@ -511,6 +600,7 @@ class GameLogic:
 
         return True
 
+
     def get_adjacent_character(self, char):
         """Get any character adjacent to the given character (within ADJACENCY_DISTANCE)"""
         for other in self.state.characters:
@@ -518,31 +608,82 @@ class GameLogic:
                 return other
         return None
     
-    def _update_facing(self, char, dx, dy):
-        """Update character's facing direction based on movement delta.
-        Uses magnitude comparison to determine if movement is primarily
-        horizontal, vertical, or diagonal.
+
+    def remember_attack(self, victim, attacker, damage):
+        """Record that victim was attacked by attacker.
+        Only stores one memory per attacker - doesn't track each hit.
         """
-        # Determine primary direction based on magnitude
+        # Check if victim already has a memory of being attacked by this attacker
+        if victim.has_memory_of('attacked_by', attacker):
+            return  # Already remembered, don't duplicate
+        
+        victim.add_memory('attacked_by', attacker, self.state.ticks,
+                         intensity=CRIME_INTENSITY_ASSAULT,
+                         source='experienced')
+    
+
+    def _face_toward_target(self, char, target):
+        """Make character face toward a target."""
+        dx = target.prevailing_x - char.prevailing_x
+        dy = target.prevailing_y - char.prevailing_y
+        
+        # Determine facing based on angle
         if abs(dx) > abs(dy) * 2:
             # Mostly horizontal
-            char['facing'] = 'right' if dx > 0 else 'left'
+            char.facing = 'right' if dx > 0 else 'left'
         elif abs(dy) > abs(dx) * 2:
             # Mostly vertical
-            char['facing'] = 'down' if dy > 0 else 'up'
+            char.facing = 'down' if dy > 0 else 'up'
         else:
             # Diagonal
-            if dx > 0 and dy < 0:
-                char['facing'] = 'up-right'
-            elif dx > 0 and dy > 0:
-                char['facing'] = 'down-right'
-            elif dx < 0 and dy < 0:
-                char['facing'] = 'up-left'
+            if dx > 0:
+                char.facing = 'down-right' if dy > 0 else 'up-right'
             else:
-                char['facing'] = 'down-left'
+                char.facing = 'down-left' if dy > 0 else 'up-left'
     
-    def _face_toward_character(self, char, target):
-        """Make char face toward target character."""
+
+    def broadcast_violence(self, attacker, target):
+        """Notify nearby characters of ongoing violence (any fight, justified or not).
+        
+        Characters who perceive a fight but aren't involved will react:
+        - High confidence (>= 7): Watch from current position
+        - Low confidence (< 7): Flee from the violence
+        
+        All bystanders use reason='bystander' - they stop caring once out of perception.
+        """
+        for char in self.state.characters:
+            if char is attacker or char is target:
+                continue
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Already reacting to something? Don't interrupt
+            if char.intent and char.intent.get('action') in ('attack', 'flee', 'watch'):
+                continue
+            
+            # Can perceive the violence?
+            can_perceive, method = self.can_perceive_character(char, attacker)
+            if not can_perceive:
+                continue
+            
+            confidence = char.get_trait('confidence')
+            if confidence >= 7:
+                char.set_intent('watch', attacker, reason='bystander', started_tick=self.state.ticks)
+            else:
+                char.set_intent('flee', attacker, reason='bystander', started_tick=self.state.ticks)
+                self.state.log_action(f"{char.get_display_name()} fleeing from violence!")
+    
+
+    def _update_combat_tracking_velocity(self, char, target):
+        """Update velocity to track a combat target smoothly.
+        
+        This bypasses the goal system to provide smooth pursuit of a moving target.
+        - If too far: move toward target (to MELEE_ATTACK_DISTANCE), sprint if able
+        - If too close: backpedal away (to just outside COMBAT_SPACE)
+        - If in sweet spot: hold position
+        Always face the target.
+        """
+        # Calculate distance and direction
         if char.zone == target.zone and char.zone is not None:
             dx = target.prevailing_x - char.prevailing_x
             dy = target.prevailing_y - char.prevailing_y
@@ -550,63 +691,949 @@ class GameLogic:
             dx = target.x - char.x
             dy = target.y - char.y
         
-        if abs(dx) > 0.01 or abs(dy) > 0.01:
-            self._update_facing(char, dx, dy)
-    
-    # =========================================================================
-    # SLEEP HELPERS
-    # =========================================================================
-    
-    def get_sleep_position(self, char):
-        """Get the position where this character should sleep.
-        Returns bed position if they own one, camp position if they have one, None otherwise.
-        """
-        # Check for owned bed
-        bed = self.state.get_character_bed(char)
-        if bed:
-            return bed.position
+        dist = math.sqrt(dx * dx + dy * dy)
         
-        # Check for existing camp
-        if char.get('camp_position'):
-            return char['camp_position']
+        # Always face the target
+        self._face_toward_character(char, target)
         
-        return None
+        # Avoid division by zero
+        if dist < 0.01:
+            char.vx = 0.0
+            char.vy = 0.0
+            char.is_sprinting = False
+            return
+        
+        # Normalize direction
+        nx = dx / dist
+        ny = dy / dist
+        
+        # Determine movement based on distance
+        if dist > MELEE_ATTACK_DISTANCE:
+            # Too far - chase the target
+            # Only sprint if target is significantly beyond attack range
+            sprint_threshold = MELEE_ATTACK_DISTANCE + COMBAT_SPRINT_DISTANCE
+            should_sprint = dist > sprint_threshold
+            
+            if should_sprint:
+                can_sprint = char.can_continue_sprint() if char.is_sprinting else char.can_start_sprint()
+                should_sprint = can_sprint
+            
+            char.is_sprinting = should_sprint
+            speed = SPRINT_SPEED if should_sprint else MOVEMENT_SPEED
+            
+            char.vx = nx * speed
+            char.vy = ny * speed
+        elif dist < COMBAT_SPACE:
+            # Too close - backpedal slowly (half speed, away from target)
+            char.is_sprinting = False
+            char.vx = -nx * MOVEMENT_SPEED * 0.5
+            char.vy = -ny * MOVEMENT_SPEED * 0.5
+        else:
+            # In sweet spot - hold position
+            char.vx = 0.0
+            char.vy = 0.0
+            char.is_sprinting = False
     
-    def can_make_camp_at(self, x, y):
-        """Check if a camp can be made at this position.
-        Works with float positions - checks the cell containing the point.
-        Cannot make camp on village grounds or on any farm.
-        """
-        cell_x = int(x)
-        cell_y = int(y)
-        if not self.state.is_position_valid(cell_x, cell_y):
-            return False
-        # Cannot camp in village areas
-        if self.state.is_in_village(cell_x, cell_y):
-            return False
-        # Cannot camp on farm cells
-        if (cell_x, cell_y) in self.state.farm_cells:
-            return False
-        return True
+
+    def _do_attack(self, attacker, target):
+        """Execute an attack. Starts attack animation, damage dealt when animation completes."""
+        # Check if can attack (not already animating)
+        if not attacker.can_attack():
+            return
+        
+        # Face the target before attacking
+        self._face_toward_target(attacker, target)
+        
+        # Start attack animation - damage dealt when animation completes
+        # (processed by _process_pending_attacks)
+        attacker.start_attack(target=target)
+        
+        # Record attack tick for cooldown
+        attacker['last_attack_tick'] = self.state.ticks
+
+    # TICK PROCESSING
     
-    def make_camp(self, char):
-        """Make a camp at the character's current position if possible.
-        Returns True if camp was made. Stores camp position as cell coordinates.
+
+    def _process_npc_combat_mode(self):
+        """Update combat mode for NPCs based on their intent.
+
+        DELEGATED TO: combat_engagement.update_npc_engagement()
+
+        NPCs enter combat mode when:
+        - Their intent is 'attack'
+        - Their intent is 'flee' (defensive stance)
+
+        NPCs exit combat mode when:
+        - They have no intent or a non-combat intent
+
+        When entering combat mode, NPCs auto-equip their strongest weapon.
+        When exiting combat mode, NPCs unequip weapons.
+
+        Player combat mode is controlled manually via R key.
         """
-        # Get the cell the character is in
-        cell_x = int(char['x'])
-        cell_y = int(char['y'])
-        if self.can_make_camp_at(cell_x, cell_y):
-            char['camp_position'] = (cell_x, cell_y)
-            name = char.get_display_name()
-            self.state.log_action(f"{name} made a camp at ({cell_x}, {cell_y})")
+        self.combat_engagement.update_npc_engagement(self.state.characters)
+    
+
+    def _process_pending_attacks(self):
+        """Process pending attacks when their animations complete.
+        
+        DELEGATED TO: combat_system.process_pending_attacks()
+        
+        Called every tick. Checks all characters for pending attacks and
+        resolves damage when the attack animation has finished.
+        """
+        self.combat_system.process_pending_attacks()
+    
+
+    def equip_weapon(self, character, slot_index):
+        """Equip a weapon from a specific inventory slot.
+
+        Args:
+            character: Character equipping the weapon
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and optional details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+
+        if item_info.get('category') != 'weapon':
+            return {'success': False, 'reason': 'not_weapon'}
+
+        if character.equipped_weapon is not None:
+            old_slot = character.equipped_weapon
+            old_item = inventory[old_slot] if old_slot < len(inventory) else None
+            if old_item:
+                old_name = ITEMS.get(old_item.get('type', ''), {}).get('name', 'weapon')
+                self.state.log_action(f"{character.get_display_name()} unequipped {old_name}")
+
+        character.equipped_weapon = slot_index
+        weapon_name = item_info.get('name', item_type)
+        self.state.log_action(f"{character.get_display_name()} equipped {weapon_name}")
+
+        return {'success': True, 'weapon_name': weapon_name}
+
+
+    def unequip_weapon(self, character, slot_index):
+        """Unequip the weapon in a specific inventory slot.
+
+        Args:
+            character: Character unequipping the weapon
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key
+        """
+        if character.equipped_weapon != slot_index:
+            return {'success': False, 'reason': 'not_equipped'}
+
+        inventory = character.inventory
+        item = inventory[slot_index] if slot_index < len(inventory) else None
+        if item:
+            item_type = item.get('type', '')
+            item_info = ITEMS.get(item_type, {})
+            weapon_name = item_info.get('name', item_type)
+            self.state.log_action(f"{character.get_display_name()} unequipped {weapon_name}")
+
+        character.equipped_weapon = None
+        return {'success': True}
+
+
+    # =============================================================================
+    # INVENTORY SYSTEM - Core Operations
+    # =============================================================================
+    # Item usage, equipment, and core inventory operations
+    # =============================================================================
+
+    def use_item(self, character, slot_index):
+        """Use/consume an item from a specific inventory slot.
+
+        Args:
+            character: Character using the item
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and optional message details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', '')
+
+        if item_type == 'bread':
+            result = character.eat()
+            if result['success']:
+                msg = f"{character.get_display_name()} ate bread, hunger now {character.hunger:.0f}"
+                if result.get('recovered_from_starvation'):
+                    msg = f"{character.get_display_name()} ate bread and recovered from starvation! Hunger: {character.hunger:.0f}"
+                self.state.log_action(msg)
+            return result
+
+        return {'success': False, 'reason': 'not_usable'}
+
+
+    def burn_item(self, character, slot_index):
+        """Burn/destroy an item from inventory.
+
+        Args:
+            character: Character burning the item
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', 'item')
+        amount = item.get('amount', 1)
+
+        item_info = ITEMS.get(item_type, {})
+        display_name = item_info.get('name', item_type.capitalize())
+
+        inventory[slot_index] = None
+
+        self.state.log_action(f"{character.get_display_name()} burned {amount} {display_name}")
+
+        return {'success': True, 'item_type': item_type, 'amount': amount, 'display_name': display_name}
+
+
+    def can_burn_items(self, character):
+        """Check if character is adjacent to a usable stove or campfire.
+
+        Args:
+            character: Character to check
+
+        Returns:
+            bool: True if can burn items
+        """
+        stove = self.state.interactables.get_adjacent_stove(character)
+        if stove and stove.can_use(character):
             return True
+
+        if character.zone is None:
+            px, py = character.x, character.y
+            for char in self.state.characters:
+                camp_pos = char.get('camp_position')
+                if camp_pos:
+                    cx, cy = camp_pos
+                    dist = ((px - (cx + 0.5)) ** 2 + (py - (cy + 0.5)) ** 2) ** 0.5
+                    if dist <= 1.5:
+                        return True
+
         return False
-    
-    # =========================================================================
-    # PLAYER FARM ACTIONS (instant via environment menu)
-    # =========================================================================
-    
+
+
+    def transfer_item_to_inventory(self, item_type, amount, target_inventory, stack_limit):
+        """Transfer items to an inventory with stacking logic.
+
+        Args:
+            item_type: Type of item to transfer
+            amount: Amount to transfer
+            target_inventory: List of inventory slots (modified in place)
+            stack_limit: Stack limit for the item type (None for unlimited)
+
+        Returns:
+            int: Amount remaining (0 if all transferred)
+        """
+        amount_to_move = amount
+
+        for i, slot in enumerate(target_inventory):
+            if slot and slot.get('type') == item_type:
+                if stack_limit is None:
+                    slot['amount'] = slot.get('amount', 0) + amount_to_move
+                    amount_to_move = 0
+                    break
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, amount_to_move)
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+
+        if amount_to_move > 0:
+            for i, slot in enumerate(target_inventory):
+                if slot is None:
+                    if stack_limit is None:
+                        target_inventory[i] = {'type': item_type, 'amount': amount_to_move}
+                        amount_to_move = 0
+                        break
+                    else:
+                        transfer = min(stack_limit, amount_to_move)
+                        target_inventory[i] = {'type': item_type, 'amount': transfer}
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+
+        return amount_to_move
+
+
+
+    def get_stack_limit(self, item_type):
+        """Get stack limit for an item type. Returns None for unlimited."""
+        info = ITEMS.get(item_type, {})
+        return info.get('stack_size', 99)  # Default to 99 if not defined
+
+
+
+    def return_held_item_to_inventory(self, player, held_item, held_was_equipped):
+        """
+        Return held item to first available inventory slot, or drop to ground if full.
+        Returns: (updated_held_item, updated_held_was_equipped)
+        """
+        if not held_item or not player:
+            return None, False
+
+        inventory = player.inventory
+        held_type = held_item['type']
+        stack_limit = self.get_stack_limit(held_type)
+
+        # First try to stack with existing items of same type
+        for i, slot in enumerate(inventory):
+            if slot and slot.get('type') == held_type:
+                if stack_limit is None:
+                    # Unlimited stacking - combine everything
+                    slot['amount'] = slot.get('amount', 0) + held_item['amount']
+                    return None, False
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, held_item['amount'])
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        held_item['amount'] -= transfer
+                        if held_item['amount'] <= 0:
+                            return None, False
+
+        # Then try empty slots
+        for i, slot in enumerate(inventory):
+            if slot is None:
+                inventory[i] = held_item.copy()
+                # If this was an equipped weapon, re-equip it in new slot
+                if held_was_equipped:
+                    player.equipped_weapon = i
+                return None, False
+
+        # If still holding item, return it (inventory full - caller should drop to ground)
+        return held_item, held_was_equipped
+
+
+    # =============================================================================
+    # INVENTORY SYSTEM - Slot Interactions
+    # =============================================================================
+    # Inventory slot clicking and quick-move operations
+    # =============================================================================
+
+    def interact_inventory_slot_full(self, player, slot_index, held_item, held_was_equipped):
+        """
+        Left click interaction - pick up / place / swap full stack.
+        Returns: dict with 'held_item' and 'held_was_equipped' keys
+        """
+        inventory = player.inventory
+
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'held_item': held_item, 'held_was_equipped': held_was_equipped}
+
+        slot_item = inventory[slot_index]
+
+        if held_item is None:
+            # Pick up entire stack from slot
+            if slot_item is not None:
+                held_item = slot_item.copy()
+                # Track if we're picking up the equipped weapon
+                held_was_equipped = (player.equipped_weapon == slot_index)
+                if held_was_equipped:
+                    player.equipped_weapon = None
+                inventory[slot_index] = None
+        else:
+            # We're holding something
+            if slot_item is None:
+                # Place entire held stack in empty slot
+                inventory[slot_index] = held_item.copy()
+                # If we were holding an equipped weapon, update the slot reference
+                if held_was_equipped:
+                    player.equipped_weapon = slot_index
+                    held_was_equipped = False
+                held_item = None
+            elif slot_item.get('type') == held_item.get('type'):
+                # Same type - try to stack
+                stack_limit = self.get_stack_limit(slot_item.get('type'))
+                if stack_limit is None:
+                    # Unlimited stacking - combine everything
+                    slot_item['amount'] = slot_item.get('amount', 0) + held_item['amount']
+                    held_was_equipped = False
+                    held_item = None
+                else:
+                    space = stack_limit - slot_item.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, held_item['amount'])
+                        slot_item['amount'] = slot_item.get('amount', 0) + transfer
+                        held_item['amount'] -= transfer
+                        if held_item['amount'] <= 0:
+                            held_was_equipped = False
+                            held_item = None
+                    else:
+                        # Stack full - swap
+                        inventory[slot_index] = held_item.copy()
+                        old_slot_was_equipped = (player.equipped_weapon == slot_index)
+                        # If we were holding equipped weapon, it goes to this slot
+                        if held_was_equipped:
+                            player.equipped_weapon = slot_index
+                        elif old_slot_was_equipped:
+                            player.equipped_weapon = None  # Old equipped is now held
+                        held_was_equipped = old_slot_was_equipped
+                        held_item = slot_item.copy()
+            else:
+                # Different type - swap
+                inventory[slot_index] = held_item.copy()
+                old_slot_was_equipped = (player.equipped_weapon == slot_index)
+                # If we were holding equipped weapon, it goes to this slot
+                if held_was_equipped:
+                    player.equipped_weapon = slot_index
+                elif old_slot_was_equipped:
+                    player.equipped_weapon = None  # Old equipped is now held
+                held_was_equipped = old_slot_was_equipped
+                held_item = slot_item.copy()
+
+        return {'held_item': held_item, 'held_was_equipped': held_was_equipped}
+
+
+    def interact_inventory_slot_single(self, player, slot_index, held_item, held_was_equipped):
+        """
+        Right click interaction - pick up half / place single.
+        Returns: dict with 'held_item' and 'held_was_equipped' keys
+        """
+        inventory = player.inventory
+
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'held_item': held_item, 'held_was_equipped': held_was_equipped}
+
+        slot_item = inventory[slot_index]
+
+        if held_item is None:
+            # Pick up half of stack from slot
+            if slot_item is not None:
+                total = slot_item.get('amount', 1)
+                take = (total + 1) // 2  # Ceiling division - take the larger half
+                leave = total - take
+
+                held_item = {'type': slot_item['type'], 'amount': take}
+
+                if leave > 0:
+                    slot_item['amount'] = leave
+                    # Weapon stays equipped if there's still items in the slot
+                else:
+                    # Track if we're picking up the equipped weapon
+                    held_was_equipped = (player.equipped_weapon == slot_index)
+                    if held_was_equipped:
+                        player.equipped_weapon = None
+                    inventory[slot_index] = None
+        else:
+            # We're holding something - place single item
+            if slot_item is None:
+                # Place 1 item in empty slot
+                inventory[slot_index] = {'type': held_item['type'], 'amount': 1}
+                held_item['amount'] -= 1
+                if held_item['amount'] <= 0:
+                    # If placing the last of an equipped weapon, equip it in new slot
+                    if held_was_equipped:
+                        player.equipped_weapon = slot_index
+                        held_was_equipped = False
+                    held_item = None
+            elif slot_item.get('type') == held_item.get('type'):
+                # Same type - place 1 if room
+                stack_limit = self.get_stack_limit(slot_item.get('type'))
+                # None means unlimited, so always allow; otherwise check limit
+                if stack_limit is None or slot_item.get('amount', 0) < stack_limit:
+                    slot_item['amount'] = slot_item.get('amount', 0) + 1
+                    held_item['amount'] -= 1
+                    if held_item['amount'] <= 0:
+                        held_was_equipped = False
+                        held_item = None
+
+        return {'held_item': held_item, 'held_was_equipped': held_was_equipped}
+
+
+
+    def quick_move_inventory_to_ground(self, player, slot_index, ground_items_manager, is_blocked_fn):
+        """Shift+click: Quick-move item from inventory to ground."""
+        inventory = player.inventory
+
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+
+        slot_item = inventory[slot_index]
+        if slot_item is None:
+            return
+
+        # Unequip if this was the equipped weapon
+        if player.equipped_weapon == slot_index:
+            player.equipped_weapon = None
+
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked_fn)
+        if drop_pos:
+            ground_items_manager.add_item(
+                slot_item['type'],
+                slot_item['amount'],
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+            inventory[slot_index] = None
+
+
+
+    def quick_move_inventory_to_barrel(self, player, barrel, slot_index):
+        """Shift+click: Quick-move item from player inventory to barrel/corpse."""
+        inventory = player.inventory
+        barrel_inventory = barrel.inventory
+
+        if slot_index < 0 or slot_index >= len(inventory):
+            return
+
+        slot_item = inventory[slot_index]
+        if slot_item is None:
+            return
+
+        if player.equipped_weapon == slot_index:
+            player.equipped_weapon = None
+
+        item_type = slot_item['type']
+        amount_to_move = slot_item['amount']
+        stack_limit = self.get_stack_limit(item_type)
+
+        amount_remaining = self.transfer_item_to_inventory(item_type, amount_to_move, barrel_inventory, stack_limit)
+
+        if amount_remaining <= 0:
+            inventory[slot_index] = None
+        else:
+            slot_item['amount'] = amount_remaining
+
+
+
+    # =============================================================================
+    # GROUND ITEMS SYSTEM
+    # =============================================================================
+    # Ground item interactions and dropping logic
+    # =============================================================================
+
+    def interact_ground_slot_full(self, ground_item, held_item, ground_items_manager, nearby_items_list, player):
+        """
+        Handle left-click on a ground slot - pick up / place / swap full stack.
+        Returns: updated held_item
+        """
+        if held_item is None:
+            # Pick up item from ground
+            if ground_item:
+                held_item = {'type': ground_item.item_type, 'amount': ground_item.amount}
+                ground_items_manager.remove_item(ground_item)
+        else:
+            # We're holding something
+            if ground_item is None:
+                # Caller should handle drop to ground
+                return held_item
+            elif ground_item.item_type == held_item.get('type'):
+                # Same type - try to stack
+                stack_limit = self.get_stack_limit(ground_item.item_type)
+                if stack_limit is None:
+                    # Unlimited stacking
+                    ground_item.amount += held_item['amount']
+                    held_item = None
+                else:
+                    space = stack_limit - ground_item.amount
+                    if space > 0:
+                        transfer = min(space, held_item['amount'])
+                        ground_item.amount += transfer
+                        held_item['amount'] -= transfer
+                        if held_item['amount'] <= 0:
+                            held_item = None
+                    else:
+                        # Stack full - swap
+                        old_type = ground_item.item_type
+                        old_amount = ground_item.amount
+                        ground_item.item_type = held_item['type']
+                        ground_item.amount = held_item['amount']
+                        held_item = {'type': old_type, 'amount': old_amount}
+            else:
+                # Different type - swap
+                old_type = ground_item.item_type
+                old_amount = ground_item.amount
+                ground_item.item_type = held_item['type']
+                ground_item.amount = held_item['amount']
+                held_item = {'type': old_type, 'amount': old_amount}
+
+        return held_item
+
+
+    def interact_ground_slot_single(self, ground_item, held_item, ground_items_manager, nearby_items_list, player):
+        """
+        Handle right-click on a ground slot - pick up half / place single.
+        Returns: updated held_item
+        """
+        if held_item is None:
+            # Pick up half of stack from ground
+            if ground_item:
+                total = ground_item.amount
+                take = (total + 1) // 2  # Ceiling division - take the larger half
+                leave = total - take
+
+                held_item = {'type': ground_item.item_type, 'amount': take}
+
+                if leave > 0:
+                    ground_item.amount = leave
+                else:
+                    ground_items_manager.remove_item(ground_item)
+        else:
+            # We're holding something - place single item
+            if ground_item is None:
+                # Caller should handle drop to ground
+                return held_item
+            elif ground_item.item_type == held_item.get('type'):
+                # Same type - place 1 if room
+                stack_limit = self.get_stack_limit(ground_item.item_type)
+                if stack_limit is None or ground_item.amount < stack_limit:
+                    ground_item.amount += 1
+                    held_item['amount'] -= 1
+                    if held_item['amount'] <= 0:
+                        held_item = None
+            # Different type - do nothing
+
+        return held_item
+
+
+    def drop_held_item_to_ground(self, player, held_item, ground_items_manager, is_blocked_fn):
+        """
+        Drop the entire held item stack to the ground.
+        Returns: None (clears held_item)
+        """
+        if not held_item:
+            return None
+
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked_fn)
+        if drop_pos:
+            ground_items_manager.add_item(
+                held_item['type'],
+                held_item['amount'],
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+
+        return None
+
+
+    def drop_single_item_to_ground(self, player, held_item, ground_items_manager, is_blocked_fn):
+        """
+        Drop a single item from the held stack to the ground.
+        Returns: updated held_item
+        """
+        if not held_item or held_item['amount'] < 1:
+            return held_item
+
+        # Find valid drop position
+        if player.zone:
+            px, py = player.prevailing_x, player.prevailing_y
+        else:
+            px, py = player.x, player.y
+
+        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked_fn)
+        if drop_pos:
+            ground_items_manager.add_item(
+                held_item['type'],
+                1,
+                drop_pos[0],
+                drop_pos[1],
+                player.zone
+            )
+            held_item['amount'] -= 1
+            if held_item['amount'] <= 0:
+                return None
+
+        return held_item
+
+
+    def quick_move_ground_to_inventory(self, player, ground_item, ground_items_manager, nearby_items_list):
+        """Shift+click: Quick-move item from ground to inventory (Minecraft style)."""
+        inventory = player.inventory
+        item_type = ground_item.item_type
+        amount_to_move = ground_item.amount
+        stack_limit = self.get_stack_limit(item_type)
+
+        amount_remaining = self.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
+
+        if amount_remaining <= 0:
+            ground_items_manager.remove_item(ground_item)
+        else:
+            ground_item.amount = amount_remaining
+
+
+    # =============================================================================
+    # BARREL/CONTAINER SYSTEM
+    # =============================================================================
+    # Storage container interactions
+    # =============================================================================
+
+    def take_from_barrel(self, char, max_amount=50, log_errors=True):
+        """Take wheat from an adjacent barrel.
+
+        Performs ALL validation and logging. Single source of truth for barrel interactions.
+
+        Args:
+            char: Character taking from barrel
+            max_amount: Maximum wheat to take at once (default 50)
+            log_errors: If True, log detailed error messages (default True)
+
+        Returns:
+            Amount of wheat actually taken (0 if failed)
+        """
+        # Find adjacent barrel
+        for barrel in self.state.interactables.barrels.values():
+            if not barrel.is_adjacent(char):
+                continue
+
+            # Found adjacent barrel - check permissions
+            if not barrel.can_use(char):
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'not_yours')
+                return 0
+
+            # Check barrel contents
+            wheat_count = barrel.get_item('wheat')
+            if wheat_count <= 0:
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'empty')
+                return 0
+
+            # Check inventory space
+            if not char.can_add_item('wheat', 1):
+                if log_errors:
+                    self.log_barrel_error(char, barrel, 'inventory_full')
+                return 0
+
+            # Take as much wheat as possible
+            can_take = min(wheat_count, max_amount)
+            taken = 0
+            for _ in range(can_take):
+                if not char.can_add_item('wheat', 1):
+                    break
+                if barrel.get_item('wheat') <= 0:
+                    break
+                barrel.remove_item('wheat', 1)
+                char.add_item('wheat', 1)
+                taken += 1
+
+            if taken > 0:
+                self.log_barrel_take(char, barrel, taken)
+
+            return taken
+
+        # No adjacent barrel found
+        return 0
+
+
+    def get_nearby_barrel(self, character, max_distance=1.5):
+        """
+        Find a barrel near the character in the same zone.
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Barrel object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        import math
+        char_zone = character.zone
+
+        for barrel in self.state.interactables.barrels.values():
+            # Must be in same zone
+            if barrel.zone != char_zone:
+                continue
+
+            # Calculate distance using appropriate coordinates
+            if char_zone is not None:
+                # Interior - use prevailing (local) coords
+                dx = character.prevailing_x - (barrel.x + 0.5)
+                dy = character.prevailing_y - (barrel.y + 0.5)
+            else:
+                # Exterior - use world coords
+                dx = character.x - (barrel.x + 0.5)
+                dy = character.y - (barrel.y + 0.5)
+
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return barrel
+
+        return None
+
+
+    def interact_barrel_slot_full(self, barrel, slot_index, held_item):
+        """
+        Handle left-click on a barrel/corpse slot - pick up / place / swap full stack.
+        Returns: updated held_item
+        """
+        barrel_inventory = barrel.inventory
+
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return held_item
+
+        barrel_item = barrel_inventory[slot_index]
+
+        if held_item is None:
+            # Pick up item from barrel
+            if barrel_item:
+                held_item = {'type': barrel_item['type'], 'amount': barrel_item['amount']}
+                barrel_inventory[slot_index] = None
+        else:
+            # We're holding something
+            if barrel_item is None:
+                # Place held item in barrel
+                barrel_inventory[slot_index] = {'type': held_item['type'], 'amount': held_item['amount']}
+                held_item = None
+            elif barrel_item['type'] == held_item.get('type'):
+                # Same type - try to stack
+                stack_limit = self.get_stack_limit(barrel_item['type'])
+                if stack_limit is None:
+                    # Unlimited stacking
+                    barrel_item['amount'] += held_item['amount']
+                    held_item = None
+                else:
+                    space = stack_limit - barrel_item['amount']
+                    if space > 0:
+                        transfer = min(space, held_item['amount'])
+                        barrel_item['amount'] += transfer
+                        held_item['amount'] -= transfer
+                        if held_item['amount'] <= 0:
+                            held_item = None
+                    else:
+                        # Stack full - swap
+                        old_type = barrel_item['type']
+                        old_amount = barrel_item['amount']
+                        barrel_item['type'] = held_item['type']
+                        barrel_item['amount'] = held_item['amount']
+                        held_item = {'type': old_type, 'amount': old_amount}
+            else:
+                # Different type - swap
+                old_type = barrel_item['type']
+                old_amount = barrel_item['amount']
+                barrel_item['type'] = held_item['type']
+                barrel_item['amount'] = held_item['amount']
+                held_item = {'type': old_type, 'amount': old_amount}
+
+        return held_item
+
+
+    def interact_barrel_slot_single(self, barrel, slot_index, held_item):
+        """
+        Handle right-click on a barrel/corpse slot - pick up half / place single.
+        Returns: updated held_item
+        """
+        barrel_inventory = barrel.inventory
+
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return held_item
+
+        barrel_item = barrel_inventory[slot_index]
+
+        if held_item is None:
+            # Pick up half of stack from barrel
+            if barrel_item:
+                total = barrel_item['amount']
+                take = (total + 1) // 2  # Ceiling division - take the larger half
+                leave = total - take
+
+                held_item = {'type': barrel_item['type'], 'amount': take}
+
+                if leave > 0:
+                    barrel_item['amount'] = leave
+                else:
+                    barrel_inventory[slot_index] = None
+        else:
+            # We're holding something - place single item
+            if barrel_item is None:
+                # Place 1 item in barrel
+                barrel_inventory[slot_index] = {'type': held_item['type'], 'amount': 1}
+                held_item['amount'] -= 1
+                if held_item['amount'] <= 0:
+                    held_item = None
+            elif barrel_item['type'] == held_item.get('type'):
+                # Same type - place 1 if room
+                stack_limit = self.get_stack_limit(barrel_item['type'])
+                if stack_limit is None or barrel_item['amount'] < stack_limit:
+                    barrel_item['amount'] += 1
+                    held_item['amount'] -= 1
+                    if held_item['amount'] <= 0:
+                        held_item = None
+            # Different type - do nothing
+
+        return held_item
+
+
+    def quick_move_barrel_to_inventory(self, player, barrel, slot_index):
+        """Shift+click: Quick-move item from barrel/corpse to player inventory."""
+        inventory = player.inventory
+        barrel_inventory = barrel.inventory
+
+        if slot_index < 0 or slot_index >= len(barrel_inventory):
+            return
+
+        barrel_item = barrel_inventory[slot_index]
+        if barrel_item is None:
+            return
+
+        item_type = barrel_item['type']
+        amount_to_move = barrel_item['amount']
+        stack_limit = self.get_stack_limit(item_type)
+
+        amount_remaining = self.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
+
+        if amount_remaining <= 0:
+            barrel_inventory[slot_index] = None
+        else:
+            barrel_item['amount'] = amount_remaining
+
+
+    # =============================================================================
+    # FARMING SYSTEM
+    # =============================================================================
+    # Crop planting, harvesting, and farm management
+    # =============================================================================
+
     def player_harvest_cell(self, player):
         """Instantly harvest the farm cell the player is standing on.
         
@@ -653,6 +1680,7 @@ class GameLogic:
         
         return True
     
+
     def player_plant_cell(self, player):
         """Instantly plant/replant the farm cell the player is standing on.
         
@@ -686,21 +1714,153 @@ class GameLogic:
         
         return True
     
-    # =========================================================================
-    # STOVE / CAMPFIRE BAKING SYSTEM
-    # =========================================================================
     
-    def get_adjacent_camp(self, char):
-        """Get any camp adjacent to the character.
-        Returns (camp_position, owner_char) tuple or (None, None).
-        Note: Camps are stored on characters, not in interactables.
+
+    def _update_farm_cells(self):
+        """Update all farm cell states"""
+        for cell, data in self.state.farm_cells.items():
+            if data['state'] == 'growing':
+                data['timer'] -= 1
+                if data['timer'] <= 0:
+                    data['state'] = 'ready'
+                    data['timer'] = 0
+        
+        # Process characters standing on farm cells
+        # Only farmers can legitimately harvest - others commit theft
+        # NOTE: Player is skipped here - player uses environment menu for instant harvest/plant
+        cells_being_worked = set()
+        for char in self.state.characters:
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Skip player - player harvests via environment menu
+            if char.is_player:
+                continue
+            
+            # Convert float position to cell coordinates
+            cell = (int(char['x']), int(char['y']))
+            if cell in self.state.farm_cells and cell not in cells_being_worked:
+                data = self.state.farm_cells[cell]
+                
+                # Only farmers can work farm cells without it being theft
+                is_farmer = char.get('job') == 'Farmer'
+                
+                if not is_farmer:
+                    continue  # Non-farmers use try_farm_theft via AI
+                
+                if data['state'] == 'ready':
+                    # Check if can carry more wheat
+                    if not char.can_add_item('wheat', FARM_CELL_YIELD):
+                        continue  # Inventory full, can't harvest
+                    data['state'] = 'harvesting'
+                    data['timer'] = FARM_HARVEST_TIME
+                    data['harvester'] = char  # Track who started harvesting
+                    cells_being_worked.add(cell)
+                
+                elif data['state'] == 'harvesting':
+                    data['timer'] -= 1
+                    if data['timer'] <= 0:
+                        # Check inventory space before adding wheat
+                        if char.can_add_item('wheat', FARM_CELL_YIELD):
+                            char.add_item('wheat', FARM_CELL_YIELD)
+                            data['state'] = 'replanting'
+                            data['timer'] = FARM_REPLANT_TIME
+                            
+                            name = char.get_display_name()
+                            self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")
+                        else:
+                            # Can't harvest, leave cell ready
+                            data['state'] = 'ready'
+                    cells_being_worked.add(cell)
+                
+                elif data['state'] == 'replanting':
+                    data['timer'] -= 1
+                    if data['timer'] <= 0:
+                        data['state'] = 'growing'
+                        data['timer'] = FARM_CELL_HARVEST_INTERVAL
+                    cells_being_worked.add(cell)
+    
+
+    def can_harvest_at(self, player):
+        """Check if player can harvest at current position."""
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+
+        if farm_cell and farm_cell.get('state', '') == 'ready':
+            return True
+        return False
+
+
+    def can_plant_at(self, player):
+        """Check if player can plant at current position."""
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+
+        if farm_cell and farm_cell.get('state', '') == 'replanting':
+            return True
+        return False
+
+
+    def start_harvest_action(self, player):
         """
-        for other_char in self.state.characters:
-            camp_pos = other_char.get('camp_position')
-            if camp_pos and self.state.interactables.is_adjacent_to_camp(char, camp_pos):
-                return camp_pos, other_char
-        return None, None
-    
+        Validate and start harvest action.
+        Returns: True if successful, False otherwise
+        """
+        from constants import ONGOING_ACTION_HARVEST_DURATION, FARM_CELL_YIELD
+
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+
+        if not farm_cell or farm_cell.get('state') != 'ready':
+            self.log_harvest_plant_error(player, 'harvest', 'cant_here')
+            return False
+
+        # Check inventory space
+        if not player.can_add_item('wheat', FARM_CELL_YIELD):
+            self.log_harvest_plant_error(player, 'harvest', 'inventory_full')
+            return False
+
+        # Start ongoing harvest action
+        player.start_ongoing_action(
+            'harvest',
+            ONGOING_ACTION_HARVEST_DURATION,
+            {'cell': (cell_x, cell_y)}
+        )
+        return True
+
+
+    def start_plant_action(self, player):
+        """
+        Validate and start plant action.
+        Returns: True if successful, False otherwise
+        """
+        from constants import ONGOING_ACTION_PLANT_DURATION
+
+        cell_x = int(player.x)
+        cell_y = int(player.y)
+        farm_cell = self.state.farm_cells.get((cell_x, cell_y))
+
+        if not farm_cell or farm_cell.get('state') != 'replanting':
+            self.log_harvest_plant_error(player, 'plant', 'cant_here')
+            return False
+
+        # Start ongoing plant action
+        player.start_ongoing_action(
+            'plant',
+            ONGOING_ACTION_PLANT_DURATION,
+            {'cell': (cell_x, cell_y)}
+        )
+        return True
+    # =============================================================================
+    # CRAFTING & COOKING SYSTEM
+    # =============================================================================
+    # Bread baking and crafting mechanics
+    # =============================================================================
+
     def get_adjacent_cooking_spot(self, char):
         """Get any adjacent cooking spot (stove or campfire).
         Returns a dict with 'type' ('stove' or 'camp'), 'name', and source object.
@@ -728,6 +1888,7 @@ class GameLogic:
 
         return None
     
+
     def can_bake_bread(self, char):
         """Check if character can bake bread right now.
         Requirements: adjacent to a stove (that they can use) or campfire, has wheat, has space for bread.
@@ -747,6 +1908,7 @@ class GameLogic:
         
         return True
     
+
     def bake_bread(self, char, amount=1, log_errors=True):
         """Convert wheat into bread at a stove or campfire.
 
@@ -810,62 +1972,6 @@ class GameLogic:
 
         return actually_baked
 
-    def take_from_barrel(self, char, max_amount=50, log_errors=True):
-        """Take wheat from an adjacent barrel.
-
-        Performs ALL validation and logging. Single source of truth for barrel interactions.
-
-        Args:
-            char: Character taking from barrel
-            max_amount: Maximum wheat to take at once (default 50)
-            log_errors: If True, log detailed error messages (default True)
-
-        Returns:
-            Amount of wheat actually taken (0 if failed)
-        """
-        # Find adjacent barrel
-        for barrel in self.state.interactables.barrels.values():
-            if not barrel.is_adjacent(char):
-                continue
-
-            # Found adjacent barrel - check permissions
-            if not barrel.can_use(char):
-                if log_errors:
-                    self.log_barrel_error(char, barrel, 'not_yours')
-                return 0
-
-            # Check barrel contents
-            wheat_count = barrel.get_item('wheat')
-            if wheat_count <= 0:
-                if log_errors:
-                    self.log_barrel_error(char, barrel, 'empty')
-                return 0
-
-            # Check inventory space
-            if not char.can_add_item('wheat', 1):
-                if log_errors:
-                    self.log_barrel_error(char, barrel, 'inventory_full')
-                return 0
-
-            # Take as much wheat as possible
-            can_take = min(wheat_count, max_amount)
-            taken = 0
-            for _ in range(can_take):
-                if not char.can_add_item('wheat', 1):
-                    break
-                if barrel.get_item('wheat') <= 0:
-                    break
-                barrel.remove_item('wheat', 1)
-                char.add_item('wheat', 1)
-                taken += 1
-
-            if taken > 0:
-                self.log_barrel_take(char, barrel, taken)
-
-            return taken
-
-        # No adjacent barrel found
-        return 0
 
     def get_nearest_cooking_spot(self, char):
         """Find the nearest cooking spot the character can use (their stoves or any campfire).
@@ -914,6 +2020,7 @@ class GameLogic:
         
         return best_spot, best_pos
     
+
     def get_nearest_stove(self, char):
         """Find the nearest stove the character can use. Returns (stove, position) or (None, None)."""
         best_stove = None
@@ -937,283 +2044,6 @@ class GameLogic:
 
         return best_stove, best_pos
 
-    def get_nearest_interactable_npc(self, player, max_distance=ADJACENCY_DISTANCE):
-        """
-        Find the nearest NPC that the player can interact with.
-
-        Args:
-            player: Player character
-            max_distance: Maximum distance to check
-
-        Returns:
-            Nearest NPC character, or None if none in range
-        """
-        if not player:
-            return None
-
-        nearest_npc = None
-        nearest_dist = float('inf')
-
-        for char in self.state.characters:
-            if char.is_player:
-                continue
-
-            # Must be in same zone
-            if char.zone != player.zone:
-                continue
-
-            # Calculate distance using prevailing coords
-            dx = char.prevailing_x - player.prevailing_x
-            dy = char.prevailing_y - player.prevailing_y
-            dist = (dx * dx + dy * dy) ** 0.5
-
-            if dist <= max_distance and dist < nearest_dist:
-                nearest_dist = dist
-                nearest_npc = char
-
-        return nearest_npc
-
-    # =========================================================================
-    # DIALOGUE SYSTEM
-    # =========================================================================
-
-    def can_start_dialogue(self, npc):
-        """
-        Check if dialogue can be started with the given NPC.
-
-        Args:
-            npc: Character to check
-
-        Returns:
-            True if dialogue is possible
-        """
-        if npc is None:
-            return False
-
-        # Can't talk to yourself
-        if npc.is_player:
-            return False
-
-        # Check NPC's intent - cannot talk if they're attacking
-        intent = npc.intent
-        if intent and intent.get('action') == 'attack':
-            return False
-
-        # Can talk if fleeing (per user request)
-        # Can talk in all other states (idle, wandering, working, etc.)
-
-        return True
-
-    def start_dialogue(self, npc, player):
-        """
-        Start a dialogue between player and NPC.
-
-        Args:
-            npc: NPC character to talk to
-            player: Player character
-
-        Returns:
-            dict with 'success': bool and 'saved_state': dict if successful
-        """
-        if not self.can_start_dialogue(npc):
-            return {'success': False}
-
-        # Save NPC's current state to restore later
-        saved_state = {
-            'intent': npc.intent,
-            'goal': npc.goal
-        }
-
-        # Make NPC face the player and stop moving
-        if player:
-            self.make_character_face_character(npc, player)
-
-        npc.vx = 0
-        npc.vy = 0
-        npc.goal = None  # Clear movement goal
-
-        return {'success': True, 'saved_state': saved_state}
-
-    def end_dialogue(self, npc, saved_state):
-        """
-        End a dialogue and restore NPC state.
-
-        Args:
-            npc: NPC character
-            saved_state: State dict from start_dialogue
-        """
-        if not npc or not saved_state:
-            return
-
-        # Restore NPC state (only restore goal, let AI decide new intent)
-        npc.goal = saved_state.get('goal')
-
-    def update_dialogue(self, npc, player):
-        """
-        Update dialogue state - keeps NPC facing player and stationary.
-
-        Args:
-            npc: NPC character in dialogue
-            player: Player character
-        """
-        if not npc or not player:
-            return
-
-        # Keep NPC facing player and stationary
-        npc.vx = 0
-        npc.vy = 0
-        self.make_character_face_character(npc, player)
-
-    def make_character_face_character(self, character, target):
-        """
-        Make a character face toward another character (8-directional).
-
-        Args:
-            character: Character to turn
-            target: Character to face toward
-        """
-        if not character or not target:
-            return
-
-        import math
-
-        # Use prevailing coords for same-zone calculation
-        if character.zone == target.zone:
-            dx = target.prevailing_x - character.prevailing_x
-            dy = target.prevailing_y - character.prevailing_y
-        else:
-            dx = target.x - character.x
-            dy = target.y - character.y
-
-        # Determine 8-direction facing based on angle
-        angle = math.atan2(dy, dx)
-
-        # Convert to 8 directions
-        if angle >= -math.pi/8 and angle < math.pi/8:
-            character.facing = 'right'
-        elif angle >= math.pi/8 and angle < 3*math.pi/8:
-            character.facing = 'down-right'
-        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
-            character.facing = 'down'
-        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
-            character.facing = 'down-left'
-        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
-            character.facing = 'left'
-        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
-            character.facing = 'up-left'
-        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
-            character.facing = 'up'
-        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
-            character.facing = 'up-right'
-
-    # =========================================================================
-    # ENVIRONMENT QUERIES
-    # =========================================================================
-
-    def get_nearby_barrel(self, character, max_distance=1.5):
-        """
-        Find a barrel near the character in the same zone.
-
-        Args:
-            character: Character to search from
-            max_distance: Maximum distance to search
-
-        Returns:
-            Barrel object if one is nearby, None otherwise
-        """
-        if not character:
-            return None
-
-        import math
-        char_zone = character.zone
-
-        for barrel in self.state.interactables.barrels.values():
-            # Must be in same zone
-            if barrel.zone != char_zone:
-                continue
-
-            # Calculate distance using appropriate coordinates
-            if char_zone is not None:
-                # Interior - use prevailing (local) coords
-                dx = character.prevailing_x - (barrel.x + 0.5)
-                dy = character.prevailing_y - (barrel.y + 0.5)
-            else:
-                # Exterior - use world coords
-                dx = character.x - (barrel.x + 0.5)
-                dy = character.y - (barrel.y + 0.5)
-
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist <= max_distance:
-                return barrel
-
-        return None
-
-    def get_nearby_corpse(self, character, max_distance=1.5):
-        """
-        Find a corpse near the character in the same zone.
-
-        Args:
-            character: Character to search from
-            max_distance: Maximum distance to search
-
-        Returns:
-            Corpse object if one is nearby, None otherwise
-        """
-        if not character:
-            return None
-
-        import math
-        char_zone = character.zone
-
-        for corpse in self.state.corpses:
-            # Must be in same zone
-            if corpse.zone != char_zone:
-                continue
-
-            # Calculate distance using appropriate coordinates
-            if char_zone is not None:
-                # Interior - use prevailing (local) coords
-                dx = character.prevailing_x - (corpse.x + 0.5)
-                dy = character.prevailing_y - (corpse.y + 0.5)
-            else:
-                # Exterior - use world coords
-                dx = character.x - (corpse.x + 0.5)
-                dy = character.y - (corpse.y + 0.5)
-
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist <= max_distance:
-                return corpse
-
-        return None
-
-    def get_nearby_tree(self, character, max_distance=1.5):
-        """
-        Find a tree near the character (exterior only).
-
-        Args:
-            character: Character to search from
-            max_distance: Maximum distance to search
-
-        Returns:
-            Tree object if one is nearby, None otherwise
-        """
-        if not character:
-            return None
-
-        # Trees only exist in exterior
-        if character.zone is not None:
-            return None
-
-        import math
-
-        for tree in self.state.interactables.trees.values():
-            dx = character.x - (tree.x + 0.5)
-            dy = character.y - (tree.y + 0.5)
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist <= max_distance:
-                return tree
-
-        return None
 
     def has_access_to_cooking(self, char):
         """Check if character has access to any cooking spot (stove they can use or any camp)."""
@@ -1260,14 +2090,401 @@ class GameLogic:
         
         return False
 
-    # =========================================================================
-    # COMBAT SYSTEM (Memory-Based)
-    # =========================================================================
     
-    # -------------------------------------------------------------------------
     # PERCEPTION SYSTEM (Vision Cones and Sound Radii)
-    # -------------------------------------------------------------------------
     
+
+    # =============================================================================
+    # CAMPFIRE & ENVIRONMENT
+    # =============================================================================
+    # Camp making and outdoor survival
+    # =============================================================================
+
+    def get_sleep_position(self, char):
+        """Get the position where this character should sleep.
+        Returns bed position if they own one, camp position if they have one, None otherwise.
+        """
+        # Check for owned bed
+        bed = self.state.get_character_bed(char)
+        if bed:
+            return bed.position
+        
+        # Check for existing camp
+        if char.get('camp_position'):
+            return char['camp_position']
+        
+        return None
+    
+
+    def can_make_camp_at(self, x, y):
+        """Check if a camp can be made at this position.
+        Works with float positions - checks the cell containing the point.
+        Cannot make camp on village grounds or on any farm.
+        """
+        cell_x = int(x)
+        cell_y = int(y)
+        if not self.state.is_position_valid(cell_x, cell_y):
+            return False
+        # Cannot camp in village areas
+        if self.state.is_in_village(cell_x, cell_y):
+            return False
+        # Cannot camp on farm cells
+        if (cell_x, cell_y) in self.state.farm_cells:
+            return False
+        return True
+    
+
+    def make_camp(self, char):
+        """Make a camp at the character's current position if possible.
+        Returns True if camp was made. Stores camp position as cell coordinates.
+        """
+        # Get the cell the character is in
+        cell_x = int(char['x'])
+        cell_y = int(char['y'])
+        if self.can_make_camp_at(cell_x, cell_y):
+            char['camp_position'] = (cell_x, cell_y)
+            name = char.get_display_name()
+            self.state.log_action(f"{name} made a camp at ({cell_x}, {cell_y})")
+            return True
+        return False
+    
+    
+
+    def get_adjacent_camp(self, char):
+        """Get any camp adjacent to the character.
+        Returns (camp_position, owner_char) tuple or (None, None).
+        Note: Camps are stored on characters, not in interactables.
+        """
+        for other_char in self.state.characters:
+            camp_pos = other_char.get('camp_position')
+            if camp_pos and self.state.interactables.is_adjacent_to_camp(char, camp_pos):
+                return camp_pos, other_char
+        return None, None
+    
+
+    def _find_camp_spot(self, char):
+        """Find a nearby position where the character can make a camp (outside village).
+        Returns float position (center of cell).
+        """
+        # Try to find nearest valid camp spot
+        best_spot = None
+        best_dist = float('inf')
+        
+        for y in range(SIZE):
+            for x in range(SIZE):
+                if self.can_make_camp_at(x, y) and not self.state.is_occupied(x, y):
+                    # Calculate distance to center of this cell
+                    cx, cy = x + 0.5, y + 0.5
+                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_spot = (cx, cy)
+        
+        return best_spot
+    
+
+    def can_build_campfire(self, player):
+        """Check if player can build a campfire at current location."""
+        if not player:
+            return False
+
+        # Can't build campfire in interior
+        if player.zone is not None:
+            return False
+
+        # Can't build campfire if already has one
+        if player.get('camp_position'):
+            return False
+
+        return True
+
+
+    # =============================================================================
+    # DIALOGUE SYSTEM
+    # =============================================================================
+    # NPC conversation management
+    # =============================================================================
+
+    def can_start_dialogue(self, npc):
+        """
+        Check if dialogue can be started with the given NPC.
+
+        Args:
+            npc: Character to check
+
+        Returns:
+            True if dialogue is possible
+        """
+        if npc is None:
+            return False
+
+        # Can't talk to yourself
+        if npc.is_player:
+            return False
+
+        # Check NPC's intent - cannot talk if they're attacking
+        intent = npc.intent
+        if intent and intent.get('action') == 'attack':
+            return False
+
+        # Can talk if fleeing (per user request)
+        # Can talk in all other states (idle, wandering, working, etc.)
+
+        return True
+
+
+    def start_dialogue(self, npc, player):
+        """
+        Start a dialogue between player and NPC.
+
+        Args:
+            npc: NPC character to talk to
+            player: Player character
+
+        Returns:
+            dict with 'success': bool and 'saved_state': dict if successful
+        """
+        if not self.can_start_dialogue(npc):
+            return {'success': False}
+
+        # Save NPC's current state to restore later
+        saved_state = {
+            'intent': npc.intent,
+            'goal': npc.goal
+        }
+
+        # Make NPC face the player and stop moving
+        if player:
+            self.make_character_face_character(npc, player)
+
+        npc.vx = 0
+        npc.vy = 0
+        npc.goal = None  # Clear movement goal
+
+        return {'success': True, 'saved_state': saved_state}
+
+
+    def end_dialogue(self, npc, saved_state):
+        """
+        End a dialogue and restore NPC state.
+
+        Args:
+            npc: NPC character
+            saved_state: State dict from start_dialogue
+        """
+        if not npc or not saved_state:
+            return
+
+        # Restore NPC state (only restore goal, let AI decide new intent)
+        npc.goal = saved_state.get('goal')
+
+
+    def update_dialogue(self, npc, player):
+        """
+        Update dialogue state - keeps NPC facing player and stationary.
+
+        Args:
+            npc: NPC character in dialogue
+            player: Player character
+        """
+        if not npc or not player:
+            return
+
+        # Keep NPC facing player and stationary
+        npc.vx = 0
+        npc.vy = 0
+        self.make_character_face_character(npc, player)
+
+
+    def make_character_face_character(self, character, target):
+        """
+        Make a character face toward another character (8-directional).
+
+        Args:
+            character: Character to turn
+            target: Character to face toward
+        """
+        if not character or not target:
+            return
+
+        import math
+
+        # Use prevailing coords for same-zone calculation
+        if character.zone == target.zone:
+            dx = target.prevailing_x - character.prevailing_x
+            dy = target.prevailing_y - character.prevailing_y
+        else:
+            dx = target.x - character.x
+            dy = target.y - character.y
+
+        # Determine 8-direction facing based on angle
+        angle = math.atan2(dy, dx)
+
+        # Convert to 8 directions
+        if angle >= -math.pi/8 and angle < math.pi/8:
+            character.facing = 'right'
+        elif angle >= math.pi/8 and angle < 3*math.pi/8:
+            character.facing = 'down-right'
+        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
+            character.facing = 'down'
+        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
+            character.facing = 'down-left'
+        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
+            character.facing = 'left'
+        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
+            character.facing = 'up-left'
+        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
+            character.facing = 'up'
+        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
+            character.facing = 'up-right'
+
+    # ENVIRONMENT QUERIES
+
+
+    # =============================================================================
+    # ENVIRONMENT QUERIES
+    # =============================================================================
+    # Finding nearby objects, NPCs, and interactive elements
+    # =============================================================================
+
+    def get_nearest_interactable_npc(self, player, max_distance=ADJACENCY_DISTANCE):
+        """
+        Find the nearest NPC that the player can interact with.
+
+        Args:
+            player: Player character
+            max_distance: Maximum distance to check
+
+        Returns:
+            Nearest NPC character, or None if none in range
+        """
+        if not player:
+            return None
+
+        nearest_npc = None
+        nearest_dist = float('inf')
+
+        for char in self.state.characters:
+            if char.is_player:
+                continue
+
+            # Must be in same zone
+            if char.zone != player.zone:
+                continue
+
+            # Calculate distance using prevailing coords
+            dx = char.prevailing_x - player.prevailing_x
+            dy = char.prevailing_y - player.prevailing_y
+            dist = (dx * dx + dy * dy) ** 0.5
+
+            if dist <= max_distance and dist < nearest_dist:
+                nearest_dist = dist
+                nearest_npc = char
+
+        return nearest_npc
+
+    # DIALOGUE SYSTEM
+
+
+    def get_nearby_corpse(self, character, max_distance=1.5):
+        """
+        Find a corpse near the character in the same zone.
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Corpse object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        import math
+        char_zone = character.zone
+
+        for corpse in self.state.corpses:
+            # Must be in same zone
+            if corpse.zone != char_zone:
+                continue
+
+            # Calculate distance using appropriate coordinates
+            if char_zone is not None:
+                # Interior - use prevailing (local) coords
+                dx = character.prevailing_x - (corpse.x + 0.5)
+                dy = character.prevailing_y - (corpse.y + 0.5)
+            else:
+                # Exterior - use world coords
+                dx = character.x - (corpse.x + 0.5)
+                dy = character.y - (corpse.y + 0.5)
+
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return corpse
+
+        return None
+
+
+    def get_nearby_tree(self, character, max_distance=1.5):
+        """
+        Find a tree near the character (exterior only).
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Tree object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        # Trees only exist in exterior
+        if character.zone is not None:
+            return None
+
+        import math
+
+        for tree in self.state.interactables.trees.values():
+            dx = character.x - (tree.x + 0.5)
+            dy = character.y - (tree.y + 0.5)
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return tree
+
+        return None
+
+
+    # =============================================================================
+    # PERCEPTION & VISION SYSTEM
+    # =============================================================================
+    # Vision cones, line of sight, sound radius, and window viewing
+    # =============================================================================
+
+    def _update_facing(self, char, dx, dy):
+        """Update character's facing direction based on movement delta.
+        Uses magnitude comparison to determine if movement is primarily
+        horizontal, vertical, or diagonal.
+        """
+        # Determine primary direction based on magnitude
+        if abs(dx) > abs(dy) * 2:
+            # Mostly horizontal
+            char['facing'] = 'right' if dx > 0 else 'left'
+        elif abs(dy) > abs(dx) * 2:
+            # Mostly vertical
+            char['facing'] = 'down' if dy > 0 else 'up'
+        else:
+            # Diagonal
+            if dx > 0 and dy < 0:
+                char['facing'] = 'up-right'
+            elif dx > 0 and dy > 0:
+                char['facing'] = 'down-right'
+            elif dx < 0 and dy < 0:
+                char['facing'] = 'up-left'
+            else:
+                char['facing'] = 'down-left'
+    
+
     def get_facing_vector(self, char):
         """Get unit vector for character's facing direction."""
         facing = char.get('facing', 'down')
@@ -1283,6 +2500,7 @@ class GameLogic:
         }
         return vectors.get(facing, (0, 1))
     
+
     def _get_perception_coords(self, char):
         """Get the coordinates to use for perception calculations.
         
@@ -1296,6 +2514,7 @@ class GameLogic:
             return (char.prevailing_x, char.prevailing_y)
         return (char.x, char.y)
     
+
     def _is_facing_direction(self, char, direction):
         """Check if character is facing a cardinal direction.
 
@@ -1309,49 +2528,12 @@ class GameLogic:
         facing = char.get('facing', 'down')
         return facing in DIRECTION_TO_FACINGS.get(direction, ())
     
+
     def _get_opposite_direction(self, direction):
         """Get the opposite cardinal direction."""
         return OPPOSITE_DIRECTIONS.get(direction, 'south')
     
-    def get_window_for_cross_zone_vision(self, observer, target):
-        """Check if observer can see target through a window.
-        
-        Args:
-            observer: Character doing the looking
-            target: Character being looked at
-            
-        Returns:
-            (window, looking_in) tuple, or (None, None) if no valid window
-            looking_in: True if observer is outside looking in, False if inside looking out
-        """
-        # Must be in different zones
-        if observer.zone == target.zone:
-            return (None, None)
-        
-        observer_interior = self.state.interiors.get_interior(observer.zone) if observer.zone else None
-        target_interior = self.state.interiors.get_interior(target.zone) if target.zone else None
-        
-        if observer_interior and target.zone is None:
-            # Observer inside, target outside
-            # Check if observer is near a window and facing outward
-            for window in observer_interior.windows:
-                if window.is_character_near(observer.prevailing_x, observer.prevailing_y):
-                    # Must be facing the window's direction (outward)
-                    if self._is_facing_direction(observer, window.facing):
-                        return (window, False)  # looking out
-        
-        if target_interior and observer.zone is None:
-            # Observer outside, target inside
-            # Check if observer is near window's exterior AND facing toward building
-            for window in target_interior.windows:
-                if window.is_character_near_exterior(observer.x, observer.y):
-                    # Must be facing opposite of window direction (into building)
-                    inward_dir = self._get_opposite_direction(window.facing)
-                    if self._is_facing_direction(observer, inward_dir):
-                        return (window, True)  # looking in
-        
-        return (None, None)
-    
+
     def can_perceive_character(self, observer, target):
         """Check if observer can perceive target character.
         
@@ -1493,6 +2675,7 @@ class GameLogic:
         
         return self.can_perceive_event(observer, target_x, target_y, event_zone=target.zone)
     
+
     def _get_vision_obstacles(self, zone):
         """Get obstacles that block vision for a given zone.
         
@@ -1534,6 +2717,7 @@ class GameLogic:
         
         return obstacles
     
+
     def _line_intersects_circle(self, x1, y1, x2, y2, cx, cy, radius):
         """Check if line segment from (x1,y1) to (x2,y2) intersects circle at (cx,cy).
         
@@ -1571,6 +2755,7 @@ class GameLogic:
         
         return None
     
+
     def _check_line_of_sight(self, from_x, from_y, to_x, to_y, zone):
         """Check if there's clear line of sight between two points.
         
@@ -1596,6 +2781,7 @@ class GameLogic:
         
         return True  # Clear line of sight
     
+
     def is_point_in_vision_cone(self, observer, target_x, target_y):
         """Check if a specific point is within observer's vision cone.
         
@@ -1644,6 +2830,7 @@ class GameLogic:
         # In cone - check line of sight
         return self._check_line_of_sight(obs_x, obs_y, target_x, target_y, observer.zone)
     
+
     def _does_vision_cone_overlap_circle_coords(self, obs_x, obs_y, facing, circle_x, circle_y, circle_radius):
         """Check if vision cone overlaps with a circle using explicit coordinates.
         
@@ -1680,6 +2867,7 @@ class GameLogic:
         
         return False
     
+
     def _is_point_in_vision_cone_coords(self, obs_x, obs_y, facing, target_x, target_y, zone=None):
         """Check if point is in vision cone using explicit coordinates."""
         dx = target_x - obs_x
@@ -1711,6 +2899,7 @@ class GameLogic:
         
         return self._check_line_of_sight(obs_x, obs_y, target_x, target_y, zone)
     
+
     def does_vision_cone_overlap_circle(self, observer, circle_x, circle_y, circle_radius):
         """Check if observer's vision cone overlaps with a circle (sound radius).
         
@@ -1756,6 +2945,7 @@ class GameLogic:
         
         return False
     
+
     def do_circles_overlap(self, x1, y1, r1, x2, y2, r2):
         """Check if two circles overlap."""
         dx = x2 - x1
@@ -1763,6 +2953,7 @@ class GameLogic:
         dist = math.sqrt(dx * dx + dy * dy)
         return dist <= (r1 + r2)
     
+
     def can_perceive_event(self, witness, event_x, event_y, sound_radius=None, event_zone=None):
         """Check if witness can perceive an event at a location.
         
@@ -1810,10 +3001,78 @@ class GameLogic:
         
         return (False, None)
     
-    # -------------------------------------------------------------------------
     # Criminal Status and Memory
-    # -------------------------------------------------------------------------
     
+
+    def _update_facing_from_velocity(self, char):
+        """Update character's facing direction based on velocity.
+        
+        If char has a 'face_target' set (another character), face them instead
+        of the movement direction. This allows backpedaling.
+        """
+        # Check for face_target override first
+        face_target = char.get('face_target')
+        if face_target and face_target in self.state.characters:
+            self._face_toward_character(char, face_target)
+            return
+        
+        vx = char.get('vx', 0.0)
+        vy = char.get('vy', 0.0)
+        
+        if abs(vx) < 0.01 and abs(vy) < 0.01:
+            return  # Not moving
+        
+        # Determine primary direction
+        if abs(vx) > abs(vy) * 2:
+            # Mostly horizontal
+            char['facing'] = 'right' if vx > 0 else 'left'
+        elif abs(vy) > abs(vx) * 2:
+            # Mostly vertical
+            char['facing'] = 'down' if vy > 0 else 'up'
+        else:
+            # Diagonal
+            if vx > 0 and vy < 0:
+                char['facing'] = 'up-right'
+            elif vx > 0 and vy > 0:
+                char['facing'] = 'down-right'
+            elif vx < 0 and vy < 0:
+                char['facing'] = 'up-left'
+            else:
+                char['facing'] = 'down-left'
+    
+
+    def _get_window_facing_at(self, interior, local_x, local_y, threshold=1.0):
+        """Check if position is near a window and return its facing direction.
+        
+        Args:
+            interior: The interior to check
+            local_x, local_y: Position in interior local coords
+            threshold: How close to window to count as "at" it
+            
+        Returns:
+            Window facing direction ('north', 'south', 'east', 'west') or None
+        """
+        if not interior:
+            return None
+        
+        for window in interior.windows:
+            # Distance from character to window position
+            dx = local_x - (window.interior_x + 0.5)
+            dy = local_y - (window.interior_y + 0.5)
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < threshold:
+                return window.facing
+        
+        return None
+    
+
+    # =============================================================================
+    # CRIME & MEMORY SYSTEM
+    # =============================================================================
+    # Criminal status, memories, and defender logic
+    # =============================================================================
+
     def is_known_criminal(self, char):
         """Check if this character is known as a criminal by anyone.
         
@@ -1821,18 +3080,7 @@ class GameLogic:
         """
         return char.has_committed_crime()
     
-    def remember_attack(self, victim, attacker, damage):
-        """Record that victim was attacked by attacker.
-        Only stores one memory per attacker - doesn't track each hit.
-        """
-        # Check if victim already has a memory of being attacked by this attacker
-        if victim.has_memory_of('attacked_by', attacker):
-            return  # Already remembered, don't duplicate
-        
-        victim.add_memory('attacked_by', attacker, self.state.ticks,
-                         intensity=CRIME_INTENSITY_ASSAULT,
-                         source='experienced')
-    
+
     def find_nearby_defender(self, char, max_distance, exclude=None):
         """Find a defender within range.
         
@@ -1895,6 +3143,7 @@ class GameLogic:
         # No soldier found (or no allegiance) - use general defender
         return best_general
     
+
     def is_defender(self, char):
         """Check if a character will defend others from crime.
         General defenders have morality >= 7 and confidence >= 7.
@@ -1904,6 +3153,7 @@ class GameLogic:
         confidence = char.get_trait('confidence')
         return morality >= 7 and confidence >= 7
     
+
     def get_crime_range(self, crime_type):
         """Get the range for a crime type. The intensity IS the range."""
         if crime_type == 'murder':
@@ -1915,10 +3165,12 @@ class GameLogic:
         else:
             return 5  # default fallback
     
+
     def get_flee_distance(self, intensity):
         """Get how far to flee from a criminal. Returns intensity / FLEE_DISTANCE_DIVISOR."""
         return intensity / FLEE_DISTANCE_DIVISOR
     
+
     def will_care_about_crime(self, responder, crime_allegiance, intensity=None):
         """Does this person care about this crime?
         
@@ -1939,6 +3191,7 @@ class GameLogic:
         
         return effective_morality >= 7
     
+
     def find_known_criminal_nearby(self, char):
         """Find any known criminal within range that this character cares about.
         
@@ -1968,6 +3221,13 @@ class GameLogic:
         
         return (None, None)
     
+
+    # =============================================================================
+    # CRIME ACTIONS
+    # =============================================================================
+    # Theft, murder, and criminal behavior
+    # =============================================================================
+
     def get_hunger_factor(self, char):
         """Get hunger factor from 0 (not hungry) to 1 (starving).
         Scales from HUNGER_CHANCE_THRESHOLD (60) down to 0.
@@ -1976,6 +3236,7 @@ class GameLogic:
             return 0.0
         return 1.0 - (char['hunger'] / HUNGER_CHANCE_THRESHOLD)
     
+
     def should_attempt_farm_theft(self, char):
         """Determine if character will attempt to steal from a farm.
         Returns True if they decide to steal.
@@ -2006,6 +3267,7 @@ class GameLogic:
         
         return random.random() < chance
     
+
     def should_attempt_murder(self, char):
         """Determine if character will attempt to kill someone.
         Returns True if they decide to attack with intent to kill.
@@ -2033,6 +3295,7 @@ class GameLogic:
             chance = 0.50 + (0.50 * hunger_factor)  # 50% to 100%
             return random.random() < chance
     
+
     def decide_crime_action(self, char):
         """Decide what crime action (if any) to take.
         Returns: 'theft', 'murder', or None
@@ -2065,6 +3328,7 @@ class GameLogic:
         
         return None
     
+
     def find_nearby_ready_farm_cell(self, char):
         """Find a ready farm cell nearby that the character could steal from."""
         best_cell = None
@@ -2079,6 +3343,7 @@ class GameLogic:
         
         return best_cell
     
+
     def get_farm_waiting_position(self, char):
         """Get a position near the farm to wait for crops."""
         # Find any farm cell and return a position adjacent to the farm area
@@ -2095,6 +3360,7 @@ class GameLogic:
         # Return center of farm area
         return ((min_x + max_x) / 2 + 0.5, (min_y + max_y) / 2 + 0.5)
     
+
     def try_farm_theft(self, char):
         """Character attempts to steal from a farm. Returns True if action taken."""
         # If already pursuing theft, continue
@@ -2117,6 +3383,7 @@ class GameLogic:
         
         return self.continue_theft(char)
     
+
     def continue_theft(self, char):
         """Continue theft in progress. Returns True if still stealing."""
         cell = char.get('theft_target')
@@ -2194,6 +3461,7 @@ class GameLogic:
         # Still in transit - movement handled by _get_goal
         return True
     
+
     def witness_theft(self, thief, cell):
         """Witnesses within perception range learn about the theft and may react.
         
@@ -2261,6 +3529,7 @@ class GameLogic:
                 else:
                     self.state.log_action(f"{witness_name} {perception_verb.lower()} {thief_name} stealing.")
     
+
     def find_richest_target(self, robber):
         """Find the best target to rob"""
         targets = [c for c in self.state.characters if c != robber and (c.get_item('gold') > 0 or c.get_item('wheat') > 0)]
@@ -2268,6 +3537,7 @@ class GameLogic:
             return None
         return max(targets, key=lambda c: (c.get_item('wheat'), c.get_item('gold')))
     
+
     def try_murder(self, attacker):
         """Character decides to attack someone with intent to kill - sets intent and starts pursuit.
         No crime is committed until actual swing (handled in resolve_melee_attack).
@@ -2284,6 +3554,7 @@ class GameLogic:
             return self.continue_murder(attacker)
         return False
     
+
     def continue_murder(self, attacker):
         """Continue murder pursuit - returns True if still pursuing"""
         if attacker.intent is None or attacker.intent.get('action') != 'attack':
@@ -2349,25 +3620,13 @@ class GameLogic:
 
         return True
     
-    def _face_toward_target(self, char, target):
-        """Make character face toward a target."""
-        dx = target.prevailing_x - char.prevailing_x
-        dy = target.prevailing_y - char.prevailing_y
-        
-        # Determine facing based on angle
-        if abs(dx) > abs(dy) * 2:
-            # Mostly horizontal
-            char.facing = 'right' if dx > 0 else 'left'
-        elif abs(dy) > abs(dx) * 2:
-            # Mostly vertical
-            char.facing = 'down' if dy > 0 else 'up'
-        else:
-            # Diagonal
-            if dx > 0:
-                char.facing = 'down-right' if dy > 0 else 'up-right'
-            else:
-                char.facing = 'down-left' if dy > 0 else 'up-left'
-    
+
+    # =============================================================================
+    # WITNESS & CRIME REPORTING
+    # =============================================================================
+    # Crime witnessing and reporting to authorities
+    # =============================================================================
+
     def witness_crime(self, criminal, victim, crime_type):
         """Witnesses within perception range learn about the crime and may react.
         
@@ -2425,6 +3684,7 @@ class GameLogic:
                 # Evaluate reaction based on personality
                 self.evaluate_crime_reaction(char, criminal, intensity, crime_allegiance)
     
+
     def evaluate_crime_reaction(self, witness, criminal, intensity, crime_allegiance):
         """Evaluate how a witness should react to a crime.
         
@@ -2445,37 +3705,7 @@ class GameLogic:
             witness.set_intent('flee', criminal, reason='witnessed_crime', started_tick=self.state.ticks)
             self.state.log_action(f"{witness.get_display_name()} fleeing from {criminal.get_display_name()}!")
     
-    def broadcast_violence(self, attacker, target):
-        """Notify nearby characters of ongoing violence (any fight, justified or not).
-        
-        Characters who perceive a fight but aren't involved will react:
-        - High confidence (>= 7): Watch from current position
-        - Low confidence (< 7): Flee from the violence
-        
-        All bystanders use reason='bystander' - they stop caring once out of perception.
-        """
-        for char in self.state.characters:
-            if char is attacker or char is target:
-                continue
-            if char.get('health', 100) <= 0:
-                continue
-            
-            # Already reacting to something? Don't interrupt
-            if char.intent and char.intent.get('action') in ('attack', 'flee', 'watch'):
-                continue
-            
-            # Can perceive the violence?
-            can_perceive, method = self.can_perceive_character(char, attacker)
-            if not can_perceive:
-                continue
-            
-            confidence = char.get_trait('confidence')
-            if confidence >= 7:
-                char.set_intent('watch', attacker, reason='bystander', started_tick=self.state.ticks)
-            else:
-                char.set_intent('flee', attacker, reason='bystander', started_tick=self.state.ticks)
-                self.state.log_action(f"{char.get_display_name()} fleeing from violence!")
-    
+
     def report_crime_to(self, reporter, defender, crime_memory):
         """Reporter tells defender about a crime they know about.
         
@@ -2508,6 +3738,7 @@ class GameLogic:
                                     crime_memory['intensity'],
                                     crime_memory['details'].get('victim_allegiance'))
     
+
     def try_report_crimes_to_soldier(self, char):
         """If character has unreported crimes and is adjacent to a soldier, report to them.
         
@@ -2553,9 +3784,13 @@ class GameLogic:
                     if criminal in self.state.characters:
                         self.report_crime_to(char, other, crime_memory)
 
-    # =========================================================================
-    # ONGOING ACTIONS (Player timed actions)
-    # =========================================================================
+
+
+    # =============================================================================
+    # ONGOING ACTIONS
+    # =============================================================================
+    # Timed player actions (harvest, plant, chop)
+    # =============================================================================
 
     def update_ongoing_actions(self):
         """Update ongoing actions and complete them when finished."""
@@ -2597,10 +3832,504 @@ class GameLogic:
             # Clear the ongoing action
             player.cancel_ongoing_action()
 
-    # =========================================================================
     # MOVEMENT SYSTEM
-    # =========================================================================
     
+
+    # =============================================================================
+    # MOVEMENT SYSTEM
+    # =============================================================================
+    # Position updates, velocity, collision, and squeeze behavior
+    # =============================================================================
+
+    def _should_npc_sprint(self, char):
+        """
+        Determine if an NPC should sprint based on their current intent/situation.
+        
+        NPCs sprint when:
+        - Fleeing from danger (being attacked, saw crime, etc.)
+        - Chasing/attacking a target (soldiers pursuing criminals, fighting back)
+        - Responding urgently (soldier responding to crime report)
+        
+        NPCs do NOT sprint when:
+        - Idling/wandering
+        - Patrolling (soldiers walk their routes)
+        - Going about normal business (buying food, farming, etc.)
+        
+        Returns:
+            True if NPC should sprint, False otherwise
+        """
+        intent = char.intent
+        if not intent:
+            return False
+        
+        action = intent.get('action')
+        reason = intent.get('reason', '')
+        
+        # Sprint when fleeing from any danger
+        if action == 'flee':
+            return True
+        
+        # Sprint when attacking (chasing a target)
+        if action == 'attack':
+            # Soldiers chasing criminals should sprint
+            if reason in ('law_enforcement', 'pursuing_criminal'):
+                return True
+            # Fighting back against attacker - sprint to engage
+            if reason in ('self_defense', 'retaliation'):
+                return True
+            # High-confidence NPCs confronting criminals
+            if reason == 'confronting_criminal':
+                return True
+        
+        # Sprint when actively following an urgent target
+        if action == 'follow':
+            # Following to help or confront
+            if reason in ('help_victim', 'confronting', 'responding'):
+                return True
+        
+        # Default: don't sprint
+        return False
+    
+
+    def _get_effective_goal_and_transition(self, char, goal_world, goal_zone):
+        """
+        Convert world-coordinate goal to local coordinates for movement,
+        and determine if a zone transition is needed.
+        
+        Args:
+            char: The character moving
+            goal_world: (x, y) in world coordinates
+            goal_zone: Zone the goal is in (None for exterior)
+        
+        Returns:
+            (effective_goal_local, transition)
+            - effective_goal_local: (x, y) in char's current coordinate space
+            - transition: None, 'need_to_enter', or 'need_to_exit'
+        """
+        char_zone = char.zone
+        
+        # Same zone - move directly (convert to local if needed)
+        if char_zone == goal_zone:
+            if char_zone is None:
+                # Both exterior - world coords are local coords
+                return goal_world, None
+            else:
+                # Both in same interior - convert world to interior local coords
+                interior = self.state.interiors.get_interior(char_zone)
+                if interior:
+                    local_x, local_y = interior.world_to_interior(goal_world[0], goal_world[1])
+                    return (local_x, local_y), None
+                return goal_world, None
+        
+        # Character outside, goal inside - path to exterior door first
+        if char_zone is None and goal_zone is not None:
+            interior = self.state.interiors.get_interior(goal_zone)
+            if interior:
+                door_pos = interior.get_exit_position()  # world coords of exterior door
+                return door_pos, 'need_to_enter'
+        
+        # Character inside, goal outside or different interior - path to interior door to exit
+        if char_zone is not None:
+            interior = self.state.interiors.get_interior(char_zone)
+            if interior:
+                door_local = interior.get_entry_position()  # interior local coords
+                return door_local, 'need_to_exit'
+        
+        # Fallback
+        return goal_world, None
+    
+
+    def _do_enter_interior(self, char, interior):
+        """Handle character entering an interior."""
+        char.enter_interior(interior)
+        self.log_zone_transition(char, interior.name, entering=True)
+
+
+    def _do_exit_interior(self, char, interior):
+        """Handle character exiting an interior."""
+        char.exit_interior(interior)
+
+        # If exit position is blocked (another char just exited), find nearby spot
+        if self.state.is_position_blocked(char.prevailing_x, char.prevailing_y, exclude_char=char):
+            exit_x, exit_y = interior.get_exit_position()
+            # Try offsets around exit point
+            for offset in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5), (0.5, 0.5), (-0.5, -0.5)]:
+                test_x = exit_x + offset[0]
+                test_y = exit_y + offset[1]
+                if not self.state.is_position_blocked(test_x, test_y, exclude_char=char):
+                    char.prevailing_x = test_x
+                    char.prevailing_y = test_y
+                    break
+
+        self.log_zone_transition(char, interior.name, entering=False)
+    
+
+    def update_npc_positions(self, dt):
+        """Update NPC positions based on velocity. Called every frame for smooth movement.
+        
+        Implements squeeze behavior: when blocked for more than SQUEEZE_THRESHOLD_TICKS,
+        characters will slide perpendicular to their movement direction to squeeze past obstacles.
+        
+        Uses prevailing coords (local when in interior, world when in exterior) since
+        velocity is calculated in that coordinate space.
+        
+        Note: Stamina drain/regen is handled separately in gui._game_loop using real-time
+        to ensure consistent feel regardless of game speed.
+        """
+        npcs = [c for c in self.state.characters if not c.is_player]
+        
+        for char in npcs:
+            vx = char.get('vx', 0.0)
+            vy = char.get('vy', 0.0)
+            
+            if vx == 0.0 and vy == 0.0:
+                # Not moving - reset squeeze state
+                char['blocked_ticks'] = 0
+                char['squeeze_direction'] = 0
+                continue
+            
+            # Use prevailing coords (local when in interior, world when exterior)
+            # Velocity is calculated in this space, so movement must be too
+            curr_x = char.prevailing_x
+            curr_y = char.prevailing_y
+            
+            # Calculate base new position
+            new_x = curr_x + vx * dt
+            new_y = curr_y + vy * dt
+            
+            # Keep within bounds - different for interior vs exterior
+            if char.zone is None:
+                # Exterior - use world SIZE
+                new_x = max(0, min(SIZE, new_x))
+                new_y = max(0, min(SIZE, new_y))
+            else:
+                # Interior - use interior dimensions
+                interior = self.state.interiors.get_interior(char.zone)
+                if interior:
+                    new_x = max(0.3, min(interior.width - 0.3, new_x))
+                    new_y = max(0.3, min(interior.height - 0.3, new_y))
+            
+            # Check for collision with other characters
+            # is_position_blocked handles zone-aware collision checking
+            if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
+                # Clear path - move normally
+                char.prevailing_x = new_x
+                char.prevailing_y = new_y
+                char['blocked_ticks'] = 0
+                char['squeeze_direction'] = 0
+            else:
+                # Blocked - try to find a way through
+                moved = self._try_squeeze_movement(char, vx, vy, new_x, new_y, dt)
+    
+
+    def update_arrows(self, dt):
+        """Update arrow projectile positions and check for hits.
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        import time
+        from constants import ARROW_STUCK_DURATION
+        
+        _bow = ITEMS["bow"]
+        arrows_to_remove = []
+        
+        for arrow in self.state.arrows:
+            # Handle stuck arrows (waiting to disappear)
+            if arrow.get('stuck'):
+                if time.time() - arrow['stuck_time'] >= ARROW_STUCK_DURATION:
+                    arrows_to_remove.append(arrow)
+                continue
+            
+            # Get per-arrow speed and range (with fallback to bow defaults)
+            arrow_speed = arrow.get('speed', _bow["max_speed"])
+            arrow_max_range = arrow.get('max_range', _bow["range"])
+            
+            # Move arrow
+            arrow['x'] += arrow['dx'] * arrow_speed * dt
+            arrow['y'] += arrow['dy'] * arrow_speed * dt
+            arrow['distance'] += arrow_speed * dt
+            
+            # Check if exceeded max range - mark as stuck instead of removing
+            if arrow['distance'] >= arrow_max_range:
+                arrow['stuck'] = True
+                arrow['stuck_time'] = time.time()
+                continue
+            
+            # Check for collision with obstacles (trees, houses, etc.)
+            # Use check_characters=False since we handle character hits separately
+            if self.state.is_position_blocked(arrow['x'], arrow['y'], 
+                                               zone=arrow['zone'],
+                                               check_characters=False):
+                arrow['stuck'] = True
+                arrow['stuck_time'] = time.time()
+                continue
+            
+            # Check for hits on characters
+            hit_char = self._check_arrow_hit(arrow)
+            if hit_char:
+                # Deal damage
+                self._apply_arrow_damage(arrow, hit_char)
+                arrows_to_remove.append(arrow)
+                continue
+        
+        # Remove arrows that hit or expired
+        for arrow in arrows_to_remove:
+            if arrow in self.state.arrows:
+                self.state.arrows.remove(arrow)
+    
+
+    def _check_arrow_hit(self, arrow):
+        """Check if arrow hit any character.
+        
+        Returns:
+            Character that was hit, or None
+        """
+        for char in self.state.characters:
+            # Don't hit the owner
+            if char is arrow['owner']:
+                continue
+            
+            # Must be in same zone
+            if char.zone != arrow['zone']:
+                continue
+            
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            # Check distance to character center
+            if arrow['zone']:
+                char_x = char.prevailing_x
+                char_y = char.prevailing_y
+            else:
+                char_x = char.x
+                char_y = char.y
+            
+            dx = arrow['x'] - char_x
+            dy = arrow['y'] - char_y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            # Hit if within character collision radius (use a slightly larger hitbox)
+            if dist < 0.4:
+                return char
+        
+        return None
+    
+
+    def _apply_arrow_damage(self, arrow, target):
+        """Apply arrow damage to a target character with full aggro/witness logic."""
+        owner = arrow['owner']
+        owner_name = owner.get_display_name() if owner else "Arrow"
+        target_name = target.get_display_name()
+        
+        # Apply damage (same as melee: 2-5)
+        damage = random.randint(2, 5)
+        target.health -= damage
+        self.state.log_action(f"{owner_name}'s arrow hits {target_name} for {damage}! HP: {target.health}")
+        
+        # Set hit flash
+        target['hit_flash_until'] = self.state.ticks + 2
+        
+        # Clear face_target and intent - being hit interrupts current behavior
+        target['face_target'] = None
+        if target.intent and target.intent.get('reason') == 'bystander':
+            target.clear_intent()
+        
+        # Target remembers being attacked (if owner exists)
+        if owner:
+            self.remember_attack(target, owner, damage)
+            
+            # Check criminal status via memories
+            attacker_is_criminal = self.is_known_criminal(owner)
+            target_was_criminal = self.is_known_criminal(target)
+
+            # If attacking an innocent, this is a crime
+            if not target_was_criminal:
+                # Attacker records they committed a crime (only once)
+                if not attacker_is_criminal:
+                    owner.add_memory('committed_crime', owner, self.state.ticks,
+                                       location=(owner.x, owner.y),
+                                       intensity=CRIME_INTENSITY_ASSAULT,
+                                       source='self',
+                                       crime_type='assault', victim=target)
+                    attacker_is_criminal = True
+
+                # Witness EVERY attack against an innocent (not just first)
+                if target.health > 0:
+                    self.witness_crime(owner, target, 'assault')
+            
+            # Handle death
+            if target.health <= 0:
+                if not attacker_is_criminal and target_was_criminal:
+                    self.state.log_action(f"{owner_name} killed {target_name} with an arrow (justified)")
+                else:
+                    # Murder - record and witness
+                    owner.add_memory('committed_crime', owner, self.state.ticks,
+                                       location=(owner.x, owner.y),
+                                       intensity=CRIME_INTENSITY_MURDER,
+                                       source='self',
+                                       crime_type='murder', victim=target)
+                    self.witness_crime(owner, target, 'murder')
+                
+                # Transfer items
+                owner.transfer_all_items_from(target)
+            
+            # Broadcast violence to nearby characters
+            self.broadcast_violence(owner, target)
+        else:
+            # No owner - just handle death
+            if target.health <= 0:
+                self.state.log_action(f"{target_name} was killed by an arrow!")
+    
+
+    def _try_squeeze_movement(self, char, vx, vy, new_x, new_y, dt):
+        """Try to squeeze past an obstacle when blocked.
+        
+        Strategy:
+        1. First, try simple axis-aligned sliding (might work for glancing collisions)
+        2. If blocked for 3+ ticks, pick a perpendicular direction and slide that way
+        3. Keep sliding in that direction until we make forward progress or get unstuck
+        
+        Uses prevailing coords (local when in interior, world when in exterior).
+        
+        Returns True if character moved, False if completely stuck.
+        """
+        moved = False
+        made_forward_progress = False
+        
+        # Use prevailing coords - match coordinate space of new_x/new_y
+        curr_x = char.prevailing_x
+        curr_y = char.prevailing_y
+        
+        # Try simple axis-aligned sliding first (handles glancing collisions)
+        # Only try if we're actually moving in that direction
+        if abs(vx) >= abs(vy):
+            # Moving mostly horizontal - try X only first
+            if abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
+                char.prevailing_x = new_x
+                moved = True
+                made_forward_progress = True
+            # Then try Y if we have Y velocity
+            elif abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
+                char.prevailing_y = new_y
+                moved = True
+        else:
+            # Moving mostly vertical - try Y only first
+            if abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
+                char.prevailing_y = new_y
+                moved = True
+                made_forward_progress = True
+            # Then try X if we have X velocity
+            elif abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
+                char.prevailing_x = new_x
+                moved = True
+        
+        if made_forward_progress:
+            # Made actual forward progress - reset squeeze state
+            char['blocked_ticks'] = 0
+            char['squeeze_direction'] = 0
+            return True
+        
+        # Still blocked on primary axis - increment counter
+        char['blocked_ticks'] = char.get('blocked_ticks', 0) + 1
+        
+        # After threshold OR if already squeezing, continue squeeze behavior
+        if char['blocked_ticks'] >= SQUEEZE_THRESHOLD_TICKS or char.get('squeeze_direction', 0) != 0:
+            # Pick a squeeze direction if we don't have one
+            if char.get('squeeze_direction', 0) == 0:
+                # Choose direction based on which way has more space
+                # or randomly if equal
+                char['squeeze_direction'] = self._choose_squeeze_direction(char, vx, vy)
+            
+            squeeze_dir = char['squeeze_direction']
+            slide_speed = MOVEMENT_SPEED * SQUEEZE_SLIDE_SPEED * dt
+            
+            # Calculate slide movement perpendicular to travel direction
+            if abs(vx) > abs(vy):
+                # Moving horizontal, slide vertical
+                slide_y = curr_y + squeeze_dir * slide_speed
+                # Try to move: slide perpendicular + forward progress
+                if not self.state.is_position_blocked(new_x, slide_y, exclude_char=char):
+                    char.prevailing_x = new_x
+                    char.prevailing_y = slide_y
+                    char['blocked_ticks'] = 0
+                    char['squeeze_direction'] = 0
+                    return True
+                # Try just sliding perpendicular
+                elif not self.state.is_position_blocked(curr_x, slide_y, exclude_char=char):
+                    char.prevailing_y = slide_y
+                    return True
+                else:
+                    # This direction is blocked, try the other way
+                    char['squeeze_direction'] = -squeeze_dir
+            else:
+                # Moving vertical, slide horizontal
+                slide_x = curr_x + squeeze_dir * slide_speed
+                # Try to move: slide perpendicular + forward progress
+                if not self.state.is_position_blocked(slide_x, new_y, exclude_char=char):
+                    char.prevailing_x = slide_x
+                    char.prevailing_y = new_y
+                    char['blocked_ticks'] = 0
+                    char['squeeze_direction'] = 0
+                    return True
+                # Try just sliding perpendicular
+                elif not self.state.is_position_blocked(slide_x, curr_y, exclude_char=char):
+                    char.prevailing_x = slide_x
+                    return True
+                else:
+                    # This direction is blocked, try the other way
+                    char['squeeze_direction'] = -squeeze_dir
+        
+        return False
+    
+
+    def _choose_squeeze_direction(self, char, vx, vy):
+        """Choose which direction to squeeze (perpendicular to movement).
+        Picks the direction with more open space, or random if equal.
+        Returns -1 or 1.
+        """
+        # Use prevailing coords for interior/exterior compatibility
+        curr_x = char.prevailing_x
+        curr_y = char.prevailing_y
+        
+        # Check space in both perpendicular directions
+        check_dist = 1.0  # How far to look
+        
+        if abs(vx) > abs(vy):
+            # Moving horizontal, check vertical space
+            space_pos = 0
+            space_neg = 0
+            for d in [0.3, 0.6, 1.0]:
+                if not self.state.is_position_blocked(curr_x, curr_y + d, exclude_char=char):
+                    space_pos += 1
+                if not self.state.is_position_blocked(curr_x, curr_y - d, exclude_char=char):
+                    space_neg += 1
+        else:
+            # Moving vertical, check horizontal space
+            space_pos = 0
+            space_neg = 0
+            for d in [0.3, 0.6, 1.0]:
+                if not self.state.is_position_blocked(curr_x + d, curr_y, exclude_char=char):
+                    space_pos += 1
+                if not self.state.is_position_blocked(curr_x - d, curr_y, exclude_char=char):
+                    space_neg += 1
+        
+        if space_pos > space_neg:
+            return 1
+        elif space_neg > space_pos:
+            return -1
+        else:
+            # Equal space - pick randomly
+            return random.choice([-1, 1])
+
+
+    # =============================================================================
+    # PATHFINDING & NAVIGATION
+    # =============================================================================
+    # Goal selection, pathfinding, and AI navigation
+    # =============================================================================
+
     def _process_npc_movement(self):
         """
         Process all NPC decisions and movement for this tick.
@@ -2749,581 +4478,14 @@ class GameLogic:
         for char in self.state.characters:
             self.try_report_crimes_to_soldier(char)
     
-    def _should_npc_sprint(self, char):
-        """
-        Determine if an NPC should sprint based on their current intent/situation.
-        
-        NPCs sprint when:
-        - Fleeing from danger (being attacked, saw crime, etc.)
-        - Chasing/attacking a target (soldiers pursuing criminals, fighting back)
-        - Responding urgently (soldier responding to crime report)
-        
-        NPCs do NOT sprint when:
-        - Idling/wandering
-        - Patrolling (soldiers walk their routes)
-        - Going about normal business (buying food, farming, etc.)
-        
-        Returns:
-            True if NPC should sprint, False otherwise
-        """
-        intent = char.intent
-        if not intent:
-            return False
-        
-        action = intent.get('action')
-        reason = intent.get('reason', '')
-        
-        # Sprint when fleeing from any danger
-        if action == 'flee':
-            return True
-        
-        # Sprint when attacking (chasing a target)
-        if action == 'attack':
-            # Soldiers chasing criminals should sprint
-            if reason in ('law_enforcement', 'pursuing_criminal'):
-                return True
-            # Fighting back against attacker - sprint to engage
-            if reason in ('self_defense', 'retaliation'):
-                return True
-            # High-confidence NPCs confronting criminals
-            if reason == 'confronting_criminal':
-                return True
-        
-        # Sprint when actively following an urgent target
-        if action == 'follow':
-            # Following to help or confront
-            if reason in ('help_victim', 'confronting', 'responding'):
-                return True
-        
-        # Default: don't sprint
-        return False
-    
-    def _get_effective_goal_and_transition(self, char, goal_world, goal_zone):
-        """
-        Convert world-coordinate goal to local coordinates for movement,
-        and determine if a zone transition is needed.
-        
-        Args:
-            char: The character moving
-            goal_world: (x, y) in world coordinates
-            goal_zone: Zone the goal is in (None for exterior)
-        
-        Returns:
-            (effective_goal_local, transition)
-            - effective_goal_local: (x, y) in char's current coordinate space
-            - transition: None, 'need_to_enter', or 'need_to_exit'
-        """
-        char_zone = char.zone
-        
-        # Same zone - move directly (convert to local if needed)
-        if char_zone == goal_zone:
-            if char_zone is None:
-                # Both exterior - world coords are local coords
-                return goal_world, None
-            else:
-                # Both in same interior - convert world to interior local coords
-                interior = self.state.interiors.get_interior(char_zone)
-                if interior:
-                    local_x, local_y = interior.world_to_interior(goal_world[0], goal_world[1])
-                    return (local_x, local_y), None
-                return goal_world, None
-        
-        # Character outside, goal inside - path to exterior door first
-        if char_zone is None and goal_zone is not None:
-            interior = self.state.interiors.get_interior(goal_zone)
-            if interior:
-                door_pos = interior.get_exit_position()  # world coords of exterior door
-                return door_pos, 'need_to_enter'
-        
-        # Character inside, goal outside or different interior - path to interior door to exit
-        if char_zone is not None:
-            interior = self.state.interiors.get_interior(char_zone)
-            if interior:
-                door_local = interior.get_entry_position()  # interior local coords
-                return door_local, 'need_to_exit'
-        
-        # Fallback
-        return goal_world, None
-    
-    def _do_enter_interior(self, char, interior):
-        """Handle character entering an interior."""
-        char.enter_interior(interior)
-        self.log_zone_transition(char, interior.name, entering=True)
 
-    def _do_exit_interior(self, char, interior):
-        """Handle character exiting an interior."""
-        char.exit_interior(interior)
-
-        # If exit position is blocked (another char just exited), find nearby spot
-        if self.state.is_position_blocked(char.prevailing_x, char.prevailing_y, exclude_char=char):
-            exit_x, exit_y = interior.get_exit_position()
-            # Try offsets around exit point
-            for offset in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5), (0.5, 0.5), (-0.5, -0.5)]:
-                test_x = exit_x + offset[0]
-                test_y = exit_y + offset[1]
-                if not self.state.is_position_blocked(test_x, test_y, exclude_char=char):
-                    char.prevailing_x = test_x
-                    char.prevailing_y = test_y
-                    break
-
-        self.log_zone_transition(char, interior.name, entering=False)
-    
-    def update_npc_positions(self, dt):
-        """Update NPC positions based on velocity. Called every frame for smooth movement.
-        
-        Implements squeeze behavior: when blocked for more than SQUEEZE_THRESHOLD_TICKS,
-        characters will slide perpendicular to their movement direction to squeeze past obstacles.
-        
-        Uses prevailing coords (local when in interior, world when in exterior) since
-        velocity is calculated in that coordinate space.
-        
-        Note: Stamina drain/regen is handled separately in gui._game_loop using real-time
-        to ensure consistent feel regardless of game speed.
-        """
-        npcs = [c for c in self.state.characters if not c.is_player]
-        
-        for char in npcs:
-            vx = char.get('vx', 0.0)
-            vy = char.get('vy', 0.0)
-            
-            if vx == 0.0 and vy == 0.0:
-                # Not moving - reset squeeze state
-                char['blocked_ticks'] = 0
-                char['squeeze_direction'] = 0
-                continue
-            
-            # Use prevailing coords (local when in interior, world when exterior)
-            # Velocity is calculated in this space, so movement must be too
-            curr_x = char.prevailing_x
-            curr_y = char.prevailing_y
-            
-            # Calculate base new position
-            new_x = curr_x + vx * dt
-            new_y = curr_y + vy * dt
-            
-            # Keep within bounds - different for interior vs exterior
-            if char.zone is None:
-                # Exterior - use world SIZE
-                new_x = max(0, min(SIZE, new_x))
-                new_y = max(0, min(SIZE, new_y))
-            else:
-                # Interior - use interior dimensions
-                interior = self.state.interiors.get_interior(char.zone)
-                if interior:
-                    new_x = max(0.3, min(interior.width - 0.3, new_x))
-                    new_y = max(0.3, min(interior.height - 0.3, new_y))
-            
-            # Check for collision with other characters
-            # is_position_blocked handles zone-aware collision checking
-            if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
-                # Clear path - move normally
-                char.prevailing_x = new_x
-                char.prevailing_y = new_y
-                char['blocked_ticks'] = 0
-                char['squeeze_direction'] = 0
-            else:
-                # Blocked - try to find a way through
-                moved = self._try_squeeze_movement(char, vx, vy, new_x, new_y, dt)
-    
-    def update_arrows(self, dt):
-        """Update arrow projectile positions and check for hits.
-        
-        Args:
-            dt: Delta time in seconds
-        """
-        import time
-        from constants import ARROW_STUCK_DURATION
-        
-        _bow = ITEMS["bow"]
-        arrows_to_remove = []
-        
-        for arrow in self.state.arrows:
-            # Handle stuck arrows (waiting to disappear)
-            if arrow.get('stuck'):
-                if time.time() - arrow['stuck_time'] >= ARROW_STUCK_DURATION:
-                    arrows_to_remove.append(arrow)
-                continue
-            
-            # Get per-arrow speed and range (with fallback to bow defaults)
-            arrow_speed = arrow.get('speed', _bow["max_speed"])
-            arrow_max_range = arrow.get('max_range', _bow["range"])
-            
-            # Move arrow
-            arrow['x'] += arrow['dx'] * arrow_speed * dt
-            arrow['y'] += arrow['dy'] * arrow_speed * dt
-            arrow['distance'] += arrow_speed * dt
-            
-            # Check if exceeded max range - mark as stuck instead of removing
-            if arrow['distance'] >= arrow_max_range:
-                arrow['stuck'] = True
-                arrow['stuck_time'] = time.time()
-                continue
-            
-            # Check for collision with obstacles (trees, houses, etc.)
-            # Use check_characters=False since we handle character hits separately
-            if self.state.is_position_blocked(arrow['x'], arrow['y'], 
-                                               zone=arrow['zone'],
-                                               check_characters=False):
-                arrow['stuck'] = True
-                arrow['stuck_time'] = time.time()
-                continue
-            
-            # Check for hits on characters
-            hit_char = self._check_arrow_hit(arrow)
-            if hit_char:
-                # Deal damage
-                self._apply_arrow_damage(arrow, hit_char)
-                arrows_to_remove.append(arrow)
-                continue
-        
-        # Remove arrows that hit or expired
-        for arrow in arrows_to_remove:
-            if arrow in self.state.arrows:
-                self.state.arrows.remove(arrow)
-    
-    def _check_arrow_hit(self, arrow):
-        """Check if arrow hit any character.
-        
-        Returns:
-            Character that was hit, or None
-        """
-        for char in self.state.characters:
-            # Don't hit the owner
-            if char is arrow['owner']:
-                continue
-            
-            # Must be in same zone
-            if char.zone != arrow['zone']:
-                continue
-            
-            # Skip dead characters
-            if char.get('health', 100) <= 0:
-                continue
-            
-            # Check distance to character center
-            if arrow['zone']:
-                char_x = char.prevailing_x
-                char_y = char.prevailing_y
-            else:
-                char_x = char.x
-                char_y = char.y
-            
-            dx = arrow['x'] - char_x
-            dy = arrow['y'] - char_y
-            dist = math.sqrt(dx * dx + dy * dy)
-            
-            # Hit if within character collision radius (use a slightly larger hitbox)
-            if dist < 0.4:
-                return char
-        
-        return None
-    
-    def _apply_arrow_damage(self, arrow, target):
-        """Apply arrow damage to a target character with full aggro/witness logic."""
-        owner = arrow['owner']
-        owner_name = owner.get_display_name() if owner else "Arrow"
-        target_name = target.get_display_name()
-        
-        # Apply damage (same as melee: 2-5)
-        damage = random.randint(2, 5)
-        target.health -= damage
-        self.state.log_action(f"{owner_name}'s arrow hits {target_name} for {damage}! HP: {target.health}")
-        
-        # Set hit flash
-        target['hit_flash_until'] = self.state.ticks + 2
-        
-        # Clear face_target and intent - being hit interrupts current behavior
-        target['face_target'] = None
-        if target.intent and target.intent.get('reason') == 'bystander':
-            target.clear_intent()
-        
-        # Target remembers being attacked (if owner exists)
-        if owner:
-            self.remember_attack(target, owner, damage)
-            
-            # Check criminal status via memories
-            attacker_is_criminal = self.is_known_criminal(owner)
-            target_was_criminal = self.is_known_criminal(target)
-
-            # If attacking an innocent, this is a crime
-            if not target_was_criminal:
-                # Attacker records they committed a crime (only once)
-                if not attacker_is_criminal:
-                    owner.add_memory('committed_crime', owner, self.state.ticks,
-                                       location=(owner.x, owner.y),
-                                       intensity=CRIME_INTENSITY_ASSAULT,
-                                       source='self',
-                                       crime_type='assault', victim=target)
-                    attacker_is_criminal = True
-
-                # Witness EVERY attack against an innocent (not just first)
-                if target.health > 0:
-                    self.witness_crime(owner, target, 'assault')
-            
-            # Handle death
-            if target.health <= 0:
-                if not attacker_is_criminal and target_was_criminal:
-                    self.state.log_action(f"{owner_name} killed {target_name} with an arrow (justified)")
-                else:
-                    # Murder - record and witness
-                    owner.add_memory('committed_crime', owner, self.state.ticks,
-                                       location=(owner.x, owner.y),
-                                       intensity=CRIME_INTENSITY_MURDER,
-                                       source='self',
-                                       crime_type='murder', victim=target)
-                    self.witness_crime(owner, target, 'murder')
-                
-                # Transfer items
-                owner.transfer_all_items_from(target)
-            
-            # Broadcast violence to nearby characters
-            self.broadcast_violence(owner, target)
-        else:
-            # No owner - just handle death
-            if target.health <= 0:
-                self.state.log_action(f"{target_name} was killed by an arrow!")
-    
-    def _try_squeeze_movement(self, char, vx, vy, new_x, new_y, dt):
-        """Try to squeeze past an obstacle when blocked.
-        
-        Strategy:
-        1. First, try simple axis-aligned sliding (might work for glancing collisions)
-        2. If blocked for 3+ ticks, pick a perpendicular direction and slide that way
-        3. Keep sliding in that direction until we make forward progress or get unstuck
-        
-        Uses prevailing coords (local when in interior, world when in exterior).
-        
-        Returns True if character moved, False if completely stuck.
-        """
-        moved = False
-        made_forward_progress = False
-        
-        # Use prevailing coords - match coordinate space of new_x/new_y
-        curr_x = char.prevailing_x
-        curr_y = char.prevailing_y
-        
-        # Try simple axis-aligned sliding first (handles glancing collisions)
-        # Only try if we're actually moving in that direction
-        if abs(vx) >= abs(vy):
-            # Moving mostly horizontal - try X only first
-            if abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
-                char.prevailing_x = new_x
-                moved = True
-                made_forward_progress = True
-            # Then try Y if we have Y velocity
-            elif abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
-                char.prevailing_y = new_y
-                moved = True
-        else:
-            # Moving mostly vertical - try Y only first
-            if abs(vy) > 0.01 and not self.state.is_position_blocked(curr_x, new_y, exclude_char=char):
-                char.prevailing_y = new_y
-                moved = True
-                made_forward_progress = True
-            # Then try X if we have X velocity
-            elif abs(vx) > 0.01 and not self.state.is_position_blocked(new_x, curr_y, exclude_char=char):
-                char.prevailing_x = new_x
-                moved = True
-        
-        if made_forward_progress:
-            # Made actual forward progress - reset squeeze state
-            char['blocked_ticks'] = 0
-            char['squeeze_direction'] = 0
-            return True
-        
-        # Still blocked on primary axis - increment counter
-        char['blocked_ticks'] = char.get('blocked_ticks', 0) + 1
-        
-        # After threshold OR if already squeezing, continue squeeze behavior
-        if char['blocked_ticks'] >= SQUEEZE_THRESHOLD_TICKS or char.get('squeeze_direction', 0) != 0:
-            # Pick a squeeze direction if we don't have one
-            if char.get('squeeze_direction', 0) == 0:
-                # Choose direction based on which way has more space
-                # or randomly if equal
-                char['squeeze_direction'] = self._choose_squeeze_direction(char, vx, vy)
-            
-            squeeze_dir = char['squeeze_direction']
-            slide_speed = MOVEMENT_SPEED * SQUEEZE_SLIDE_SPEED * dt
-            
-            # Calculate slide movement perpendicular to travel direction
-            if abs(vx) > abs(vy):
-                # Moving horizontal, slide vertical
-                slide_y = curr_y + squeeze_dir * slide_speed
-                # Try to move: slide perpendicular + forward progress
-                if not self.state.is_position_blocked(new_x, slide_y, exclude_char=char):
-                    char.prevailing_x = new_x
-                    char.prevailing_y = slide_y
-                    char['blocked_ticks'] = 0
-                    char['squeeze_direction'] = 0
-                    return True
-                # Try just sliding perpendicular
-                elif not self.state.is_position_blocked(curr_x, slide_y, exclude_char=char):
-                    char.prevailing_y = slide_y
-                    return True
-                else:
-                    # This direction is blocked, try the other way
-                    char['squeeze_direction'] = -squeeze_dir
-            else:
-                # Moving vertical, slide horizontal
-                slide_x = curr_x + squeeze_dir * slide_speed
-                # Try to move: slide perpendicular + forward progress
-                if not self.state.is_position_blocked(slide_x, new_y, exclude_char=char):
-                    char.prevailing_x = slide_x
-                    char.prevailing_y = new_y
-                    char['blocked_ticks'] = 0
-                    char['squeeze_direction'] = 0
-                    return True
-                # Try just sliding perpendicular
-                elif not self.state.is_position_blocked(slide_x, curr_y, exclude_char=char):
-                    char.prevailing_x = slide_x
-                    return True
-                else:
-                    # This direction is blocked, try the other way
-                    char['squeeze_direction'] = -squeeze_dir
-        
-        return False
-    
-    def _choose_squeeze_direction(self, char, vx, vy):
-        """Choose which direction to squeeze (perpendicular to movement).
-        Picks the direction with more open space, or random if equal.
-        Returns -1 or 1.
-        """
-        # Use prevailing coords for interior/exterior compatibility
-        curr_x = char.prevailing_x
-        curr_y = char.prevailing_y
-        
-        # Check space in both perpendicular directions
-        check_dist = 1.0  # How far to look
-        
-        if abs(vx) > abs(vy):
-            # Moving horizontal, check vertical space
-            space_pos = 0
-            space_neg = 0
-            for d in [0.3, 0.6, 1.0]:
-                if not self.state.is_position_blocked(curr_x, curr_y + d, exclude_char=char):
-                    space_pos += 1
-                if not self.state.is_position_blocked(curr_x, curr_y - d, exclude_char=char):
-                    space_neg += 1
-        else:
-            # Moving vertical, check horizontal space
-            space_pos = 0
-            space_neg = 0
-            for d in [0.3, 0.6, 1.0]:
-                if not self.state.is_position_blocked(curr_x + d, curr_y, exclude_char=char):
-                    space_pos += 1
-                if not self.state.is_position_blocked(curr_x - d, curr_y, exclude_char=char):
-                    space_neg += 1
-        
-        if space_pos > space_neg:
-            return 1
-        elif space_neg > space_pos:
-            return -1
-        else:
-            # Equal space - pick randomly
-            return random.choice([-1, 1])
-
-    def _update_facing_from_velocity(self, char):
-        """Update character's facing direction based on velocity.
-        
-        If char has a 'face_target' set (another character), face them instead
-        of the movement direction. This allows backpedaling.
-        """
-        # Check for face_target override first
-        face_target = char.get('face_target')
-        if face_target and face_target in self.state.characters:
-            self._face_toward_character(char, face_target)
-            return
-        
-        vx = char.get('vx', 0.0)
-        vy = char.get('vy', 0.0)
-        
-        if abs(vx) < 0.01 and abs(vy) < 0.01:
-            return  # Not moving
-        
-        # Determine primary direction
-        if abs(vx) > abs(vy) * 2:
-            # Mostly horizontal
-            char['facing'] = 'right' if vx > 0 else 'left'
-        elif abs(vy) > abs(vx) * 2:
-            # Mostly vertical
-            char['facing'] = 'down' if vy > 0 else 'up'
-        else:
-            # Diagonal
-            if vx > 0 and vy < 0:
-                char['facing'] = 'up-right'
-            elif vx > 0 and vy > 0:
-                char['facing'] = 'down-right'
-            elif vx < 0 and vy < 0:
-                char['facing'] = 'up-left'
-            else:
-                char['facing'] = 'down-left'
-    
-    def _update_combat_tracking_velocity(self, char, target):
-        """Update velocity to track a combat target smoothly.
-        
-        This bypasses the goal system to provide smooth pursuit of a moving target.
-        - If too far: move toward target (to MELEE_ATTACK_DISTANCE), sprint if able
-        - If too close: backpedal away (to just outside COMBAT_SPACE)
-        - If in sweet spot: hold position
-        Always face the target.
-        """
-        # Calculate distance and direction
-        if char.zone == target.zone and char.zone is not None:
-            dx = target.prevailing_x - char.prevailing_x
-            dy = target.prevailing_y - char.prevailing_y
-        else:
-            dx = target.x - char.x
-            dy = target.y - char.y
-        
-        dist = math.sqrt(dx * dx + dy * dy)
-        
-        # Always face the target
-        self._face_toward_character(char, target)
-        
-        # Avoid division by zero
-        if dist < 0.01:
-            char.vx = 0.0
-            char.vy = 0.0
-            char.is_sprinting = False
-            return
-        
-        # Normalize direction
-        nx = dx / dist
-        ny = dy / dist
-        
-        # Determine movement based on distance
-        if dist > MELEE_ATTACK_DISTANCE:
-            # Too far - chase the target
-            # Only sprint if target is significantly beyond attack range
-            sprint_threshold = MELEE_ATTACK_DISTANCE + COMBAT_SPRINT_DISTANCE
-            should_sprint = dist > sprint_threshold
-            
-            if should_sprint:
-                can_sprint = char.can_continue_sprint() if char.is_sprinting else char.can_start_sprint()
-                should_sprint = can_sprint
-            
-            char.is_sprinting = should_sprint
-            speed = SPRINT_SPEED if should_sprint else MOVEMENT_SPEED
-            
-            char.vx = nx * speed
-            char.vy = ny * speed
-        elif dist < COMBAT_SPACE:
-            # Too close - backpedal slowly (half speed, away from target)
-            char.is_sprinting = False
-            char.vx = -nx * MOVEMENT_SPEED * 0.5
-            char.vy = -ny * MOVEMENT_SPEED * 0.5
-        else:
-            # In sweet spot - hold position
-            char.vx = 0.0
-            char.vy = 0.0
-            char.is_sprinting = False
-    
     def _get_desired_step(self, char):
         """Calculate the position this NPC wants to move toward.
         Returns the goal position or None if no goal.
         """
         return char.goal
     
+
     def _get_homeless_idle_goal(self, char):
         """Get idle goal for a homeless character - wanders anywhere except farm cells.
         Uses the same state machine as _get_wander_goal but without area constraints.
@@ -3384,6 +4546,7 @@ class GameLogic:
         
         return None
     
+
     def _choose_homeless_destination(self, char):
         """Choose a destination for homeless wandering.
         Picks a random non-farm cell within moderate distance.
@@ -3424,6 +4587,7 @@ class GameLogic:
         
         return (cell[0] + 0.5, cell[1] + 0.5)
     
+
     def _get_flee_goal(self, char, threat):
         """Get a position away from the threat. Returns float position (world coords)."""
         dx = char['x'] - threat['x']
@@ -3440,6 +4604,7 @@ class GameLogic:
             dy = math.sin(angle)
         return (char['x'] + dx * 5.0, char['y'] + dy * 5.0)
     
+
     def _get_interior_flee_goal(self, char, threat, interior):
         """Get a flee position within an interior, respecting walls.
         
@@ -3526,26 +4691,7 @@ class GameLogic:
         exit_x, exit_y = interior.get_exit_position()
         return (exit_x, exit_y, None)
     
-    def _find_camp_spot(self, char):
-        """Find a nearby position where the character can make a camp (outside village).
-        Returns float position (center of cell).
-        """
-        # Try to find nearest valid camp spot
-        best_spot = None
-        best_dist = float('inf')
-        
-        for y in range(SIZE):
-            for x in range(SIZE):
-                if self.can_make_camp_at(x, y) and not self.state.is_occupied(x, y):
-                    # Calculate distance to center of this cell
-                    cx, cy = x + 0.5, y + 0.5
-                    dist = math.sqrt((cx - char['x']) ** 2 + (cy - char['y']) ** 2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_spot = (cx, cy)
-        
-        return best_spot
-    
+
     def _get_wheat_goal(self, char):
         """Get position to move toward for hunger needs. Returns float position.
         
@@ -3599,11 +4745,13 @@ class GameLogic:
                 return (farmer['x'], farmer['y'])
         return None
     
+
     def _get_soldiers_requesting_wheat(self):
         """Get list of soldiers who have requested wheat from the steward."""
         return [c for c in self.state.characters 
                 if c.get('job') == 'Soldier' and c.get('requested_wheat', False)]
     
+
     def _get_wander_goal(self, char, area):
         """Get the current idle destination for this character within the given area.
         Uses a state machine to create natural wandering behavior:
@@ -3693,6 +4841,7 @@ class GameLogic:
         
         return None
     
+
     def _choose_idle_destination(self, char, area, is_village):
         """Choose a destination for idle wandering.
         70% chance to pick a point of interest (corners, center, edges)
@@ -3754,39 +4903,7 @@ class GameLogic:
         
         return None
     
-    def _get_window_facing_at(self, interior, local_x, local_y, threshold=1.0):
-        """Check if position is near a window and return its facing direction.
-        
-        Args:
-            interior: The interior to check
-            local_x, local_y: Position in interior local coords
-            threshold: How close to window to count as "at" it
-            
-        Returns:
-            Window facing direction ('north', 'south', 'east', 'west') or None
-        """
-        if not interior:
-            return None
-        
-        for window in interior.windows:
-            # Distance from character to window position
-            dx = local_x - (window.interior_x + 0.5)
-            dy = local_y - (window.interior_y + 0.5)
-            dist = math.sqrt(dx * dx + dy * dy)
-            
-            if dist < threshold:
-                return window.facing
-        
-        return None
-    
-    def _reset_idle_state(self, char):
-        """Reset idle state when character is no longer idling."""
-        char['idle_state'] = 'choosing'
-        char['idle_destination'] = None
-        char['idle_wait_ticks'] = 0
-        char['idle_is_idle'] = False
-        char['is_patrolling'] = False
-    
+
     def _nearest_in_area(self, char, area, is_village=False):
         """Find the nearest unoccupied cell in an area. Returns float position (cell center).
         Falls back to occupied if none free.
@@ -3817,6 +4934,7 @@ class GameLogic:
         
         return best_free if best_free else best_any
     
+
     def _nearest_ready_farm_cell(self, char, home=None):
         """Find nearest ready farm cell. Returns float position (cell center).
         
@@ -3824,7 +4942,7 @@ class GameLogic:
             char: The character looking for a cell
             home: Filter to only cells owned by this farm area name. If None, searches all.
         """
-        from scenario_world import AREAS
+        from scenario.scenario_world import AREAS
         
         # Check if character is already on a farm cell being worked
         char_cell = (int(char['x']), int(char['y']))
@@ -3857,6 +4975,7 @@ class GameLogic:
                     best = (center_x, center_y)
         return best
     
+
     def _step_toward(self, char, goal_x, goal_y):
         """
         Calculate the best single step toward a goal.
@@ -3963,6 +5082,7 @@ class GameLogic:
         
         return None
     
+
     def _move_toward_point(self, char, point):
         """Move character one step toward a point (used for actions outside main loop)."""
         if point is None:
@@ -3972,36 +5092,21 @@ class GameLogic:
             char['x'] = step[0]
             char['y'] = step[1]
     
+
     def move_toward_character(self, char, target):
         """Move character one step toward another character."""
         if target is None or target not in self.state.characters:
             return
         self._move_toward_point(char, (target['x'], target['y']))
     
-    # =========================================================================
-    # NPC ACTIONS (non-movement)
-    # =========================================================================
     
-    def _do_attack(self, attacker, target):
-        """Execute an attack. Starts attack animation, damage dealt when animation completes."""
-        # Check if can attack (not already animating)
-        if not attacker.can_attack():
-            return
-        
-        # Face the target before attacking
-        self._face_toward_target(attacker, target)
-        
-        # Start attack animation - damage dealt when animation completes
-        # (processed by _process_pending_attacks)
-        attacker.start_attack(target=target)
-        
-        # Record attack tick for cooldown
-        attacker['last_attack_tick'] = self.state.ticks
 
-    # =========================================================================
+    # =============================================================================
     # TICK PROCESSING
-    # =========================================================================
-    
+    # =============================================================================
+    # Game loop tick processing and updates
+    # =============================================================================
+
     def process_tick(self):
         """Process one game tick - updates all game state"""
         self.state.ticks += 1
@@ -4055,6 +5160,7 @@ class GameLogic:
         # Process deaths again to catch combat kills
         self._process_deaths()
     
+
     def _process_deaths(self):
         """Remove dead characters from game and create corpse interactables"""
         from static_interactables import Corpse
@@ -4112,6 +5218,7 @@ class GameLogic:
             # Immediately remove character from game - no more processing
             self.state.remove_character(char)
     
+
     def _process_stamina(self):
         """Process stamina drain/regeneration for all characters (Skyrim-style)."""
         current_tick = self.state.ticks
@@ -4135,6 +5242,7 @@ class GameLogic:
                 # Regenerate stamina when not sprinting
                 char.regenerate_stamina(current_tick)
     
+
     def _process_starvation(self):
         """Process starvation for all characters"""
         for char in self.state.characters:
@@ -4196,100 +5304,7 @@ class GameLogic:
                     char['starvation_health_lost'] = 0
                     char['ticks_starving'] = 0
     
-    def _process_npc_combat_mode(self):
-        """Update combat mode for NPCs based on their intent.
 
-        DELEGATED TO: combat_engagement.update_npc_engagement()
-
-        NPCs enter combat mode when:
-        - Their intent is 'attack'
-        - Their intent is 'flee' (defensive stance)
-
-        NPCs exit combat mode when:
-        - They have no intent or a non-combat intent
-
-        When entering combat mode, NPCs auto-equip their strongest weapon.
-        When exiting combat mode, NPCs unequip weapons.
-
-        Player combat mode is controlled manually via R key.
-        """
-        self.combat_engagement.update_npc_engagement(self.state.characters)
-    
-    def _process_pending_attacks(self):
-        """Process pending attacks when their animations complete.
-        
-        DELEGATED TO: combat_system.process_pending_attacks()
-        
-        Called every tick. Checks all characters for pending attacks and
-        resolves damage when the attack animation has finished.
-        """
-        self.combat_system.process_pending_attacks()
-    
-    def _update_farm_cells(self):
-        """Update all farm cell states"""
-        for cell, data in self.state.farm_cells.items():
-            if data['state'] == 'growing':
-                data['timer'] -= 1
-                if data['timer'] <= 0:
-                    data['state'] = 'ready'
-                    data['timer'] = 0
-        
-        # Process characters standing on farm cells
-        # Only farmers can legitimately harvest - others commit theft
-        # NOTE: Player is skipped here - player uses environment menu for instant harvest/plant
-        cells_being_worked = set()
-        for char in self.state.characters:
-            # Skip dying characters
-            if char.get('health', 100) <= 0:
-                continue
-            
-            # Skip player - player harvests via environment menu
-            if char.is_player:
-                continue
-            
-            # Convert float position to cell coordinates
-            cell = (int(char['x']), int(char['y']))
-            if cell in self.state.farm_cells and cell not in cells_being_worked:
-                data = self.state.farm_cells[cell]
-                
-                # Only farmers can work farm cells without it being theft
-                is_farmer = char.get('job') == 'Farmer'
-                
-                if not is_farmer:
-                    continue  # Non-farmers use try_farm_theft via AI
-                
-                if data['state'] == 'ready':
-                    # Check if can carry more wheat
-                    if not char.can_add_item('wheat', FARM_CELL_YIELD):
-                        continue  # Inventory full, can't harvest
-                    data['state'] = 'harvesting'
-                    data['timer'] = FARM_HARVEST_TIME
-                    data['harvester'] = char  # Track who started harvesting
-                    cells_being_worked.add(cell)
-                
-                elif data['state'] == 'harvesting':
-                    data['timer'] -= 1
-                    if data['timer'] <= 0:
-                        # Check inventory space before adding wheat
-                        if char.can_add_item('wheat', FARM_CELL_YIELD):
-                            char.add_item('wheat', FARM_CELL_YIELD)
-                            data['state'] = 'replanting'
-                            data['timer'] = FARM_REPLANT_TIME
-                            
-                            name = char.get_display_name()
-                            self.state.log_action(f"{name} harvested {FARM_CELL_YIELD} wheat!")
-                        else:
-                            # Can't harvest, leave cell ready
-                            data['state'] = 'ready'
-                    cells_being_worked.add(cell)
-                
-                elif data['state'] == 'replanting':
-                    data['timer'] -= 1
-                    if data['timer'] <= 0:
-                        data['state'] = 'growing'
-                        data['timer'] = FARM_CELL_HARVEST_INTERVAL
-                    cells_being_worked.add(cell)
-    
     def _get_direction_vector(self, facing):
         """Get unit direction vector for a facing direction."""
         vectors = {
@@ -4304,198 +5319,33 @@ class GameLogic:
         }
         return vectors.get(facing, (0, 1))
 
-    # =========================================================================
-    # ITEM MANAGEMENT SYSTEM
-    # =========================================================================
 
-    def use_item(self, character, slot_index):
-        """Use/consume an item from a specific inventory slot.
 
-        Args:
-            character: Character using the item
-            slot_index: Inventory slot index
+    # =============================================================================
+    # UTILITY & HELPER METHODS
+    # =============================================================================
+    # General-purpose helper functions
+    # =============================================================================
 
-        Returns:
-            dict with 'success' key and optional message details
-        """
-        inventory = character.inventory
-        if slot_index < 0 or slot_index >= len(inventory):
-            return {'success': False, 'reason': 'invalid_slot'}
+    def _face_toward_character(self, char, target):
+        """Make char face toward target character."""
+        if char.zone == target.zone and char.zone is not None:
+            dx = target.prevailing_x - char.prevailing_x
+            dy = target.prevailing_y - char.prevailing_y
+        else:
+            dx = target.x - char.x
+            dy = target.y - char.y
+        
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            self._update_facing(char, dx, dy)
+    
+    
 
-        item = inventory[slot_index]
-        if item is None:
-            return {'success': False, 'reason': 'empty_slot'}
-
-        item_type = item.get('type', '')
-
-        if item_type == 'bread':
-            result = character.eat()
-            if result['success']:
-                msg = f"{character.get_display_name()} ate bread, hunger now {character.hunger:.0f}"
-                if result.get('recovered_from_starvation'):
-                    msg = f"{character.get_display_name()} ate bread and recovered from starvation! Hunger: {character.hunger:.0f}"
-                self.state.log_action(msg)
-            return result
-
-        return {'success': False, 'reason': 'not_usable'}
-
-    def equip_weapon(self, character, slot_index):
-        """Equip a weapon from a specific inventory slot.
-
-        Args:
-            character: Character equipping the weapon
-            slot_index: Inventory slot index
-
-        Returns:
-            dict with 'success' key and optional details
-        """
-        inventory = character.inventory
-        if slot_index < 0 or slot_index >= len(inventory):
-            return {'success': False, 'reason': 'invalid_slot'}
-
-        item = inventory[slot_index]
-        if item is None:
-            return {'success': False, 'reason': 'empty_slot'}
-
-        item_type = item.get('type', '')
-        item_info = ITEMS.get(item_type, {})
-
-        if item_info.get('category') != 'weapon':
-            return {'success': False, 'reason': 'not_weapon'}
-
-        if character.equipped_weapon is not None:
-            old_slot = character.equipped_weapon
-            old_item = inventory[old_slot] if old_slot < len(inventory) else None
-            if old_item:
-                old_name = ITEMS.get(old_item.get('type', ''), {}).get('name', 'weapon')
-                self.state.log_action(f"{character.get_display_name()} unequipped {old_name}")
-
-        character.equipped_weapon = slot_index
-        weapon_name = item_info.get('name', item_type)
-        self.state.log_action(f"{character.get_display_name()} equipped {weapon_name}")
-
-        return {'success': True, 'weapon_name': weapon_name}
-
-    def unequip_weapon(self, character, slot_index):
-        """Unequip the weapon in a specific inventory slot.
-
-        Args:
-            character: Character unequipping the weapon
-            slot_index: Inventory slot index
-
-        Returns:
-            dict with 'success' key
-        """
-        if character.equipped_weapon != slot_index:
-            return {'success': False, 'reason': 'not_equipped'}
-
-        inventory = character.inventory
-        item = inventory[slot_index] if slot_index < len(inventory) else None
-        if item:
-            item_type = item.get('type', '')
-            item_info = ITEMS.get(item_type, {})
-            weapon_name = item_info.get('name', item_type)
-            self.state.log_action(f"{character.get_display_name()} unequipped {weapon_name}")
-
-        character.equipped_weapon = None
-        return {'success': True}
-
-    def burn_item(self, character, slot_index):
-        """Burn/destroy an item from inventory.
-
-        Args:
-            character: Character burning the item
-            slot_index: Inventory slot index
-
-        Returns:
-            dict with 'success' key and details
-        """
-        inventory = character.inventory
-        if slot_index < 0 or slot_index >= len(inventory):
-            return {'success': False, 'reason': 'invalid_slot'}
-
-        item = inventory[slot_index]
-        if item is None:
-            return {'success': False, 'reason': 'empty_slot'}
-
-        item_type = item.get('type', 'item')
-        amount = item.get('amount', 1)
-
-        item_info = ITEMS.get(item_type, {})
-        display_name = item_info.get('name', item_type.capitalize())
-
-        inventory[slot_index] = None
-
-        self.state.log_action(f"{character.get_display_name()} burned {amount} {display_name}")
-
-        return {'success': True, 'item_type': item_type, 'amount': amount, 'display_name': display_name}
-
-    def can_burn_items(self, character):
-        """Check if character is adjacent to a usable stove or campfire.
-
-        Args:
-            character: Character to check
-
-        Returns:
-            bool: True if can burn items
-        """
-        stove = self.state.interactables.get_adjacent_stove(character)
-        if stove and stove.can_use(character):
-            return True
-
-        if character.zone is None:
-            px, py = character.x, character.y
-            for char in self.state.characters:
-                camp_pos = char.get('camp_position')
-                if camp_pos:
-                    cx, cy = camp_pos
-                    dist = ((px - (cx + 0.5)) ** 2 + (py - (cy + 0.5)) ** 2) ** 0.5
-                    if dist <= 1.5:
-                        return True
-
-        return False
-
-    def transfer_item_to_inventory(self, item_type, amount, target_inventory, stack_limit):
-        """Transfer items to an inventory with stacking logic.
-
-        Args:
-            item_type: Type of item to transfer
-            amount: Amount to transfer
-            target_inventory: List of inventory slots (modified in place)
-            stack_limit: Stack limit for the item type (None for unlimited)
-
-        Returns:
-            int: Amount remaining (0 if all transferred)
-        """
-        amount_to_move = amount
-
-        for i, slot in enumerate(target_inventory):
-            if slot and slot.get('type') == item_type:
-                if stack_limit is None:
-                    slot['amount'] = slot.get('amount', 0) + amount_to_move
-                    amount_to_move = 0
-                    break
-                else:
-                    space = stack_limit - slot.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, amount_to_move)
-                        slot['amount'] = slot.get('amount', 0) + transfer
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-
-        if amount_to_move > 0:
-            for i, slot in enumerate(target_inventory):
-                if slot is None:
-                    if stack_limit is None:
-                        target_inventory[i] = {'type': item_type, 'amount': amount_to_move}
-                        amount_to_move = 0
-                        break
-                    else:
-                        transfer = min(stack_limit, amount_to_move)
-                        target_inventory[i] = {'type': item_type, 'amount': transfer}
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-
-        return amount_to_move
+    def _reset_idle_state(self, char):
+        """Reset idle state when character is no longer idling."""
+        char['idle_state'] = 'choosing'
+        char['idle_destination'] = None
+        char['idle_wait_ticks'] = 0
+        char['idle_is_idle'] = False
+        char['is_patrolling'] = False
+    

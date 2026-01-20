@@ -235,44 +235,15 @@ class InventoryMenu:
         """Return held item to first available inventory slot, or drop to ground if full."""
         if not self.held_item or not self.state.player:
             return
-        
+
         player = self.state.player
-        inventory = player.inventory
-        held_type = self.held_item['type']
-        stack_limit = get_stack_limit(held_type)
         was_equipped = getattr(self, '_held_was_equipped', False)
-        
-        # First try to stack with existing items of same type
-        for i, slot in enumerate(inventory):
-            if slot and slot.get('type') == held_type:
-                if stack_limit is None:
-                    # Unlimited stacking - combine everything
-                    slot['amount'] = slot.get('amount', 0) + self.held_item['amount']
-                    self.held_item = None
-                    self._held_was_equipped = False
-                    return
-                else:
-                    space = stack_limit - slot.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, self.held_item['amount'])
-                        slot['amount'] = slot.get('amount', 0) + transfer
-                        self.held_item['amount'] -= transfer
-                        if self.held_item['amount'] <= 0:
-                            self.held_item = None
-                            self._held_was_equipped = False
-                            return
-        
-        # Then try empty slots
-        for i, slot in enumerate(inventory):
-            if slot is None:
-                inventory[i] = self.held_item.copy()
-                # If this was an equipped weapon, re-equip it in new slot
-                if was_equipped:
-                    player.equipped_weapon = i
-                self.held_item = None
-                self._held_was_equipped = False
-                return
-        
+
+        # Delegate to game logic
+        self.held_item, self._held_was_equipped = self.logic.return_held_item_to_inventory(
+            player, self.held_item, was_equipped
+        )
+
         # If still holding item, drop to ground (inventory full)
         if self.held_item:
             self._drop_held_item_to_ground(player)
@@ -483,73 +454,17 @@ class InventoryMenu:
         """
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        inventory = player.inventory
-        
-        if slot_index < 0 or slot_index >= len(inventory):
-            return
-        
-        slot_item = inventory[slot_index]
-        
-        if self.held_item is None:
-            # Pick up entire stack from slot
-            if slot_item is not None:
-                self.held_item = slot_item.copy()
-                # Track if we're picking up the equipped weapon
-                self._held_was_equipped = (player.equipped_weapon == slot_index)
-                if self._held_was_equipped:
-                    player.equipped_weapon = None
-                inventory[slot_index] = None
-        else:
-            # We're holding something
-            if slot_item is None:
-                # Place entire held stack in empty slot
-                inventory[slot_index] = self.held_item.copy()
-                # If we were holding an equipped weapon, update the slot reference
-                if getattr(self, '_held_was_equipped', False):
-                    player.equipped_weapon = slot_index
-                    self._held_was_equipped = False
-                self.held_item = None
-            elif slot_item.get('type') == self.held_item.get('type'):
-                # Same type - try to stack
-                stack_limit = get_stack_limit(slot_item.get('type'))
-                if stack_limit is None:
-                    # Unlimited stacking - combine everything
-                    slot_item['amount'] = slot_item.get('amount', 0) + self.held_item['amount']
-                    self._held_was_equipped = False
-                    self.held_item = None
-                else:
-                    space = stack_limit - slot_item.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, self.held_item['amount'])
-                        slot_item['amount'] = slot_item.get('amount', 0) + transfer
-                        self.held_item['amount'] -= transfer
-                        if self.held_item['amount'] <= 0:
-                            self._held_was_equipped = False
-                            self.held_item = None
-                    else:
-                        # Stack full - swap
-                        inventory[slot_index] = self.held_item.copy()
-                        old_slot_was_equipped = (player.equipped_weapon == slot_index)
-                        # If we were holding equipped weapon, it goes to this slot
-                        if getattr(self, '_held_was_equipped', False):
-                            player.equipped_weapon = slot_index
-                        elif old_slot_was_equipped:
-                            player.equipped_weapon = None  # Old equipped is now held
-                        self._held_was_equipped = old_slot_was_equipped
-                        self.held_item = slot_item.copy()
-            else:
-                # Different type - swap
-                inventory[slot_index] = self.held_item.copy()
-                old_slot_was_equipped = (player.equipped_weapon == slot_index)
-                # If we were holding equipped weapon, it goes to this slot
-                if getattr(self, '_held_was_equipped', False):
-                    player.equipped_weapon = slot_index
-                elif old_slot_was_equipped:
-                    player.equipped_weapon = None  # Old equipped is now held
-                self._held_was_equipped = old_slot_was_equipped
-                self.held_item = slot_item.copy()
+        was_equipped = getattr(self, '_held_was_equipped', False)
+
+        # Delegate to game logic
+        result = self.logic.interact_inventory_slot_full(
+            player, slot_index, self.held_item, was_equipped
+        )
+
+        self.held_item = result['held_item']
+        self._held_was_equipped = result['held_was_equipped']
     
     def _interact_slot_single(self, slot_index):
         """
@@ -558,56 +473,17 @@ class InventoryMenu:
         """
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        inventory = player.inventory
-        
-        if slot_index < 0 or slot_index >= len(inventory):
-            return
-        
-        slot_item = inventory[slot_index]
-        
-        if self.held_item is None:
-            # Pick up half of stack from slot
-            if slot_item is not None:
-                total = slot_item.get('amount', 1)
-                take = (total + 1) // 2  # Ceiling division - take the larger half
-                leave = total - take
-                
-                self.held_item = {'type': slot_item['type'], 'amount': take}
-                
-                if leave > 0:
-                    slot_item['amount'] = leave
-                    # Weapon stays equipped if there's still items in the slot
-                else:
-                    # Track if we're picking up the equipped weapon
-                    self._held_was_equipped = (player.equipped_weapon == slot_index)
-                    if self._held_was_equipped:
-                        player.equipped_weapon = None
-                    inventory[slot_index] = None
-        else:
-            # We're holding something - place single item
-            if slot_item is None:
-                # Place 1 item in empty slot
-                inventory[slot_index] = {'type': self.held_item['type'], 'amount': 1}
-                self.held_item['amount'] -= 1
-                if self.held_item['amount'] <= 0:
-                    # If placing the last of an equipped weapon, equip it in new slot
-                    if getattr(self, '_held_was_equipped', False):
-                        player.equipped_weapon = slot_index
-                        self._held_was_equipped = False
-                    self.held_item = None
-            elif slot_item.get('type') == self.held_item.get('type'):
-                # Same type - place 1 if room
-                stack_limit = get_stack_limit(slot_item.get('type'))
-                # None means unlimited, so always allow; otherwise check limit
-                if stack_limit is None or slot_item.get('amount', 0) < stack_limit:
-                    slot_item['amount'] = slot_item.get('amount', 0) + 1
-                    self.held_item['amount'] -= 1
-                    if self.held_item['amount'] <= 0:
-                        self._held_was_equipped = False
-                        self.held_item = None
-            # Different type - do nothing (can't place)
+        was_equipped = getattr(self, '_held_was_equipped', False)
+
+        # Delegate to game logic
+        result = self.logic.interact_inventory_slot_single(
+            player, slot_index, self.held_item, was_equipped
+        )
+
+        self.held_item = result['held_item']
+        self._held_was_equipped = result['held_was_equipped']
     
     def handle_item_interaction(self, full_interact=False, single_interact=False, quick_move=False):
         """
@@ -1988,151 +1864,81 @@ class InventoryMenu:
         """Handle left-click on a ground slot - pick up / place / swap full stack."""
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        
+
         # Get the ground item at this slot (if any)
         ground_item = None
         if slot_index < len(self._nearby_ground_items):
             ground_item = self._nearby_ground_items[slot_index]
-        
-        if self.held_item is None:
-            # Pick up item from ground
-            if ground_item:
-                self.held_item = {'type': ground_item.item_type, 'amount': ground_item.amount}
-                self.state.ground_items.remove_item(ground_item)
-                self._update_nearby_ground_items(player)
-        else:
-            # We're holding something
-            if ground_item is None:
-                # Drop held item to ground
-                self._drop_held_item_to_ground(player)
-            elif ground_item.item_type == self.held_item.get('type'):
-                # Same type - try to stack
-                stack_limit = get_stack_limit(ground_item.item_type)
-                if stack_limit is None:
-                    # Unlimited stacking
-                    ground_item.amount += self.held_item['amount']
-                    self.held_item = None
-                else:
-                    space = stack_limit - ground_item.amount
-                    if space > 0:
-                        transfer = min(space, self.held_item['amount'])
-                        ground_item.amount += transfer
-                        self.held_item['amount'] -= transfer
-                        if self.held_item['amount'] <= 0:
-                            self.held_item = None
-                    else:
-                        # Stack full - swap
-                        old_type = ground_item.item_type
-                        old_amount = ground_item.amount
-                        ground_item.item_type = self.held_item['type']
-                        ground_item.amount = self.held_item['amount']
-                        self.held_item = {'type': old_type, 'amount': old_amount}
-            else:
-                # Different type - swap
-                old_type = ground_item.item_type
-                old_amount = ground_item.amount
-                ground_item.item_type = self.held_item['type']
-                ground_item.amount = self.held_item['amount']
-                self.held_item = {'type': old_type, 'amount': old_amount}
+
+        # Delegate to game logic
+        self.held_item = self.logic.interact_ground_slot_full(
+            ground_item, self.held_item, self.state.ground_items,
+            self._nearby_ground_items, player
+        )
+
+        # Handle drop to ground if needed
+        if self.held_item and ground_item is None:
+            self._drop_held_item_to_ground(player)
+
+        self._update_nearby_ground_items(player)
     
     def _interact_ground_slot_single(self, slot_index):
         """Handle right-click on a ground slot - pick up half / place single."""
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        
+
         # Get the ground item at this slot (if any)
         ground_item = None
         if slot_index < len(self._nearby_ground_items):
             ground_item = self._nearby_ground_items[slot_index]
-        
-        if self.held_item is None:
-            # Pick up half of stack from ground
-            if ground_item:
-                total = ground_item.amount
-                take = (total + 1) // 2  # Ceiling division - take the larger half
-                leave = total - take
-                
-                self.held_item = {'type': ground_item.item_type, 'amount': take}
-                
-                if leave > 0:
-                    ground_item.amount = leave
-                else:
-                    self.state.ground_items.remove_item(ground_item)
-                    self._update_nearby_ground_items(player)
-        else:
-            # We're holding something - place single item
-            if ground_item is None:
-                # Drop 1 item to ground
-                self._drop_single_item_to_ground(player)
-            elif ground_item.item_type == self.held_item.get('type'):
-                # Same type - place 1 if room
-                stack_limit = get_stack_limit(ground_item.item_type)
-                if stack_limit is None or ground_item.amount < stack_limit:
-                    ground_item.amount += 1
-                    self.held_item['amount'] -= 1
-                    if self.held_item['amount'] <= 0:
-                        self.held_item = None
-            # Different type - do nothing
+
+        # Delegate to game logic
+        self.held_item = self.logic.interact_ground_slot_single(
+            ground_item, self.held_item, self.state.ground_items,
+            self._nearby_ground_items, player
+        )
+
+        # Handle drop to ground if needed
+        if self.held_item and ground_item is None:
+            self._drop_single_item_to_ground(player)
+
+        self._update_nearby_ground_items(player)
     
     def _drop_held_item_to_ground(self, player):
         """Drop the entire held item stack to the ground."""
         if not self.held_item:
             return
-        
-        # Find valid drop position
-        if player.zone:
-            px, py = player.prevailing_x, player.prevailing_y
-        else:
-            px, py = player.x, player.y
-        
+
         # Create blocking check function
         def is_blocked(x, y, zone):
             return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
-        
-        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
-        if drop_pos:
-            self.state.ground_items.add_item(
-                self.held_item['type'],
-                self.held_item['amount'],
-                drop_pos[0],
-                drop_pos[1],
-                player.zone
-            )
-            self.held_item = None
-            self._update_nearby_ground_items(player)
+
+        # Delegate to game logic
+        self.held_item = self.logic.drop_held_item_to_ground(
+            player, self.held_item, self.state.ground_items, is_blocked
+        )
+
+        self._update_nearby_ground_items(player)
     
     def _drop_single_item_to_ground(self, player):
         """Drop a single item from the held stack to the ground."""
         if not self.held_item or self.held_item['amount'] < 1:
             return
-        
-        # Find valid drop position
-        if player.zone:
-            px, py = player.prevailing_x, player.prevailing_y
-        else:
-            px, py = player.x, player.y
-        
+
         # Create blocking check function
         def is_blocked(x, y, zone):
             return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
-        
-        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
-        if drop_pos:
-            self.state.ground_items.add_item(
-                self.held_item['type'],
-                1,
-                drop_pos[0],
-                drop_pos[1],
-                player.zone
-            )
-            self.held_item['amount'] -= 1
-            if self.held_item['amount'] <= 0:
-                self.held_item = None
-            self._update_nearby_ground_items(player)
+
+        # Delegate to game logic
+        self.held_item = self.logic.drop_single_item_to_ground(
+            player, self.held_item, self.state.ground_items, is_blocked
+        )
+
+        self._update_nearby_ground_items(player)
     
     def _quick_move_ground_to_inventory(self, slot_index):
         """Shift+click: Quick-move item from ground to inventory (Minecraft style)."""
@@ -2140,22 +1946,16 @@ class InventoryMenu:
             return
 
         player = self.state.player
-        inventory = player.inventory
 
         if slot_index >= len(self._nearby_ground_items):
             return
 
         ground_item = self._nearby_ground_items[slot_index]
-        item_type = ground_item.item_type
-        amount_to_move = ground_item.amount
-        stack_limit = get_stack_limit(item_type)
 
-        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
-
-        if amount_remaining <= 0:
-            self.state.ground_items.remove_item(ground_item)
-        else:
-            ground_item.amount = amount_remaining
+        # Delegate to game logic
+        self.logic.quick_move_ground_to_inventory(
+            player, ground_item, self.state.ground_items, self._nearby_ground_items
+        )
 
         self._update_nearby_ground_items(player)
     
@@ -2163,41 +1963,19 @@ class InventoryMenu:
         """Shift+click: Quick-move item from inventory to ground."""
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        inventory = player.inventory
-        
-        if slot_index < 0 or slot_index >= len(inventory):
-            return
-        
-        slot_item = inventory[slot_index]
-        if slot_item is None:
-            return
-        
-        # Unequip if this was the equipped weapon
-        if player.equipped_weapon == slot_index:
-            player.equipped_weapon = None
-        
-        # Find valid drop position
-        if player.zone:
-            px, py = player.prevailing_x, player.prevailing_y
-        else:
-            px, py = player.x, player.y
-        
+
+        # Create blocking check function
         def is_blocked(x, y, zone):
             return self.state.is_position_blocked(x, y, exclude_char=player, zone=zone)
-        
-        drop_pos = find_valid_drop_position(px, py, player.zone, is_blocked)
-        if drop_pos:
-            self.state.ground_items.add_item(
-                slot_item['type'],
-                slot_item['amount'],
-                drop_pos[0],
-                drop_pos[1],
-                player.zone
-            )
-            inventory[slot_index] = None
-            self._update_nearby_ground_items(player)
+
+        # Delegate to game logic
+        self.logic.quick_move_inventory_to_ground(
+            player, slot_index, self.state.ground_items, is_blocked
+        )
+
+        self._update_nearby_ground_items(player)
     
     # =========================================================================
     # BARREL SLOT INTERACTION METHODS
@@ -2209,53 +1987,11 @@ class InventoryMenu:
             return
 
         barrel = self._viewing_container
-        barrel_inventory = barrel.inventory
-        
-        if slot_index < 0 or slot_index >= len(barrel_inventory):
-            return
-        
-        barrel_item = barrel_inventory[slot_index]
-        
-        if self.held_item is None:
-            # Pick up item from barrel
-            if barrel_item:
-                self.held_item = {'type': barrel_item['type'], 'amount': barrel_item['amount']}
-                barrel_inventory[slot_index] = None
-        else:
-            # We're holding something
-            if barrel_item is None:
-                # Place held item in barrel
-                barrel_inventory[slot_index] = {'type': self.held_item['type'], 'amount': self.held_item['amount']}
-                self.held_item = None
-            elif barrel_item['type'] == self.held_item.get('type'):
-                # Same type - try to stack
-                stack_limit = get_stack_limit(barrel_item['type'])
-                if stack_limit is None:
-                    # Unlimited stacking
-                    barrel_item['amount'] += self.held_item['amount']
-                    self.held_item = None
-                else:
-                    space = stack_limit - barrel_item['amount']
-                    if space > 0:
-                        transfer = min(space, self.held_item['amount'])
-                        barrel_item['amount'] += transfer
-                        self.held_item['amount'] -= transfer
-                        if self.held_item['amount'] <= 0:
-                            self.held_item = None
-                    else:
-                        # Stack full - swap
-                        old_type = barrel_item['type']
-                        old_amount = barrel_item['amount']
-                        barrel_item['type'] = self.held_item['type']
-                        barrel_item['amount'] = self.held_item['amount']
-                        self.held_item = {'type': old_type, 'amount': old_amount}
-            else:
-                # Different type - swap
-                old_type = barrel_item['type']
-                old_amount = barrel_item['amount']
-                barrel_item['type'] = self.held_item['type']
-                barrel_item['amount'] = self.held_item['amount']
-                self.held_item = {'type': old_type, 'amount': old_amount}
+
+        # Delegate to game logic
+        self.held_item = self.logic.interact_barrel_slot_full(
+            barrel, slot_index, self.held_item
+        )
     
     def _interact_barrel_slot_single(self, slot_index):
         """Handle right-click on a barrel/corpse slot - pick up half / place single."""
@@ -2263,43 +1999,11 @@ class InventoryMenu:
             return
 
         barrel = self._viewing_container
-        barrel_inventory = barrel.inventory
-        
-        if slot_index < 0 or slot_index >= len(barrel_inventory):
-            return
-        
-        barrel_item = barrel_inventory[slot_index]
-        
-        if self.held_item is None:
-            # Pick up half of stack from barrel
-            if barrel_item:
-                total = barrel_item['amount']
-                take = (total + 1) // 2  # Ceiling division - take the larger half
-                leave = total - take
-                
-                self.held_item = {'type': barrel_item['type'], 'amount': take}
-                
-                if leave > 0:
-                    barrel_item['amount'] = leave
-                else:
-                    barrel_inventory[slot_index] = None
-        else:
-            # We're holding something - place single item
-            if barrel_item is None:
-                # Place 1 item in barrel
-                barrel_inventory[slot_index] = {'type': self.held_item['type'], 'amount': 1}
-                self.held_item['amount'] -= 1
-                if self.held_item['amount'] <= 0:
-                    self.held_item = None
-            elif barrel_item['type'] == self.held_item.get('type'):
-                # Same type - place 1 if room
-                stack_limit = get_stack_limit(barrel_item['type'])
-                if stack_limit is None or barrel_item['amount'] < stack_limit:
-                    barrel_item['amount'] += 1
-                    self.held_item['amount'] -= 1
-                    if self.held_item['amount'] <= 0:
-                        self.held_item = None
-            # Different type - do nothing
+
+        # Delegate to game logic
+        self.held_item = self.logic.interact_barrel_slot_single(
+            barrel, slot_index, self.held_item
+        )
     
     def _quick_move_barrel_to_inventory(self, slot_index):
         """Shift+click: Quick-move item from barrel/corpse to player inventory."""
@@ -2307,27 +2011,10 @@ class InventoryMenu:
             return
 
         player = self.state.player
-        inventory = player.inventory
         barrel = self._viewing_container
-        barrel_inventory = barrel.inventory
 
-        if slot_index < 0 or slot_index >= len(barrel_inventory):
-            return
-
-        barrel_item = barrel_inventory[slot_index]
-        if barrel_item is None:
-            return
-
-        item_type = barrel_item['type']
-        amount_to_move = barrel_item['amount']
-        stack_limit = get_stack_limit(item_type)
-
-        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
-
-        if amount_remaining <= 0:
-            barrel_inventory[slot_index] = None
-        else:
-            barrel_item['amount'] = amount_remaining
+        # Delegate to game logic
+        self.logic.quick_move_barrel_to_inventory(player, barrel, slot_index)
     
     def _quick_move_inventory_to_barrel(self, slot_index):
         """Shift+click: Quick-move item from player inventory to barrel/corpse."""
@@ -2335,30 +2022,10 @@ class InventoryMenu:
             return
 
         player = self.state.player
-        inventory = player.inventory
         barrel = self._viewing_container
-        barrel_inventory = barrel.inventory
 
-        if slot_index < 0 or slot_index >= len(inventory):
-            return
-
-        slot_item = inventory[slot_index]
-        if slot_item is None:
-            return
-
-        if player.equipped_weapon == slot_index:
-            player.equipped_weapon = None
-
-        item_type = slot_item['type']
-        amount_to_move = slot_item['amount']
-        stack_limit = get_stack_limit(item_type)
-
-        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, barrel_inventory, stack_limit)
-
-        if amount_remaining <= 0:
-            inventory[slot_index] = None
-        else:
-            slot_item['amount'] = amount_remaining
+        # Delegate to game logic
+        self.logic.quick_move_inventory_to_barrel(player, barrel, slot_index)
     
     def _load_item_sprites(self):
         """Load all item sprites defined in constants.ITEMS."""

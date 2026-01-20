@@ -15,8 +15,8 @@ from constants import (
     SKILLS, CELL_SIZE,
     CHARACTER_WIDTH, CHARACTER_HEIGHT, ADJACENCY_DISTANCE, CHARACTER_COLLISION_RADIUS
 )
-from scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE, TREES, HOUSES
-from scenario_characters import CHARACTER_TEMPLATES
+from scenario.scenario_world import AREAS, BARRELS, BEDS, STOVES, SIZE, TREES, HOUSES
+from scenario.scenario_characters import CHARACTER_TEMPLATES
 from character import Character, create_character
 from static_interactables import InteractableManager
 from interiors import InteriorManager
