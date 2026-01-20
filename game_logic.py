@@ -4303,3 +4303,199 @@ class GameLogic:
             'down-right': (0.707, 0.707),
         }
         return vectors.get(facing, (0, 1))
+
+    # =========================================================================
+    # ITEM MANAGEMENT SYSTEM
+    # =========================================================================
+
+    def use_item(self, character, slot_index):
+        """Use/consume an item from a specific inventory slot.
+
+        Args:
+            character: Character using the item
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and optional message details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', '')
+
+        if item_type == 'bread':
+            result = character.eat()
+            if result['success']:
+                msg = f"{character.get_display_name()} ate bread, hunger now {character.hunger:.0f}"
+                if result.get('recovered_from_starvation'):
+                    msg = f"{character.get_display_name()} ate bread and recovered from starvation! Hunger: {character.hunger:.0f}"
+                self.state.log_action(msg)
+            return result
+
+        return {'success': False, 'reason': 'not_usable'}
+
+    def equip_weapon(self, character, slot_index):
+        """Equip a weapon from a specific inventory slot.
+
+        Args:
+            character: Character equipping the weapon
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and optional details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', '')
+        item_info = ITEMS.get(item_type, {})
+
+        if item_info.get('category') != 'weapon':
+            return {'success': False, 'reason': 'not_weapon'}
+
+        if character.equipped_weapon is not None:
+            old_slot = character.equipped_weapon
+            old_item = inventory[old_slot] if old_slot < len(inventory) else None
+            if old_item:
+                old_name = ITEMS.get(old_item.get('type', ''), {}).get('name', 'weapon')
+                self.state.log_action(f"{character.get_display_name()} unequipped {old_name}")
+
+        character.equipped_weapon = slot_index
+        weapon_name = item_info.get('name', item_type)
+        self.state.log_action(f"{character.get_display_name()} equipped {weapon_name}")
+
+        return {'success': True, 'weapon_name': weapon_name}
+
+    def unequip_weapon(self, character, slot_index):
+        """Unequip the weapon in a specific inventory slot.
+
+        Args:
+            character: Character unequipping the weapon
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key
+        """
+        if character.equipped_weapon != slot_index:
+            return {'success': False, 'reason': 'not_equipped'}
+
+        inventory = character.inventory
+        item = inventory[slot_index] if slot_index < len(inventory) else None
+        if item:
+            item_type = item.get('type', '')
+            item_info = ITEMS.get(item_type, {})
+            weapon_name = item_info.get('name', item_type)
+            self.state.log_action(f"{character.get_display_name()} unequipped {weapon_name}")
+
+        character.equipped_weapon = None
+        return {'success': True}
+
+    def burn_item(self, character, slot_index):
+        """Burn/destroy an item from inventory.
+
+        Args:
+            character: Character burning the item
+            slot_index: Inventory slot index
+
+        Returns:
+            dict with 'success' key and details
+        """
+        inventory = character.inventory
+        if slot_index < 0 or slot_index >= len(inventory):
+            return {'success': False, 'reason': 'invalid_slot'}
+
+        item = inventory[slot_index]
+        if item is None:
+            return {'success': False, 'reason': 'empty_slot'}
+
+        item_type = item.get('type', 'item')
+        amount = item.get('amount', 1)
+
+        item_info = ITEMS.get(item_type, {})
+        display_name = item_info.get('name', item_type.capitalize())
+
+        inventory[slot_index] = None
+
+        self.state.log_action(f"{character.get_display_name()} burned {amount} {display_name}")
+
+        return {'success': True, 'item_type': item_type, 'amount': amount, 'display_name': display_name}
+
+    def can_burn_items(self, character):
+        """Check if character is adjacent to a usable stove or campfire.
+
+        Args:
+            character: Character to check
+
+        Returns:
+            bool: True if can burn items
+        """
+        stove = self.state.interactables.get_adjacent_stove(character)
+        if stove and stove.can_use(character):
+            return True
+
+        if character.zone is None:
+            px, py = character.x, character.y
+            for char in self.state.characters:
+                camp_pos = char.get('camp_position')
+                if camp_pos:
+                    cx, cy = camp_pos
+                    dist = ((px - (cx + 0.5)) ** 2 + (py - (cy + 0.5)) ** 2) ** 0.5
+                    if dist <= 1.5:
+                        return True
+
+        return False
+
+    def transfer_item_to_inventory(self, item_type, amount, target_inventory, stack_limit):
+        """Transfer items to an inventory with stacking logic.
+
+        Args:
+            item_type: Type of item to transfer
+            amount: Amount to transfer
+            target_inventory: List of inventory slots (modified in place)
+            stack_limit: Stack limit for the item type (None for unlimited)
+
+        Returns:
+            int: Amount remaining (0 if all transferred)
+        """
+        amount_to_move = amount
+
+        for i, slot in enumerate(target_inventory):
+            if slot and slot.get('type') == item_type:
+                if stack_limit is None:
+                    slot['amount'] = slot.get('amount', 0) + amount_to_move
+                    amount_to_move = 0
+                    break
+                else:
+                    space = stack_limit - slot.get('amount', 0)
+                    if space > 0:
+                        transfer = min(space, amount_to_move)
+                        slot['amount'] = slot.get('amount', 0) + transfer
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+
+        if amount_to_move > 0:
+            for i, slot in enumerate(target_inventory):
+                if slot is None:
+                    if stack_limit is None:
+                        target_inventory[i] = {'type': item_type, 'amount': amount_to_move}
+                        amount_to_move = 0
+                        break
+                    else:
+                        transfer = min(stack_limit, amount_to_move)
+                        target_inventory[i] = {'type': item_type, 'amount': transfer}
+                        amount_to_move -= transfer
+                        if amount_to_move <= 0:
+                            break
+
+        return amount_to_move

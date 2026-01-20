@@ -603,11 +603,7 @@ ENVIRONMENT_INTERACT_DISTANCE = 1.5
 # DEBUG VISUALIZATION SETTINGS
 # =============================================================================
 # Set any of these to True to show debug overlays
-
-# Perception debug - vision cones and sound radii
-SHOW_PERCEPTION_DEBUG = False
-
-# Character hitbox debug - collision and sprite boundaries
+SHOW_PERCEPTION_DEBUG = False        # Perception debug - vision cones and sound radii
 SHOW_CHARACTER_HITBOXES = False       # Master toggle for all character hitbox visualization
 SHOW_COLLISION_RADIUS = False          # Circle showing CHARACTER_COLLISION_RADIUS (red)
 SHOW_SPRITE_BOUNDS = False             # Rectangle showing full sprite dimensions (blue)

@@ -755,26 +755,8 @@ class InventoryMenu:
         player = self.state.player
         if not player:
             return False
-        
-        # Check for adjacent stove that player can use
-        stove = self.state.interactables.get_adjacent_stove(player)
-        if stove and stove.can_use(player):
-            return True
-        
-        # Check for adjacent campfire (stored as camp_position on characters)
-        # Campfires are exterior only, player must be in exterior
-        if player.zone is None:
-            px, py = player.x, player.y
-            for char in self.state.characters:
-                camp_pos = char.get('camp_position')
-                if camp_pos:
-                    cx, cy = camp_pos
-                    # Check adjacency (within 1.5 cells)
-                    dist = ((px - (cx + 0.5)) ** 2 + (py - (cy + 0.5)) ** 2) ** 0.5
-                    if dist <= 1.5:
-                        return True
-        
-        return False
+
+        return self.logic.can_burn_items(player)
     
     def handle_context_menu_input(self, nav_up=False, nav_down=False, select=False, cancel=False):
         """
@@ -859,22 +841,13 @@ class InventoryMenu:
     def _use_item(self, slot_index, item):
         """
         Use/consume an item from a specific inventory slot.
-        
+
         Args:
             slot_index: Inventory slot index
             item: Item dict
         """
         player = self.state.player
-        item_type = item.get('type', '')
-        
-        # For bread, call the character's eat() method
-        if item_type == 'bread':
-            result = player.eat()
-            if result['success']:
-                msg = f"{player.get_display_name()} ate bread, hunger now {player.hunger:.0f}"
-                if result.get('recovered_from_starvation'):
-                    msg = f"{player.get_display_name()} ate bread and recovered from starvation! Hunger: {player.hunger:.0f}"
-                self.state.log_action(msg)
+        self.logic.use_item(player, slot_index)
     
     def _pick_up_half(self, slot_index):
         """
@@ -911,7 +884,7 @@ class InventoryMenu:
     def _equip_weapon(self, slot_index, item):
         """
         Equip a weapon from a specific inventory slot.
-        
+
         Args:
             slot_index: Inventory slot index
             item: Item dict
@@ -919,53 +892,21 @@ class InventoryMenu:
         player = self.state.player
         if not player:
             return
-        
-        item_type = item.get('type', '')
-        item_info = ITEMS.get(item_type, {})
-        
-        # Verify it's a weapon
-        if item_info.get('category') != 'weapon':
-            return
-        
-        # Unequip current weapon if any (only one weapon at a time)
-        if player.equipped_weapon is not None:
-            # Just clear the equipped slot - item stays in inventory
-            old_slot = player.equipped_weapon
-            old_item = player.inventory[old_slot] if old_slot < len(player.inventory) else None
-            if old_item:
-                old_name = ITEMS.get(old_item.get('type', ''), {}).get('name', 'weapon')
-                self.state.log_action(f"{player.get_display_name()} unequipped {old_name}")
-        
-        # Equip the new weapon
-        player.equipped_weapon = slot_index
-        weapon_name = item_info.get('name', item_type)
-        self.state.log_action(f"{player.get_display_name()} equipped {weapon_name}")
+
+        self.logic.equip_weapon(player, slot_index)
     
     def _unequip_weapon(self, slot_index):
         """
         Unequip the weapon in a specific inventory slot.
-        
+
         Args:
             slot_index: Inventory slot index
         """
         player = self.state.player
         if not player:
             return
-        
-        # Verify this slot is actually equipped
-        if player.equipped_weapon != slot_index:
-            return
-        
-        # Get weapon name for log
-        item = player.inventory[slot_index] if slot_index < len(player.inventory) else None
-        if item:
-            item_type = item.get('type', '')
-            item_info = ITEMS.get(item_type, {})
-            weapon_name = item_info.get('name', item_type)
-            self.state.log_action(f"{player.get_display_name()} unequipped {weapon_name}")
-        
-        # Clear equipped weapon
-        player.equipped_weapon = None
+
+        self.logic.unequip_weapon(player, slot_index)
 
     # =========================================================================
     # CONFIRMATION POPUP METHODS
@@ -1033,29 +974,9 @@ class InventoryMenu:
         """Burn/destroy an item from inventory."""
         if not self.state.player:
             return
-        
+
         player = self.state.player
-        inventory = player.inventory
-        
-        if slot_index < 0 or slot_index >= len(inventory):
-            return
-        
-        item = inventory[slot_index]
-        if item is None:
-            return
-        
-        item_type = item.get('type', 'item')
-        amount = item.get('amount', 1)
-        
-        # Get display name from ITEMS constant
-        item_info = ITEMS.get(item_type, {})
-        display_name = item_info.get('name', item_type.capitalize())
-        
-        # Remove the item
-        inventory[slot_index] = None
-        
-        # Log the action
-        self.state.log_action(f"{player.get_display_name()} burned {amount} {display_name}")
+        self.logic.burn_item(player, slot_index)
     
     def _draw_confirm_popup(self):
         """Draw the confirmation popup if open."""
@@ -2217,59 +2138,25 @@ class InventoryMenu:
         """Shift+click: Quick-move item from ground to inventory (Minecraft style)."""
         if not self.state.player:
             return
-        
+
         player = self.state.player
         inventory = player.inventory
-        
-        # Get the ground item at this slot
+
         if slot_index >= len(self._nearby_ground_items):
             return
-        
+
         ground_item = self._nearby_ground_items[slot_index]
         item_type = ground_item.item_type
         amount_to_move = ground_item.amount
         stack_limit = get_stack_limit(item_type)
-        
-        # First, try to stack with existing items of same type
-        for i, slot in enumerate(inventory):
-            if slot and slot.get('type') == item_type:
-                if stack_limit is None:
-                    # Unlimited stacking
-                    slot['amount'] = slot.get('amount', 0) + amount_to_move
-                    amount_to_move = 0
-                    break
-                else:
-                    space = stack_limit - slot.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, amount_to_move)
-                        slot['amount'] = slot.get('amount', 0) + transfer
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Then try empty slots
-        if amount_to_move > 0:
-            for i, slot in enumerate(inventory):
-                if slot is None:
-                    if stack_limit is None:
-                        inventory[i] = {'type': item_type, 'amount': amount_to_move}
-                        amount_to_move = 0
-                        break
-                    else:
-                        transfer = min(stack_limit, amount_to_move)
-                        inventory[i] = {'type': item_type, 'amount': transfer}
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Update or remove the ground item based on what was moved
-        if amount_to_move <= 0:
-            # All moved - remove ground item
+
+        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
+
+        if amount_remaining <= 0:
             self.state.ground_items.remove_item(ground_item)
         else:
-            # Some left on ground
-            ground_item.amount = amount_to_move
-        
+            ground_item.amount = amount_remaining
+
         self._update_nearby_ground_items(player)
     
     def _quick_move_inventory_to_ground(self, slot_index):
@@ -2423,55 +2310,24 @@ class InventoryMenu:
         inventory = player.inventory
         barrel = self._viewing_container
         barrel_inventory = barrel.inventory
-        
+
         if slot_index < 0 or slot_index >= len(barrel_inventory):
             return
-        
+
         barrel_item = barrel_inventory[slot_index]
         if barrel_item is None:
             return
-        
+
         item_type = barrel_item['type']
         amount_to_move = barrel_item['amount']
         stack_limit = get_stack_limit(item_type)
-        
-        # First, try to stack with existing items of same type
-        for i, slot in enumerate(inventory):
-            if slot and slot.get('type') == item_type:
-                if stack_limit is None:
-                    # Unlimited stacking
-                    slot['amount'] = slot.get('amount', 0) + amount_to_move
-                    amount_to_move = 0
-                    break
-                else:
-                    space = stack_limit - slot.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, amount_to_move)
-                        slot['amount'] = slot.get('amount', 0) + transfer
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Then try empty slots
-        if amount_to_move > 0:
-            for i, slot in enumerate(inventory):
-                if slot is None:
-                    if stack_limit is None:
-                        inventory[i] = {'type': item_type, 'amount': amount_to_move}
-                        amount_to_move = 0
-                        break
-                    else:
-                        transfer = min(stack_limit, amount_to_move)
-                        inventory[i] = {'type': item_type, 'amount': transfer}
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Update barrel based on what was moved
-        if amount_to_move <= 0:
+
+        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, inventory, stack_limit)
+
+        if amount_remaining <= 0:
             barrel_inventory[slot_index] = None
         else:
-            barrel_item['amount'] = amount_to_move
+            barrel_item['amount'] = amount_remaining
     
     def _quick_move_inventory_to_barrel(self, slot_index):
         """Shift+click: Quick-move item from player inventory to barrel/corpse."""
@@ -2482,58 +2338,27 @@ class InventoryMenu:
         inventory = player.inventory
         barrel = self._viewing_container
         barrel_inventory = barrel.inventory
-        
+
         if slot_index < 0 or slot_index >= len(inventory):
             return
-        
+
         slot_item = inventory[slot_index]
         if slot_item is None:
             return
-        
-        # Unequip if this was the equipped weapon
+
         if player.equipped_weapon == slot_index:
             player.equipped_weapon = None
-        
+
         item_type = slot_item['type']
         amount_to_move = slot_item['amount']
         stack_limit = get_stack_limit(item_type)
-        
-        # First, try to stack with existing items of same type in barrel
-        for i, barrel_slot in enumerate(barrel_inventory):
-            if barrel_slot and barrel_slot.get('type') == item_type:
-                if stack_limit is None:
-                    barrel_slot['amount'] = barrel_slot.get('amount', 0) + amount_to_move
-                    amount_to_move = 0
-                    break
-                else:
-                    space = stack_limit - barrel_slot.get('amount', 0)
-                    if space > 0:
-                        transfer = min(space, amount_to_move)
-                        barrel_slot['amount'] = barrel_slot.get('amount', 0) + transfer
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Then try empty barrel slots
-        if amount_to_move > 0:
-            for i, barrel_slot in enumerate(barrel_inventory):
-                if barrel_slot is None:
-                    if stack_limit is None:
-                        barrel_inventory[i] = {'type': item_type, 'amount': amount_to_move}
-                        amount_to_move = 0
-                        break
-                    else:
-                        transfer = min(stack_limit, amount_to_move)
-                        barrel_inventory[i] = {'type': item_type, 'amount': transfer}
-                        amount_to_move -= transfer
-                        if amount_to_move <= 0:
-                            break
-        
-        # Update player inventory based on what was moved
-        if amount_to_move <= 0:
+
+        amount_remaining = self.logic.transfer_item_to_inventory(item_type, amount_to_move, barrel_inventory, stack_limit)
+
+        if amount_remaining <= 0:
             inventory[slot_index] = None
         else:
-            slot_item['amount'] = amount_to_move
+            slot_item['amount'] = amount_remaining
     
     def _load_item_sprites(self):
         """Load all item sprites defined in constants.ITEMS."""
