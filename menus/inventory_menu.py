@@ -90,15 +90,17 @@ class InventoryMenu:
     Manages the inventory screen overlay with tabs for World, Status, and Map.
     """
     
-    def __init__(self, state):
+    def __init__(self, game_state, game_logic):
         """
         Initialize the inventory menu.
-        
+
         Args:
-            state: GameState object for accessing player and game data
+            game_state: GameState instance
+            game_logic: GameLogic instance
         """
-        self.state = state
-        self.is_open = False
+        self.state = game_state
+        self.logic = game_logic
+        self._active = False
         self.current_tab = 0  # 0=World, 1=Status, 2=Map
         
         # Canvas dimensions (set by GUI before rendering)
@@ -179,7 +181,20 @@ class InventoryMenu:
         self._dragging_status_scroll = False
         self._drag_start_y = 0
         self._drag_start_scroll = 0
-    
+
+    # =========================================================================
+    # PROPERTIES
+    # =========================================================================
+
+    @property
+    def is_active(self):
+        """Whether the menu is currently active."""
+        return self._active
+
+    # =========================================================================
+    # MENU CONTROL
+    # =========================================================================
+
     def open(self, barrel=None):
         """Open the inventory menu.
         
@@ -187,7 +202,7 @@ class InventoryMenu:
             barrel: Optional Barrel object to view. If provided, barrel inventory
                    is shown instead of Ground section.
         """
-        self.is_open = True
+        self._active = True
         self._viewing_barrel = barrel
         # Reset selection to inventory section
         self.selected_section = 'inventory'
@@ -215,7 +230,7 @@ class InventoryMenu:
         self.held_item = None
         self._held_was_equipped = False
         self._viewing_barrel = None
-        self.is_open = False
+        self._active = False
     
     def _return_held_item_to_inventory(self):
         """Return held item to first available inventory slot, or drop to ground if full."""
@@ -266,7 +281,7 @@ class InventoryMenu:
     
     def toggle(self):
         """Toggle the inventory menu open/closed."""
-        if self.is_open:
+        if self._active:
             self.close()
         else:
             self.open()
@@ -294,7 +309,7 @@ class InventoryMenu:
         self.gamepad_connected = gamepad_connected
         
         # Handle shift+click for quick-move (all sections)
-        if self.is_open and not self.context_menu_open and not self._confirm_popup_open and mouse_left_click and shift_held:
+        if self._active and not self.context_menu_open and not self._confirm_popup_open and mouse_left_click and shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
                 section, index = clicked_slot
@@ -313,7 +328,7 @@ class InventoryMenu:
                     return  # Don't process normal click
         
         # Handle mouse clicks on slots (but not if shift is held or popup is open)
-        if self.is_open and not self.context_menu_open and not self._confirm_popup_open and (mouse_left_click or mouse_right_click) and not shift_held:
+        if self._active and not self.context_menu_open and not self._confirm_popup_open and (mouse_left_click or mouse_right_click) and not shift_held:
             clicked_slot = self._get_slot_at_mouse()
             if clicked_slot:
                 section, index = clicked_slot
@@ -349,7 +364,7 @@ class InventoryMenu:
         - Gamepad right stick scrolling
         - Keyboard Page Up/Down
         """
-        if not self.is_open:
+        if not self._active:
             return
         
         # Calculate panel boundaries
@@ -604,7 +619,7 @@ class InventoryMenu:
             single_interact: X button pressed - pick up half/place single
             quick_move: LB + A pressed - quick move to other container
         """
-        if not self.is_open:
+        if not self._active:
             return
         
         # Handle quick move (LB + A)
@@ -1139,7 +1154,7 @@ class InventoryMenu:
         Returns:
             True if input was consumed, False otherwise
         """
-        if not self.is_open:
+        if not self._active:
             return False
         
         # Only handle gamepad navigation
@@ -1343,7 +1358,7 @@ class InventoryMenu:
     
     def render(self):
         """Render the inventory screen overlay."""
-        if not self.is_open:
+        if not self._active:
             return
         
         player = self.state.player

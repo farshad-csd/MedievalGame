@@ -222,17 +222,6 @@ class Barrel(Interactable):
         return amount - remaining
     
     # Convenience methods for common items
-    def get_wheat(self):
-        return self.get_item('wheat')
-    
-    def add_wheat(self, amount):
-        return self.add_item('wheat', amount)
-    
-    def remove_wheat(self, amount):
-        return self.remove_item('wheat', amount)
-    
-    def can_add_wheat(self, amount):
-        return self.can_add_item('wheat', amount)
 
 
 class Bed(Interactable):

@@ -956,7 +956,7 @@ class Job:
             return  # Already knows
         
         # Get unreported crimes about this criminal
-        crimes = char.get_unreported_crimes_about(criminal)
+        crimes = char.get_memories(memory_type='crime', subject=criminal, unreported_only=True)
         
         if crimes:
             # Report the most recent crime

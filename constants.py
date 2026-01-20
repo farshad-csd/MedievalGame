@@ -63,6 +63,23 @@ DIRECTIONS_CARDINAL = [(-1, 0), (1, 0), (0, -1), (0, 1)] # Cardinal directions
 DIRECTIONS_DIAGONAL = [(-1, -1), (1, -1), (-1, 1), (1, 1)] # Diagonal directions
 DIRECTIONS = DIRECTIONS_CARDINAL + DIRECTIONS_DIAGONAL # All 8 directions (cardinal first, then diagonal)
 
+# Cardinal direction to facing mapping
+# Maps cardinal directions (north/south/east/west) to valid character facings
+DIRECTION_TO_FACINGS = {
+    'north': ('up', 'up-left', 'up-right'),
+    'south': ('down', 'down-left', 'down-right'),
+    'east': ('right', 'up-right', 'down-right'),
+    'west': ('left', 'up-left', 'down-left'),
+}
+
+# Opposite cardinal directions
+OPPOSITE_DIRECTIONS = {
+    'north': 'south',
+    'south': 'north',
+    'east': 'west',
+    'west': 'east',
+}
+
 # Movement speed - characters move once every this many ticks
 # Set to TICK_MULTIPLIER so characters move at 1 cell per second (same as before)
 MOVEMENT_SPEED = .8 # Float-based continuous movement: cells per second

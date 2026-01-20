@@ -47,7 +47,7 @@ from game_state import GameState
 from game_logic import GameLogic
 from player_controller import PlayerController
 from sprites import get_sprite_manager
-from dialogue import DialogueSystem
+from menus.dialogue_menu import DialogueMenu
 from menus.environment_menu import EnvironmentMenu
 from menus.inventory_menu import InventoryMenu
 
@@ -230,7 +230,7 @@ class BoardGUI:
         self.player_controller = PlayerController(self.state, self.logic)
         
         # Dialogue system
-        self.dialogue = DialogueSystem(self.state, self.logic)
+        self.dialogue = DialogueMenu(self.state, self.logic)
         
         # Environment interaction menu
         self.environment_menu = EnvironmentMenu(self.state, self.logic)
@@ -271,7 +271,7 @@ class BoardGUI:
         self.running = True
         
         # UI state
-        self.inventory_menu = InventoryMenu(self.state)
+        self.inventory_menu = InventoryMenu(self.state, self.logic)
         
         # Window "security camera" viewing state
         self.window_viewing = False
@@ -902,7 +902,7 @@ class BoardGUI:
             return
         
         # Block movement and facing changes when inventory is open
-        if self.inventory_menu.is_open:
+        if self.inventory_menu.is_active:
             if self.player_moving:
                 self.player_controller.stop_movement()
                 self.player_moving = False
@@ -983,7 +983,7 @@ class BoardGUI:
     def _apply_action_input(self):
         """Apply action input"""
         # Block actions when inventory is open
-        if self.inventory_menu.is_open:
+        if self.inventory_menu.is_active:
             return
         
         # Unified interact (E key / A button) - handles NPC, door, window, stove
@@ -1447,7 +1447,7 @@ class BoardGUI:
                 self.inventory_menu.toggle()
         
         # Tab switching in inventory (gamepad bumpers only)
-        if self.inventory_menu.is_open:
+        if self.inventory_menu.is_active:
             # Check if confirmation popup is open - it takes highest priority
             if self.inventory_menu._confirm_popup_open:
                 nav_left = False
@@ -1771,7 +1771,7 @@ class BoardGUI:
         t1 = time.time()
         
         # Draw HUD overlay or inventory screen
-        if self.inventory_menu.is_open:
+        if self.inventory_menu.is_active:
             # Update inventory menu state before rendering
             self.inventory_menu.set_canvas_size(self.canvas_width, self.canvas_height)
             self.inventory_menu.update_input(

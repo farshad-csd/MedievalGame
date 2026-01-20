@@ -12,7 +12,7 @@ from collections import deque
 from constants import (
     DIRECTIONS, ITEMS, FISTS,
     MAX_HUNGER, HUNGER_DECAY, HUNGER_CRITICAL, HUNGER_CHANCE_THRESHOLD,
-    STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL, 
+    STARVATION_THRESHOLD, STARVATION_DAMAGE, STARVATION_MORALITY_INTERVAL,
     STARVATION_MORALITY_CHANCE, STARVATION_FREEZE_HEALTH,
     INVENTORY_SLOTS,
     FARM_CELL_YIELD,
@@ -28,6 +28,7 @@ from constants import (
     CHARACTER_WIDTH, CHARACTER_HEIGHT, CHARACTER_COLLISION_RADIUS,
     UPDATE_INTERVAL, TICK_MULTIPLIER,
     VENDOR_GOODS,
+    DIRECTION_TO_FACINGS, OPPOSITE_DIRECTIONS,
     IDLE_SPEED_MULTIPLIER, IDLE_MIN_WAIT_TICKS, IDLE_MAX_WAIT_TICKS,
     IDLE_PAUSE_CHANCE, IDLE_PAUSE_MIN_TICKS, IDLE_PAUSE_MAX_TICKS,
     SQUEEZE_THRESHOLD_TICKS, SQUEEZE_SLIDE_SPEED,
@@ -833,7 +834,7 @@ class GameLogic:
                 return 0
 
             # Check barrel contents
-            wheat_count = barrel.get_wheat()
+            wheat_count = barrel.get_item('wheat')
             if wheat_count <= 0:
                 if log_errors:
                     self.log_barrel_error(char, barrel, 'empty')
@@ -851,9 +852,9 @@ class GameLogic:
             for _ in range(can_take):
                 if not char.can_add_item('wheat', 1):
                     break
-                if barrel.get_wheat() <= 0:
+                if barrel.get_item('wheat') <= 0:
                     break
-                barrel.remove_wheat(1)
+                barrel.remove_item('wheat', 1)
                 char.add_item('wheat', 1)
                 taken += 1
 
@@ -917,7 +918,7 @@ class GameLogic:
         best_stove = None
         best_pos = None
         best_dist = float('inf')
-        
+
         char_zone = getattr(char, 'zone', None)
         for stove in self.state.interactables.stoves.values():
             if not stove.can_use(char):
@@ -932,8 +933,44 @@ class GameLogic:
                 best_dist = dist
                 best_stove = stove
                 best_pos = (stove_cx, stove_cy)
-        
+
         return best_stove, best_pos
+
+    def get_nearest_interactable_npc(self, player, max_distance=ADJACENCY_DISTANCE):
+        """
+        Find the nearest NPC that the player can interact with.
+
+        Args:
+            player: Player character
+            max_distance: Maximum distance to check
+
+        Returns:
+            Nearest NPC character, or None if none in range
+        """
+        if not player:
+            return None
+
+        nearest_npc = None
+        nearest_dist = float('inf')
+
+        for char in self.state.characters:
+            if char.is_player:
+                continue
+
+            # Must be in same zone
+            if char.zone != player.zone:
+                continue
+
+            # Calculate distance using prevailing coords
+            dx = char.prevailing_x - player.prevailing_x
+            dy = char.prevailing_y - player.prevailing_y
+            dist = (dx * dx + dy * dy) ** 0.5
+
+            if dist <= max_distance and dist < nearest_dist:
+                nearest_dist = dist
+                nearest_npc = char
+
+        return nearest_npc
     
     def has_access_to_cooking(self, char):
         """Check if character has access to any cooking spot (stove they can use or any camp)."""
@@ -1018,33 +1055,20 @@ class GameLogic:
     
     def _is_facing_direction(self, char, direction):
         """Check if character is facing a cardinal direction.
-        
+
         Args:
             char: Character to check
             direction: 'north', 'south', 'east', or 'west'
-            
+
         Returns:
             True if character's facing aligns with direction
         """
         facing = char.get('facing', 'down')
-        # Map directions to valid facings
-        direction_facings = {
-            'north': ('up', 'up-left', 'up-right'),
-            'south': ('down', 'down-left', 'down-right'),
-            'east': ('right', 'up-right', 'down-right'),
-            'west': ('left', 'up-left', 'down-left'),
-        }
-        return facing in direction_facings.get(direction, ())
+        return facing in DIRECTION_TO_FACINGS.get(direction, ())
     
     def _get_opposite_direction(self, direction):
         """Get the opposite cardinal direction."""
-        opposites = {
-            'north': 'south',
-            'south': 'north',
-            'east': 'west',
-            'west': 'east',
-        }
-        return opposites.get(direction, 'south')
+        return OPPOSITE_DIRECTIONS.get(direction, 'south')
     
     def get_window_for_cross_zone_vision(self, observer, target):
         """Check if observer can see target through a window.
@@ -2247,7 +2271,7 @@ class GameLogic:
         Only reports to soldiers of same allegiance as the crime.
         Only reports to soldiers in the same zone.
         """
-        unreported = char.get_unreported_crimes()
+        unreported = char.get_memories(memory_type='crime', unreported_only=True)
         
         if not unreported:
             return

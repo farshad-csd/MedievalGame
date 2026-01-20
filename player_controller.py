@@ -22,6 +22,7 @@ from constants import (
     ATTACK_ANIMATION_DURATION,
     BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
     WHEAT_TO_BREAD_RATIO,
+    DIRECTION_TO_FACINGS, OPPOSITE_DIRECTIONS,
 )
 from scenario_world import SIZE
 
@@ -482,21 +483,14 @@ class PlayerController:
     
     def _is_facing_toward_window(self, player, window):
         """Check if player is facing toward a window from outside.
-        
+
         The player must face the opposite direction of the window's facing.
         e.g., a north-facing window requires facing south to look in.
         """
         facing = player.get('facing', 'down')
-        
-        # Map window facing to required player facings
-        required_facings = {
-            'north': ('down', 'down-left', 'down-right'),
-            'south': ('up', 'up-left', 'up-right'),
-            'east': ('left', 'up-left', 'down-left'),
-            'west': ('right', 'up-right', 'down-right'),
-        }
-        
-        return facing in required_facings.get(window.facing, ())
+        # Get opposite direction - if window faces north, player must face south
+        required_direction = OPPOSITE_DIRECTIONS.get(window.facing, 'south')
+        return facing in DIRECTION_TO_FACINGS.get(required_direction, ())
     
     def get_window_camera_position(self, window):
         """

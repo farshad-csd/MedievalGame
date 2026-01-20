@@ -259,8 +259,20 @@ class Character:
     
     # =========================================================================
     # POSITION PROPERTIES
-    # x and y always return world coordinates (projected when in interior)
-    # prevailing_x and prevailing_y return actual stored position (interior coords when inside)
+    #
+    # Two coordinate systems:
+    # 1. World coordinates (x, y getters) - projected position on the world map
+    #    - In exterior: same as prevailing coords
+    #    - In interior: projected to building's world position
+    #
+    # 2. Prevailing coordinates (prevailing_x, prevailing_y) - actual position
+    #    - In exterior: world coordinates
+    #    - In interior: local coordinates within building
+    #
+    # Usage:
+    # - Use x/y GETTERS for cross-zone vision, distance checks, rendering
+    # - Use x/y SETTERS only when in exterior (player movement in exterior)
+    # - Use prevailing_x/y for all interior movement and NPC movement
     # =========================================================================
     
     @property
@@ -276,7 +288,20 @@ class Character:
     
     @x.setter
     def x(self, value):
-        """Set local X position."""
+        """Set X position directly in current coordinate space.
+
+        WARNING: Only use when character is in exterior (zone is None).
+        For interior movement, use prevailing_x instead.
+        """
+        if self.zone is not None:
+            # Safety check - catch misuse during development
+            import warnings
+            warnings.warn(
+                f"Setting char.x while in interior '{self.zone}'. "
+                f"Use char.prevailing_x instead for interior movement.",
+                RuntimeWarning,
+                stacklevel=2
+            )
         self._prevailing_x = value
     
     @property
@@ -292,7 +317,20 @@ class Character:
     
     @y.setter
     def y(self, value):
-        """Set local Y position."""
+        """Set Y position directly in current coordinate space.
+
+        WARNING: Only use when character is in exterior (zone is None).
+        For interior movement, use prevailing_y instead.
+        """
+        if self.zone is not None:
+            # Safety check - catch misuse during development
+            import warnings
+            warnings.warn(
+                f"Setting char.y while in interior '{self.zone}'. "
+                f"Use char.prevailing_y instead for interior movement.",
+                RuntimeWarning,
+                stacklevel=2
+            )
         self._prevailing_y = value
     
     @property
@@ -444,14 +482,6 @@ class Character:
     def has_memory_of(self, memory_type, subject):
         """Check if we have any memory of this type about this subject."""
         return len(self.get_memories(memory_type=memory_type, subject=subject)) > 0
-    
-    def get_unreported_crimes(self):
-        """Get all crime memories that haven't been reported yet."""
-        return self.get_memories(memory_type='crime', unreported_only=True)
-    
-    def get_unreported_crimes_about(self, criminal):
-        """Get unreported crime memories about a specific criminal."""
-        return self.get_memories(memory_type='crime', subject=criminal, unreported_only=True)
     
     def forget_memories_about(self, subject):
         """Remove all memories about a subject (e.g., when they die)."""
@@ -677,10 +707,6 @@ class Character:
             elif slot['type'] == item_type and slot['amount'] < stack_size:
                 space += stack_size - slot['amount']
         return space
-    
-    def get_inventory_space(self):
-        """Get remaining wheat capacity (for backward compatibility)."""
-        return self.get_item_space('wheat')
     
     def get_encumbrance(self):
         """Calculate total weight of all carried items.
