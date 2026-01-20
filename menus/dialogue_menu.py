@@ -1,38 +1,10 @@
-# dialogue_menu.py - Pokemon-style dialogue menu for NPC interaction
-"""
-Dialogue menu that provides:
-- Pokemon-style dialogue box at the bottom of the screen
-- Options menu on the right side with submenus
-- Typewriter text effect
-- Input handling when dialogue is active
-
-Controls:
-- E: Skip text animation (if still typing) or select current option
-- W/S: Navigate options up/down
-- Mouse: Hover to highlight, click to select
-
-Usage:
-    dialogue = DialogueMenu(game_state, game_logic)
-
-    # In GUI input handling:
-    if dialogue.is_active:
-        dialogue.handle_input()
-    elif input.interact and near_npc:
-        dialogue.start_dialogue(npc)
-
-    # In GUI rendering:
-    dialogue.update(dt)
-    dialogue.render(screen_width, screen_height)
-"""
-
 import pyray as rl
 import time
-import math
 from constants import (
-    ADJACENCY_DISTANCE,
     UI_COLOR_BOX_BG, UI_COLOR_BORDER, UI_COLOR_BORDER_INNER,
     UI_COLOR_TEXT, UI_COLOR_TEXT_DIM, UI_COLOR_CURSOR,
-    UI_COLOR_OPTION_SELECTED, UI_COLOR_OPTION_HOVER
+    UI_COLOR_OPTION_SELECTED, UI_COLOR_OPTION_HOVER,
+    DIALOGUE_MENUS
 )
 
 
@@ -67,69 +39,9 @@ CHARS_PER_SECOND = 40  # How fast text appears
 CURSOR_BLINK_RATE = 0.5  # Seconds per blink cycle
 
 
-# =============================================================================
-# DIALOGUE MENU STRUCTURE
-# =============================================================================
-
-# Main menu options - order matters for display
-MAIN_MENU_OPTIONS = [
-    "Demand",
-    "Tell",
-    "Ask",
-    "Intimidate",
-    "Recruit",
-    "Request",
-    "Offer",
-    "Trade",
-    "Exit"
-]
-
-# Submenus for options that have them
-# Each submenu automatically gets "Back" appended
-SUBMENUS = {
-    "Demand": [
-        "Surrender",
-        "Valuables",
-    ],
-    "Ask": [
-        "Name",
-        "Home",
-        "Allegiance",
-        "History",
-        "Gossip",
-        "Others",
-    ],
-    "Request": [
-        "Marriage",
-        "Song",
-        "Job",
-        "Property",
-        "Commission",
-        "Charity",
-        "Training",
-        "Lodging",
-        "Campfire",
-        "Follow Me",
-    ],
-    "Offer": [
-        "Surrender",
-        "Compliment",
-        "Gift",
-        "Lodging",
-        "Campfire",
-    ],
-}
-
-
 class DialogueMenu:
     """
     Handles NPC dialogue interactions with Pokemon-style UI.
-
-    When active:
-    - Blocks player movement and actions
-    - Makes the NPC face the player and stop moving
-    - Displays dialogue box with typewriter text effect
-    - Shows options menu for player choices (with submenus)
     """
     
     def __init__(self, game_state, game_logic):
@@ -146,8 +58,7 @@ class DialogueMenu:
         # Dialogue state
         self._active = False
         self._npc = None  # The NPC being talked to
-        self._npc_original_intent = None  # Store NPC's intent to restore later
-        self._npc_original_goal = None
+        self._saved_state = None  # Saved NPC state from game_logic
         
         # Text display state
         self._full_text = ""
@@ -157,7 +68,7 @@ class DialogueMenu:
         # Menu state
         self._menu_stack = []  # Stack of (menu_name, options_list) for navigation
         self._current_menu_name = "Main"
-        self._current_options = MAIN_MENU_OPTIONS.copy()
+        self._current_options = DIALOGUE_MENUS["Main"].copy()
         self._selected_option = 0
         
         # Animation state
@@ -183,130 +94,63 @@ class DialogueMenu:
     # =========================================================================
     
     def can_start_dialogue(self, npc):
-        """
-        Check if dialogue can be started with the given NPC.
-        
-        Args:
-            npc: Character to check
-            
-        Returns:
-            True if dialogue is possible
-        """
-        if npc is None:
-            return False
-        
-        # Can't talk to yourself
-        if npc.is_player:
-            return False
-        
-        # Check NPC's intent - cannot talk if they're attacking
-        intent = npc.intent
-        if intent and intent.get('action') == 'attack':
-            return False
-        
-        # Can talk if fleeing (per user request)
-        # Can talk in all other states (idle, wandering, working, etc.)
-        
-        return True
-    
+        """Check if dialogue can be started with the given NPC."""
+        return self.logic.can_start_dialogue(npc)
+
     def start_dialogue(self, npc):
         """
         Start a dialogue with an NPC.
-        
+
         Args:
             npc: Character to talk to
-            
+
         Returns:
             True if dialogue started successfully
         """
-        if not self.can_start_dialogue(npc):
+        player = self.state.player
+        result = self.logic.start_dialogue(npc, player)
+
+        if not result['success']:
             return False
-        
+
         self._active = True
         self._npc = npc
-        
-        # Store NPC's current state to restore later
-        self._npc_original_intent = npc.intent
-        self._npc_original_goal = npc.goal
-        
-        # Make NPC face the player and stop moving
-        self._make_npc_face_player()
-        npc.vx = 0
-        npc.vy = 0
-        npc.goal = None  # Clear movement goal
-        
+        self._saved_state = result['saved_state']
+
         # Set up dialogue text
         self._full_text = "Can I help you?"
         self._displayed_chars = 0
         self._text_start_time = time.time()
-        
+
         # Reset menu to main
         self._menu_stack = []
         self._current_menu_name = "Main"
-        self._current_options = MAIN_MENU_OPTIONS.copy()
+        self._current_options = DIALOGUE_MENUS["Main"].copy()
         self._selected_option = 0
-        
+
         return True
-    
+
     def end_dialogue(self):
         """End the current dialogue and restore NPC state."""
         if not self._active:
             return
-        
-        # Restore NPC state (only restore goal, let AI decide new intent)
-        if self._npc:
-            self._npc.goal = self._npc_original_goal
-        
+
+        # Restore NPC state through game logic
+        if self._npc and self._saved_state:
+            self.logic.end_dialogue(self._npc, self._saved_state)
+
         # Clear dialogue state
         self._active = False
         self._npc = None
-        self._npc_original_intent = None
-        self._npc_original_goal = None
+        self._saved_state = None
         self._full_text = ""
         self._displayed_chars = 0
-        
+
         # Reset menu state
         self._menu_stack = []
         self._current_menu_name = "Main"
-        self._current_options = MAIN_MENU_OPTIONS.copy()
+        self._current_options = DIALOGUE_MENUS["Main"].copy()
         self._selected_option = 0
-    
-    def _make_npc_face_player(self):
-        """Make the NPC face toward the player (8-directional)."""
-        player = self.state.player
-        if not player or not self._npc:
-            return
-        
-        npc = self._npc
-        
-        # Use prevailing coords for same-zone calculation
-        if player.zone == npc.zone:
-            dx = player.prevailing_x - npc.prevailing_x
-            dy = player.prevailing_y - npc.prevailing_y
-        else:
-            dx = player.x - npc.x
-            dy = player.y - npc.y
-        
-        # Determine 8-direction facing based on angle
-        angle = math.atan2(dy, dx)
-        
-        # Convert to 8 directions (same logic as player facing in gui.py)
-        if angle >= -math.pi/8 and angle < math.pi/8:
-            npc.facing = 'right'
-        elif angle >= math.pi/8 and angle < 3*math.pi/8:
-            npc.facing = 'down-right'
-        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
-            npc.facing = 'down'
-        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
-            npc.facing = 'down-left'
-        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
-            npc.facing = 'left'
-        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
-            npc.facing = 'up-left'
-        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
-            npc.facing = 'up'
-        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
-            npc.facing = 'up-right'
     
     # =========================================================================
     # MENU NAVIGATION
@@ -315,21 +159,21 @@ class DialogueMenu:
     def _enter_submenu(self, menu_name):
         """
         Enter a submenu.
-        
+
         Args:
-            menu_name: Name of the submenu to enter (key in SUBMENUS)
+            menu_name: Name of the submenu to enter (key in DIALOGUE_MENUS)
         """
-        if menu_name not in SUBMENUS:
+        if menu_name not in DIALOGUE_MENUS or menu_name == "Main":
             return False
-        
+
         # Push current menu onto stack
         self._menu_stack.append((self._current_menu_name, self._current_options, self._selected_option))
-        
+
         # Set up new menu
         self._current_menu_name = menu_name
-        self._current_options = SUBMENUS[menu_name].copy() + ["Back"]
+        self._current_options = DIALOGUE_MENUS[menu_name].copy() + ["Back"]
         self._selected_option = 0
-        
+
         return True
     
     def _go_back(self):
@@ -433,7 +277,7 @@ class DialogueMenu:
             return
         
         # Check if this option has a submenu
-        if option in SUBMENUS:
+        if option in DIALOGUE_MENUS and option != "Main":
             self._enter_submenu(option)
             return
         
@@ -497,12 +341,11 @@ class DialogueMenu:
         if time.time() - self._last_cursor_toggle > CURSOR_BLINK_RATE:
             self._cursor_visible = not self._cursor_visible
             self._last_cursor_toggle = time.time()
-        
+
         # Keep NPC facing player and stationary
-        if self._npc:
-            self._npc.vx = 0
-            self._npc.vy = 0
-            self._make_npc_face_player()
+        player = self.state.player
+        if self._npc and player:
+            self.logic.update_dialogue(self._npc, player)
     
     # =========================================================================
     # RENDERING

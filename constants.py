@@ -5,19 +5,19 @@
 # GUI SETTINGS
 # =============================================================================
 DEFAULT_ZOOM = 1.5         # Default camera zoom level (1.5x magnification)
+ZOOM_SPEED = 0.1           # How much zoom changes per scroll
 MIN_ZOOM = 0.5             # Minimum zoom (zoomed out)
 MAX_ZOOM = 4.0             # Maximum zoom (zoomed in)
-ZOOM_SPEED = 0.1           # How much zoom changes per scroll
 SPEED_OPTIONS = [1, 2, 10, 20, 100]
-BG_COLOR = "#000000" # UI Background Color
-GRID_COLOR = "#cccccc" # UI Grid Color
-ROAD_COLOR = "#A89880" # Road cell color
 START_MUTED = True         # Start with music muted (toggle with M key)
 
 # =============================================================================
 # BOARD SETTINGS
 # =============================================================================
 CELL_SIZE = 35  # Pixels per cell for rendering
+BG_COLOR = "#000000" # UI Background Color
+GRID_COLOR = "#cccccc" # UI Grid Color
+ROAD_COLOR = "#A89880" # Road cell color
 
 # =============================================================================
 # TIMING SETTINGS
@@ -506,9 +506,8 @@ UI_COLOR_PROGRESS_BAR = (80, 140, 220, 220)  # Blue progress bar
 
 JOB_TIERS = {
     # TIER 1 — RULERS
-    "King": {"tier": 1},
-    "Queen": {"tier": 1},
-    
+    "Royal": {"tier": 1},
+
     # TIER 2 — TRUSTED ADVISORS AND ADMINISTRATORS
     "Steward": {
         "tier": 2,
@@ -516,7 +515,6 @@ JOB_TIERS = {
         "requires": {"mercantile": 50},  # Also requires allegiance (checked in code)
     },
     "Knight": {"tier": 2},
-
     
     # TIER 3 - THINGS WE NEED OR THE GAME BREAKS
     "Soldier": { # Knightable
@@ -637,3 +635,79 @@ UI_COLOR_HEADER_GREEN = (140, 180, 120, 255)  # Green header text
 AIM_CHEVRON_FEET_OFFSET = 10          # Pixels to offset chevron downward (toward feet)
 AIM_CHEVRON_THICKNESS = 4
 AIM_CHEVRON_COLOR = (255, 255, 255, 120)
+
+# =============================================================================
+# DIALOGUE MENU CONFIGURATION
+# =============================================================================
+
+# Dialogue menu structure
+# 'Main' key contains the main menu options
+# Other keys contain submenu options (automatically get "Back" appended)
+DIALOGUE_MENUS = {
+    "Main": [
+        "Demand",
+        "Tell",
+        "Ask",
+        "Intimidate",
+        "Recruit",
+        "Request",
+        "Offer",
+        "Trade",
+        "Exit"
+    ],
+    "Demand": [
+        "Surrender",
+        "Valuables",
+    ],
+    "Ask": [
+        "Name",
+        "Home",
+        "Allegiance",
+        "History",
+        "Gossip",
+        "Others",
+    ],
+    "Request": [
+        "Marriage",
+        "Song",
+        "Job",
+        "Property",
+        "Commission",
+        "Charity",
+        "Training",
+        "Lodging",
+        "Campfire",
+        "Follow Me",
+    ],
+    "Offer": [
+        "Surrender",
+        "Compliment",
+        "Gift",
+        "Lodging",
+        "Campfire",
+    ],
+}
+
+# =============================================================================
+# ENVIRONMENT MENU CONFIGURATION
+# =============================================================================
+
+# All possible environment menu options (as a dictionary for lookup)
+ENVIRONMENT_MENU_OPTIONS = {
+    'PICK_UP_BARREL': "Pick Up Barrel",
+    'CHOP_TREE': "Chop Tree",
+    'HARVEST': "Harvest",
+    'PLANT': "Plant",
+    'BUILD_CAMPFIRE': "Build Campfire",
+    'BUILD': "Build",
+    'EXIT': "Exit",
+}
+
+# Base options always shown in environment menu
+ENVIRONMENT_BASE_OPTIONS = [
+    ENVIRONMENT_MENU_OPTIONS['BUILD'],
+    ENVIRONMENT_MENU_OPTIONS['EXIT']
+]
+
+# Proximity threshold for environment menu interactions
+ENVIRONMENT_INTERACT_DISTANCE = 1.5

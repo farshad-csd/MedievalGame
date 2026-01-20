@@ -1,33 +1,10 @@
-# environment_menu.py - Context-sensitive environment interaction menu
-"""
-Environment menu for interacting with the ground/environment around the player.
-Shows context-sensitive options based on player location.
-
-Controls:
-- G (keyboard) or X (gamepad): Open/close menu (toggle)
-- Tab (keyboard) or B (gamepad): Close menu (without opening inventory)
-- W/S or Up/Down: Navigate options
-- E or A button: Select option
-- Mouse: Hover to highlight, click to select
-
-Options (context-sensitive, in priority order):
-- Pick Up Barrel: When near a barrel (same zone) - pick up to carry
-- Chop Tree: When near a tree (exterior only)
-- Harvest: When on green/ready farm cell
-- Plant: When on brown/harvested farm cell  
-- Build Campfire: When outside village and not in interior
-- Build: Always shown
-- Exit: Always shown
-
-Note: E key opens barrel inventory directly; Pick Up Barrel is for carrying.
-"""
-
 import pyray as rl
 import time
 from constants import (
     UI_COLOR_BOX_BG, UI_COLOR_BORDER, UI_COLOR_BORDER_INNER,
     UI_COLOR_TEXT, UI_COLOR_TEXT_DIM, UI_COLOR_HEADER_GREEN,
-    UI_COLOR_OPTION_SELECTED, UI_COLOR_OPTION_HOVER
+    UI_COLOR_OPTION_SELECTED, UI_COLOR_OPTION_HOVER,
+    ENVIRONMENT_MENU_OPTIONS, ENVIRONMENT_BASE_OPTIONS, ENVIRONMENT_INTERACT_DISTANCE
 )
 
 
@@ -57,34 +34,9 @@ MENU_BORDER_WIDTH = 3
 CURSOR_BLINK_RATE = 0.5
 
 
-# =============================================================================
-# MENU OPTIONS
-# =============================================================================
-
-# All possible options - shown/hidden based on context
-OPTION_PICK_UP_BARREL = "Pick Up Barrel"
-OPTION_CHOP_TREE = "Chop Tree"
-OPTION_HARVEST = "Harvest"
-OPTION_PLANT = "Plant"
-OPTION_BUILD_CAMPFIRE = "Build Campfire"
-OPTION_BUILD = "Build"
-OPTION_EXIT = "Exit"
-
-# Base options always shown
-BASE_OPTIONS = [OPTION_BUILD, OPTION_EXIT]
-
-# Proximity threshold for interacting with objects
-INTERACT_DISTANCE = 1.5
-
-
 class EnvironmentMenu:
     """
     Context-sensitive menu for environment interactions.
-    
-    When active:
-    - Blocks player movement and other actions
-    - Shows options based on player's current location
-    - Allows selection via keyboard, gamepad, or mouse
     """
     
     def __init__(self, game_state, game_logic):
@@ -128,7 +80,7 @@ class EnvironmentMenu:
         return None
     
     # =========================================================================
-    # MENU CONTROL
+    # ENVIRONMENT MENU CONTROL
     # =========================================================================
     
     def open(self):
@@ -150,98 +102,53 @@ class EnvironmentMenu:
         """Build the list of available options based on player context."""
         self._options = []
         player = self.state.player
-        
+
         if not player:
-            self._options = [OPTION_EXIT]
+            self._options = [ENVIRONMENT_MENU_OPTIONS['EXIT']]
             return
-        
+
         # Check for nearby barrel (same zone, within distance)
         nearby_barrel = self._get_nearby_barrel()
         if nearby_barrel:
-            self._options.append(OPTION_PICK_UP_BARREL)
-        
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['PICK_UP_BARREL'])
+
         # Check for nearby tree (exterior only, within distance)
         nearby_tree = self._get_nearby_tree()
         if nearby_tree:
-            self._options.append(OPTION_CHOP_TREE)
-        
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['CHOP_TREE'])
+
         # Check farm cell state at player position
         cell_x = int(player.x)
         cell_y = int(player.y)
         farm_cell = self.state.farm_cells.get((cell_x, cell_y))
-        
+
         if farm_cell:
             state = farm_cell.get('state', '')
             if state == 'ready':
-                self._options.append(OPTION_HARVEST)
+                self._options.append(ENVIRONMENT_MENU_OPTIONS['HARVEST'])
             elif state == 'replanting':
-                self._options.append(OPTION_PLANT)
-        
+                self._options.append(ENVIRONMENT_MENU_OPTIONS['PLANT'])
+
         # Check if can build campfire (outside village, not in interior)
         if self._can_build_campfire():
-            self._options.append(OPTION_BUILD_CAMPFIRE)
-        
+            self._options.append(ENVIRONMENT_MENU_OPTIONS['BUILD_CAMPFIRE'])
+
         # Always add base options
-        self._options.extend(BASE_OPTIONS)
+        self._options.extend(ENVIRONMENT_BASE_OPTIONS)
     
     def _get_nearby_barrel(self):
-        """Find a barrel near the player in the same zone.
-        
-        Returns:
-            Barrel object if one is nearby, None otherwise
-        """
+        """Find a barrel near the player in the same zone."""
         player = self.state.player
         if not player:
             return None
-        
-        import math
-        player_zone = player.zone
-        
-        for barrel in self.state.interactables.barrels.values():
-            # Must be in same zone
-            if barrel.zone != player_zone:
-                continue
-            
-            # Calculate distance using appropriate coordinates
-            if player_zone is not None:
-                # Interior - use prevailing (local) coords
-                dx = player.prevailing_x - (barrel.x + 0.5)
-                dy = player.prevailing_y - (barrel.y + 0.5)
-            else:
-                # Exterior - use world coords
-                dx = player.x - (barrel.x + 0.5)
-                dy = player.y - (barrel.y + 0.5)
-            
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist <= INTERACT_DISTANCE:
-                return barrel
-        
-        return None
-    
+        return self.logic.get_nearby_barrel(player, max_distance=ENVIRONMENT_INTERACT_DISTANCE)
+
     def _get_nearby_tree(self):
-        """Find a tree near the player (exterior only).
-        
-        Returns:
-            Tree object if one is nearby, None otherwise
-        """
+        """Find a tree near the player (exterior only)."""
         player = self.state.player
         if not player:
             return None
-        
-        # Trees only exist in exterior
-        if player.zone is not None:
-            return None
-        
-        import math
-        
-        for tree in self.state.interactables.trees.values():
-            dx = player.x - (tree.x + 0.5)
-            dy = player.y - (tree.y + 0.5)
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist <= INTERACT_DISTANCE:
-                return tree
-        
-        return None
+        return self.logic.get_nearby_tree(player, max_distance=ENVIRONMENT_INTERACT_DISTANCE)
     
     def _can_build_campfire(self):
         """Check if player can build a campfire at current location."""
@@ -341,30 +248,30 @@ class EnvironmentMenu:
         """Select the current option and return the action."""
         if not self._options:
             return None
-        
+
         option = self._options[self._selected_option]
-        
-        if option == OPTION_EXIT:
+
+        if option == ENVIRONMENT_MENU_OPTIONS['EXIT']:
             self.close()
             return "closed"
-        
+
         # Handle new options with debug logging
-        if option == OPTION_PICK_UP_BARREL:
+        if option == ENVIRONMENT_MENU_OPTIONS['PICK_UP_BARREL']:
             barrel = self._get_nearby_barrel()
             if barrel:
                 player_name = self.state.player.get_display_name() if self.state.player else "Player"
                 self.state.log_action(f"{player_name} picked up {barrel.name} (not yet implemented)")
             self.close()
             return option
-        
-        if option == OPTION_CHOP_TREE:
+
+        if option == ENVIRONMENT_MENU_OPTIONS['CHOP_TREE']:
             tree = self._get_nearby_tree()
             if tree:
                 player_name = self.state.player.get_display_name() if self.state.player else "Player"
                 self.state.log_action(f"{player_name} chopped tree at ({tree.x}, {tree.y}) (not yet implemented)")
             self.close()
             return option
-        
+
         # Return the action to be handled by GUI
         self.close()
         return option

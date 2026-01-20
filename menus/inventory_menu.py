@@ -1,14 +1,3 @@
-# inventory_menu.py - Inventory, Status, and World Map menu system
-"""
-Handles the inventory screen overlay with three tabs:
-- World: Transparent view of game world with inventory panel
-- Status: Character skills and stats
-- Map: World map (placeholder)
-
-Extracted from gui.py to reduce file size and improve organization.
-All item properties (sprites, colors, stack limits) come from constants.ITEMS.
-"""
-
 import os
 import pyray as rl
 from constants import (

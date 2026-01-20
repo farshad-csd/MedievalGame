@@ -971,7 +971,211 @@ class GameLogic:
                 nearest_npc = char
 
         return nearest_npc
-    
+
+    # =========================================================================
+    # DIALOGUE SYSTEM
+    # =========================================================================
+
+    def can_start_dialogue(self, npc):
+        """
+        Check if dialogue can be started with the given NPC.
+
+        Args:
+            npc: Character to check
+
+        Returns:
+            True if dialogue is possible
+        """
+        if npc is None:
+            return False
+
+        # Can't talk to yourself
+        if npc.is_player:
+            return False
+
+        # Check NPC's intent - cannot talk if they're attacking
+        intent = npc.intent
+        if intent and intent.get('action') == 'attack':
+            return False
+
+        # Can talk if fleeing (per user request)
+        # Can talk in all other states (idle, wandering, working, etc.)
+
+        return True
+
+    def start_dialogue(self, npc, player):
+        """
+        Start a dialogue between player and NPC.
+
+        Args:
+            npc: NPC character to talk to
+            player: Player character
+
+        Returns:
+            dict with 'success': bool and 'saved_state': dict if successful
+        """
+        if not self.can_start_dialogue(npc):
+            return {'success': False}
+
+        # Save NPC's current state to restore later
+        saved_state = {
+            'intent': npc.intent,
+            'goal': npc.goal
+        }
+
+        # Make NPC face the player and stop moving
+        if player:
+            self.make_character_face_character(npc, player)
+
+        npc.vx = 0
+        npc.vy = 0
+        npc.goal = None  # Clear movement goal
+
+        return {'success': True, 'saved_state': saved_state}
+
+    def end_dialogue(self, npc, saved_state):
+        """
+        End a dialogue and restore NPC state.
+
+        Args:
+            npc: NPC character
+            saved_state: State dict from start_dialogue
+        """
+        if not npc or not saved_state:
+            return
+
+        # Restore NPC state (only restore goal, let AI decide new intent)
+        npc.goal = saved_state.get('goal')
+
+    def update_dialogue(self, npc, player):
+        """
+        Update dialogue state - keeps NPC facing player and stationary.
+
+        Args:
+            npc: NPC character in dialogue
+            player: Player character
+        """
+        if not npc or not player:
+            return
+
+        # Keep NPC facing player and stationary
+        npc.vx = 0
+        npc.vy = 0
+        self.make_character_face_character(npc, player)
+
+    def make_character_face_character(self, character, target):
+        """
+        Make a character face toward another character (8-directional).
+
+        Args:
+            character: Character to turn
+            target: Character to face toward
+        """
+        if not character or not target:
+            return
+
+        import math
+
+        # Use prevailing coords for same-zone calculation
+        if character.zone == target.zone:
+            dx = target.prevailing_x - character.prevailing_x
+            dy = target.prevailing_y - character.prevailing_y
+        else:
+            dx = target.x - character.x
+            dy = target.y - character.y
+
+        # Determine 8-direction facing based on angle
+        angle = math.atan2(dy, dx)
+
+        # Convert to 8 directions
+        if angle >= -math.pi/8 and angle < math.pi/8:
+            character.facing = 'right'
+        elif angle >= math.pi/8 and angle < 3*math.pi/8:
+            character.facing = 'down-right'
+        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
+            character.facing = 'down'
+        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
+            character.facing = 'down-left'
+        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
+            character.facing = 'left'
+        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
+            character.facing = 'up-left'
+        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
+            character.facing = 'up'
+        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
+            character.facing = 'up-right'
+
+    # =========================================================================
+    # ENVIRONMENT QUERIES
+    # =========================================================================
+
+    def get_nearby_barrel(self, character, max_distance=1.5):
+        """
+        Find a barrel near the character in the same zone.
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Barrel object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        import math
+        char_zone = character.zone
+
+        for barrel in self.state.interactables.barrels.values():
+            # Must be in same zone
+            if barrel.zone != char_zone:
+                continue
+
+            # Calculate distance using appropriate coordinates
+            if char_zone is not None:
+                # Interior - use prevailing (local) coords
+                dx = character.prevailing_x - (barrel.x + 0.5)
+                dy = character.prevailing_y - (barrel.y + 0.5)
+            else:
+                # Exterior - use world coords
+                dx = character.x - (barrel.x + 0.5)
+                dy = character.y - (barrel.y + 0.5)
+
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return barrel
+
+        return None
+
+    def get_nearby_tree(self, character, max_distance=1.5):
+        """
+        Find a tree near the character (exterior only).
+
+        Args:
+            character: Character to search from
+            max_distance: Maximum distance to search
+
+        Returns:
+            Tree object if one is nearby, None otherwise
+        """
+        if not character:
+            return None
+
+        # Trees only exist in exterior
+        if character.zone is not None:
+            return None
+
+        import math
+
+        for tree in self.state.interactables.trees.values():
+            dx = character.x - (tree.x + 0.5)
+            dy = character.y - (tree.y + 0.5)
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= max_distance:
+                return tree
+
+        return None
+
     def has_access_to_cooking(self, char):
         """Check if character has access to any cooking spot (stove they can use or any camp)."""
         # Check for stoves they can use
