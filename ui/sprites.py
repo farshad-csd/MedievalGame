@@ -8,7 +8,7 @@ Designed for compatibility with eventual Rust migration (raylib-rs).
 
 Sprite Sheet Layout:
 - Civilian1_Move.png: 4 frames × 8 directions (208x416, walking animation - unarmed/bow/fists)
-- Civilian1_Move_swordsword.png: 4 frames × 8 directions (208x416, walking with sword in combat mode)
+- Civilian1_Move_longsword.png: 4 frames × 8 directions (208x416, walking with sword in combat mode)
 - Civilian1_Attack.png: 4 frames × 8 directions (208x416, attack animation - unarmed/fists)
 - Civilian1_Attack_longsword.png: 4 frames × 8 directions (208x416, attack with sword)
 - Civilian1_Faint.png: 1 frame (52x52, death pose)

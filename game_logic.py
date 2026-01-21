@@ -43,14 +43,13 @@ from constants import (
 from scenario.scenario_world import SIZE
 from scenario.scenario_characters import CHARACTER_TEMPLATES
 from jobs import get_job
-from combat_system import CombatSystem
 from world_objects import find_valid_drop_position
 
 
 class GameLogic:
     """
     Contains all game logic that operates on a GameState instance.
-    
+
     This class:
     - Takes a GameState and modifies it
     - Contains all AI decision making
@@ -58,29 +57,219 @@ class GameLogic:
     - Does NOT hold persistent state (that's in GameState)
     - Does NOT contain rendering code (that's in gui.py)
     """
-    
 
     # =============================================================================
-    # INITIALIZATION & STATE MANAGEMENT
-    # =============================================================================
-    # Core initialization and state reset methods
+    # INITIALIZATION
     # =============================================================================
 
     def __init__(self, state):
-        """
+        """Initialize game logic with reference to game state.
+
         Args:
             state: GameState instance to operate on
         """
         self.state = state
-        # Initialize combat system
-        self.combat_system = CombatSystem(self)
-    
-    
 
     # =============================================================================
-    # STATE & GOAL MANAGEMENT
+    # TICK PROCESSING - Main game loop and per-tick updates
     # =============================================================================
-    # Goal setting and state management helpers
+
+    def process_tick(self):
+        """Process one game tick - updates all game state"""
+        self.state.ticks += 1
+        
+        # Update hunger for all characters
+        for char in self.state.characters:
+            char['hunger'] = max(0, char['hunger'] - HUNGER_DECAY)
+        
+        # Update stamina for all characters (Skyrim-style)
+        self._process_stamina()
+        
+        # Process starvation
+        self._process_starvation()
+        
+        # Update NPC combat mode based on intent
+        self._process_npc_combat_mode()
+        
+        # Process pending attacks (resolve damage when animation completes)
+        self._process_pending_attacks()
+        
+        # Handle deaths IMMEDIATELY - remove from game logic, store visual info separately
+        # This must happen right after starvation before any other processing
+        self._process_deaths()
+        
+        # Update farm cells
+        self._update_farm_cells()
+        
+        # Age increment
+        if self.state.ticks > 0 and self.state.ticks % TICKS_PER_YEAR == 0:
+            for char in self.state.characters:
+                char['age'] += 1
+            self.state.log_action(f"A new year begins! Everyone is one year older.")
+        
+        # Tax grace period check - steward goes to collect if farmer is late
+        steward = self.state.get_steward()
+        if steward:
+            steward_allegiance = steward.get('allegiance')
+            for char in self.state.characters:
+                if char.get('job') == 'Farmer' and char.get('allegiance') == steward_allegiance:
+                    tax_due_tick = char.get('tax_due_tick')
+                    if tax_due_tick is not None and self.state.ticks >= tax_due_tick + TAX_GRACE_PERIOD:
+                        if steward.get('tax_collection_target') != char:
+                            steward_name = steward.get_display_name()
+                            char_name = char.get_display_name()
+                            self.state.log_action(f"Steward {steward_name} going to collect tax from {char_name}!")
+                            steward['tax_collection_target'] = char
+        
+        # Move NPCs with swap detection to prevent oscillation
+        self._process_npc_movement()
+        
+        # Process deaths again to catch combat kills
+        self._process_deaths()
+    
+    def _process_deaths(self):
+        """Remove dead characters from game and create corpse interactables"""
+        from world_objects import Corpse
+
+        dead_chars = [char for char in self.state.characters if char['health'] <= 0]
+        for char in dead_chars:
+            # Log death message
+            dead_name = char.get_display_name()
+            if char.is_player:
+                if char.get('is_starving'):
+                    self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
+                else:
+                    self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
+            else:
+                if char.get('is_starving'):
+                    self.state.log_action(f"{dead_name} DIED from starvation!")
+                else:
+                    self.state.log_action(f"{dead_name} DIED!")
+
+            # Get position (interior coords if in interior, world coords if outside)
+            if char.zone:
+                corpse_x = char.prevailing_x  # Local coords
+                corpse_y = char.prevailing_y
+            else:
+                corpse_x = char['x']  # World coords
+                corpse_y = char['y']
+
+            # Create corpse interactable with character's inventory
+            corpse_name = f"{char['name']}'s Corpse"
+            corpse = Corpse(
+                name=corpse_name,
+                character_name=char['name'],
+                x=corpse_x,
+                y=corpse_y,
+                zone=char.zone,
+                facing=char.get('facing', 'down'),
+                job=char.get('job'),
+                morality=char.get('morality', 5)
+            )
+
+            # Transfer inventory from character to corpse
+            for i, slot in enumerate(char.inventory):
+                if slot is not None:
+                    corpse.inventory[i] = {'type': slot['type'], 'amount': slot['amount']}
+
+            # Set interior projection params if in interior
+            if char.zone and hasattr(self.state, 'interiors'):
+                interior = self.state.interiors.get_interior(char.zone)
+                if interior:
+                    corpse.set_interior_projection(interior)
+
+            # Add corpse to game state
+            self.state.corpses.append(corpse)
+
+            # Immediately remove character from game - no more processing
+            self.state.remove_character(char)
+    
+    def _process_stamina(self):
+        """Process stamina drain/regeneration for all characters (Skyrim-style)."""
+        current_tick = self.state.ticks
+        
+        for char in self.state.characters:
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            if char.is_sprinting:
+                # Drain stamina while sprinting
+                if not char.drain_stamina_sprint(current_tick):
+                    # Stamina depleted - force stop sprinting
+                    char.is_sprinting = False
+                    # Reduce velocity to walking speed
+                    if char.vx != 0 or char.vy != 0:
+                        speed_ratio = MOVEMENT_SPEED / SPRINT_SPEED
+                        char.vx *= speed_ratio
+                        char.vy *= speed_ratio
+            else:
+                # Regenerate stamina when not sprinting
+                char.regenerate_stamina(current_tick)
+    
+    def _process_starvation(self):
+        """Process starvation for all characters"""
+        for char in self.state.characters:
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+            
+            name = char.get_display_name()
+            
+            # Check if character should enter starvation (hunger = 0)
+            if char['hunger'] <= STARVATION_THRESHOLD:
+                was_starving = char.get('is_starving', False)
+                
+                if not was_starving:
+                    # Just entered starvation
+                    char['is_starving'] = True
+                    char['starvation_health_lost'] = 0
+                    char['ticks_starving'] = 0
+                    self.state.log_action(f"{name} is STARVING! Losing health...")
+                    
+                    # Soldiers quit when they start starving - lose job and home, but keep allegiance
+                    # This gives them a chance to buy wheat from a farmer and rejoin
+                    # If no farmer will sell to them, wheat timeout will naturally remove allegiance
+                    if char.get('job') == 'Soldier':
+                        char['job'] = None
+                        char['home'] = None
+                        # Remove bed ownership
+                        self.state.interactables.unassign_bed_owner(char['name'])
+                        self.state.log_action(f"{name} QUIT being a Soldier due to starvation!")
+                
+                # Increment ticks starving
+                char['ticks_starving'] = char.get('ticks_starving', 0) + 1
+                
+                # Apply starvation damage
+                char['health'] -= STARVATION_DAMAGE
+                char['starvation_health_lost'] += STARVATION_DAMAGE
+                
+                # Check if should freeze (health <= 20)
+                if char['health'] <= STARVATION_FREEZE_HEALTH:
+                    if not char.get('is_frozen', False):
+                        char['is_frozen'] = True
+                        # Clear any intent when freezing
+                        char.clear_intent()
+                        self.state.log_action(f"{name} is too weak to move! (health: {char['health']})")
+                
+                # Check for morality loss every STARVATION_MORALITY_INTERVAL health lost
+                if char['starvation_health_lost'] >= STARVATION_MORALITY_INTERVAL:
+                    char['starvation_health_lost'] -= STARVATION_MORALITY_INTERVAL
+                    if random.random() < STARVATION_MORALITY_CHANCE:
+                        old_morality = char.get('morality', 5)
+                        if old_morality > 1:
+                            char['morality'] = old_morality - 1
+                            self.state.log_action(f"{name}'s morality dropped from {old_morality} to {char['morality']} due to starvation!")
+            else:
+                # Not starving anymore
+                if char.get('is_starving', False):
+                    char['is_starving'] = False
+                    char['is_frozen'] = False
+                    char['starvation_health_lost'] = 0
+                    char['ticks_starving'] = 0
+    
+    # =============================================================================
+    # GOAL MANAGEMENT - Setting and clearing character movement goals
     # =============================================================================
 
     def set_goal_to_character(self, char, target):
@@ -122,12 +311,8 @@ class GameLogic:
         char.goal = None
         char.goal_zone = None
     
-    
-
     # =============================================================================
-    # ZONE & POSITION MANAGEMENT
-    # =============================================================================
-    # Zone queries, accessibility checks, and position validation
+    # ZONE NAVIGATION - Interior/exterior zone transitions and pathfinding
     # =============================================================================
 
     def set_goal_same_zone(self, char, x, y):
@@ -256,9 +441,7 @@ class GameLogic:
     
 
     # =============================================================================
-    # CENTRALIZED ACTION LOGGING
-    # =============================================================================
-    # Unified logging for player and NPC actions
+    # ACTION LOGGING - Unified logging for player and NPC actions
     # =============================================================================
 
     def log_combat_mode_change(self, char, entering):
@@ -399,11 +582,8 @@ class GameLogic:
         self.state.log_action(f"{name} cancelled {action_name}")
 
 
-
     # =============================================================================
-    # AI & NPC BEHAVIOR HELPERS
-    # =============================================================================
-    # Distance checks and basic AI decision helpers
+    # DISTANCE & PROXIMITY - Adjacency and range checking for interactions
     # =============================================================================
 
     def is_adjacent(self, char1, char2):
@@ -435,9 +615,7 @@ class GameLogic:
     
 
     # =============================================================================
-    # COMBAT SYSTEM
-    # =============================================================================
-    # Attack resolution, damage calculation, and combat mechanics
+    # COMBAT SYSTEM - Attack resolution, damage, blocking, and weapon mechanics
     # =============================================================================
 
     def is_in_combat_range(self, char1, char2):
@@ -489,49 +667,382 @@ class GameLogic:
 
     def can_attack(self, char):
         """Check if character can attack (not on cooldown and in combat mode).
-        Returns True if in combat mode and enough time has passed since last attack.
 
-        DELEGATED TO: combat_system.can_attack()
+        Returns True if in combat mode and enough time has passed since last attack.
         """
-        return self.combat_system.can_attack(char)
+        # Must be in combat mode to attack
+        if not char.get('combat_mode', False):
+            return False
+        weapon_stats = self.get_weapon_stats(char)
+        attack_speed = weapon_stats.get('attack_speed', FISTS['attack_speed'])
+        last_attack_tick = char.get('last_attack_tick', -attack_speed)
+        return self.state.ticks - last_attack_tick >= attack_speed
     
 
     def resolve_attack(self, attacker, attack_direction=None, damage_multiplier=1.0):
         """Resolve an attack from a character.
-        
-        DELEGATED TO: combat_system.resolve_attack()
-        
+
         This is the unified attack resolution used by BOTH player and NPCs.
         Handles: finding targets, dealing damage, witnesses, death, loot.
-        
+
         Args:
             attacker: Character performing the attack
             attack_direction: Optional direction ('up', 'down', 'left', 'right')
                             If None, uses attacker's current facing
             damage_multiplier: Multiplier for damage (1.0 = normal, 2.0 = double)
                               Used for heavy attacks
-        
+
         Returns:
             List of characters that were hit
         """
-        return self.combat_system.resolve_attack(attacker, attack_direction, damage_multiplier)
+        if attack_direction is None:
+            attack_direction = attacker.get('facing', 'down')
+
+        attacker_name = attacker.get_display_name()
+
+        # Get weapon stats (equipped weapon or fists)
+        weapon_stats = self.get_weapon_stats(attacker)
+        weapon_name = weapon_stats.get('name', 'Fists')
+        weapon_reach = weapon_stats.get('range', FISTS['range'])
+        damage_min = weapon_stats.get('base_damage_min', 2)
+        damage_max = weapon_stats.get('base_damage_max', 5)
+
+        # Check if using 360° aiming (player) or 8-direction (NPCs)
+        attack_angle = attacker.get('attack_angle')
+        use_360_aiming = attack_angle is not None
+
+        # Get direction vector (for 8-direction fallback)
+        dx, dy = self._get_direction_vector(attack_direction)
+
+        # Convert cone angles to radians (half angle for each side)
+        # Cone interpolates from BASE at player to FULL at weapon_reach
+        half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+        half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
+
+        # Find targets in attack arc
+        targets_hit = []
+        for char in self.state.characters:
+            if char is attacker:
+                continue
+
+            # Skip dying characters
+            if char.get('health', 100) <= 0:
+                continue
+
+            # Can only attack characters in the same zone (both exterior or same interior)
+            if char.zone != attacker.zone:
+                continue
+
+            # Calculate relative position using prevailing coords (local when in interior)
+            # This gives correct distance in interior space
+            rel_x = char.prevailing_x - attacker.prevailing_x
+            rel_y = char.prevailing_y - attacker.prevailing_y
+
+            # Calculate distance to target
+            distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+
+            # Must be within weapon reach and not at same position
+            if distance <= 0 or distance > weapon_reach:
+                continue
+
+            if use_360_aiming:
+                # 360° angle-based cone detection (player)
+                # Interpolate cone half-angle based on distance (wider at range)
+                t = distance / weapon_reach  # 0 at player, 1 at max range
+                half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
+
+                # Calculate angle to target
+                angle_to_target = math.atan2(rel_y, rel_x)
+
+                # Calculate angular difference (handle wraparound)
+                angle_diff = angle_to_target - attack_angle
+                # Normalize to [-pi, pi]
+                while angle_diff > math.pi:
+                    angle_diff -= 2 * math.pi
+                while angle_diff < -math.pi:
+                    angle_diff += 2 * math.pi
+
+                # Hit if within interpolated cone angle
+                if abs(angle_diff) <= half_cone_rad:
+                    targets_hit.append(char)
+            else:
+                # 8-direction perpendicular distance method (NPCs)
+                if dx != 0 or dy != 0:
+                    proj_dist = rel_x * dx + rel_y * dy  # Distance along attack direction
+                    perp_dist = abs(rel_x * (-dy) + rel_y * dx)  # Perpendicular distance
+
+                    # Hit if in front and within swing width
+                    if proj_dist > 0 and perp_dist < 0.7:
+                        targets_hit.append(char)
+
+        # Log miss if no targets (use appropriate verb based on weapon)
+        if not targets_hit:
+            if weapon_name == 'Fists':
+                self.state.log_action(f"{attacker_name} swings fist (missed)")
+            else:
+                self.state.log_action(f"{attacker_name} swings {weapon_name.lower()} (missed)")
+            return []
+
+        # Determine if attacker is a known criminal to anyone
+        attacker_is_criminal = self.is_known_criminal(attacker)
+
+        # Deal damage to all targets
+        for target in targets_hit:
+            target_name = target.get_display_name()
+
+            # Check if target is blocking (blocks attacks from any direction for now)
+            if target.is_blocking:
+                self.state.log_action(f"{target_name} BLOCKED {attacker_name}'s attack!")
+                continue  # Skip damage for this target
+
+            # Calculate and apply damage (with multiplier for heavy attacks)
+            base_damage = random.randint(damage_min, damage_max)
+            damage = int(base_damage * damage_multiplier)
+            old_health = target.health
+            target.health -= damage
+
+            # Log with weapon name and attack type (IDENTICAL format to resolve_melee_attack)
+            if damage_multiplier > 1.01:
+                # Heavy attack
+                self.state.log_action(f"{attacker_name} HEAVY ATTACKS {target_name} with {weapon_name} for {damage} damage! (x{damage_multiplier:.1f}) Health: {old_health} -> {target.health}")
+            else:
+                # Normal attack - vary message based on weapon
+                if weapon_name == 'Fists':
+                    self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage} damage! Health: {old_health} -> {target.health}")
+                else:
+                    self.state.log_action(f"{attacker_name} ATTACKS {target_name} with {weapon_name} for {damage} damage! Health: {old_health} -> {target.health}")
+
+            # Cancel ongoing action if player is hit
+            if target.is_player and target.has_ongoing_action():
+                cancelled = target.cancel_ongoing_action()
+                if cancelled:
+                    action_name = cancelled['action'].title()
+                    self.state.log_action(f"{target_name}'s {action_name} interrupted by attack!")
+
+            # Cancel heavy attack charge if player is hit
+            if target.is_player and target.is_charging_heavy_attack():
+                target.cancel_heavy_attack()
+                self.state.log_action(f"{target_name}'s heavy attack interrupted!")
+
+            # Set hit flash for visual feedback
+            target['hit_flash_until'] = self.state.ticks + 2  # Flash for ~8 ticks
+
+            # Clear face_target and intent - being hit interrupts current behavior
+            # This forces immediate re-evaluation (e.g. bystander -> fight back)
+            target['face_target'] = None
+            if target.intent and target.intent.get('reason') == 'bystander':
+                target.clear_intent()
+
+            # Target remembers being attacked
+            self.remember_attack(target, attacker, damage)
+
+            # Update attacker's intent if not already attacking someone
+            if attacker.intent is None or attacker.intent.get('action') != 'attack':
+                attacker.set_intent('attack', target, reason='initiated_attack', started_tick=self.state.ticks)
+
+            # Check if target was a criminal
+            target_was_criminal = self.is_known_criminal(target)
+
+            # If attacking an innocent, this is a crime
+            if not target_was_criminal:
+                # Attacker records they committed a crime (only once)
+                if not attacker_is_criminal:
+                    attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                       location=(attacker.x, attacker.y),
+                                       intensity=CRIME_INTENSITY_ASSAULT,
+                                       source='self',
+                                       crime_type='assault', victim=target)
+                    attacker_is_criminal = True
+
+                # Witness EVERY attack against an innocent (not just first)
+                if target.health > 0:
+                    self.witness_crime(attacker, target, 'assault')
+
+            # Handle death
+            if target.health <= 0:
+                if target_was_criminal and not attacker_is_criminal:
+                    # Justified kill
+                    self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
+                else:
+                    # Murder - record and witness
+                    attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                       location=(attacker.x, attacker.y),
+                                       intensity=CRIME_INTENSITY_MURDER,
+                                       source='self',
+                                       crime_type='murder', victim=target)
+                    self.witness_crime(attacker, target, 'murder')
+
+                # Items remain in corpse (no automatic transfer)
+
+                # Clear intent if this was the target
+                if attacker.intent and attacker.intent.get('target') is target:
+                    attacker.clear_intent()
+
+        # Broadcast violence to nearby characters (regardless of justification)
+        for target in targets_hit:
+            self.broadcast_violence(attacker, target)
+
+        return targets_hit
     
 
     def resolve_melee_attack(self, attacker, target):
         """Resolve a direct melee attack against a specific target.
-        
-        DELEGATED TO: combat_system.resolve_melee_attack()
-        
+
         Used by NPCs who have a specific target (combat, murder intent).
-        
+
         Args:
             attacker: Character performing the attack
             target: Character being attacked
-            
+
         Returns:
             dict with 'hit', 'damage', 'killed' keys
         """
-        return self.combat_system.resolve_melee_attack(attacker, target)
+        result = {'hit': False, 'damage': 0, 'killed': False}
+
+        if target is None or target not in self.state.characters:
+            return result
+
+        if target.get('health', 100) <= 0:
+            return result
+
+        attacker_name = attacker.get_display_name()
+        target_name = target.get_display_name()
+
+        # Get attacker's weapon stats for blocking cone calculation
+        attacker_weapon_stats = self.get_weapon_stats(attacker)
+        attacker_weapon_reach = attacker_weapon_stats.get('range', FISTS['range'])
+
+        # Check if in melee attack range
+        if not self.is_in_melee_range(attacker, target):
+            return result
+
+        # Check if target is blocking
+        if target.is_blocking:
+            # Check if attacker is within target's block cone (same as attack cone)
+            block_angle = target.get('attack_angle')
+            if block_angle is not None:
+                # Calculate angle from target to attacker
+                rel_x = attacker.prevailing_x - target.prevailing_x
+                rel_y = attacker.prevailing_y - target.prevailing_y
+                distance = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+
+                if distance > 0:
+                    angle_to_attacker = math.atan2(rel_y, rel_x)
+
+                    # Use attack cone angles for block cone
+                    half_base_rad = math.radians(ATTACK_CONE_BASE_ANGLE / 2)
+                    half_full_rad = math.radians(ATTACK_CONE_ANGLE / 2)
+
+                    # Interpolate cone angle based on distance (relative to attacker's weapon reach)
+                    t = min(distance / attacker_weapon_reach, 1.0)
+                    half_cone_rad = half_base_rad + t * (half_full_rad - half_base_rad)
+
+                    # Check if attacker is within block cone
+                    angle_diff = angle_to_attacker - block_angle
+                    while angle_diff > math.pi:
+                        angle_diff -= 2 * math.pi
+                    while angle_diff < -math.pi:
+                        angle_diff += 2 * math.pi
+
+                    if abs(angle_diff) <= half_cone_rad:
+                        # Attack blocked!
+                        self.state.log_action(f"{target_name} BLOCKED {attacker_name}'s attack!")
+                        result['hit'] = False
+                        return result
+
+        result['hit'] = True
+
+        # Get weapon stats (equipped weapon or fists)
+        weapon_stats = self.get_weapon_stats(attacker)
+        weapon_name = weapon_stats.get('name', 'Fists')
+        damage_min = weapon_stats.get('base_damage_min', 2)
+        damage_max = weapon_stats.get('base_damage_max', 5)
+
+        # Apply damage
+        damage = random.randint(damage_min, damage_max)
+        result['damage'] = damage
+        old_health = target.health
+        target.health -= damage
+
+        # Log with weapon name (IDENTICAL format to resolve_attack)
+        if weapon_name == 'Fists':
+            self.state.log_action(f"{attacker_name} PUNCHES {target_name} for {damage} damage! Health: {old_health} -> {target.health}")
+        else:
+            self.state.log_action(f"{attacker_name} ATTACKS {target_name} with {weapon_name} for {damage} damage! Health: {old_health} -> {target.health}")
+
+        # Cancel ongoing action if player is hit
+        if target.is_player and target.has_ongoing_action():
+            cancelled = target.cancel_ongoing_action()
+            if cancelled:
+                action_name = cancelled['action'].title()
+                self.state.log_action(f"{target_name}'s {action_name} interrupted by attack!")
+
+        # Cancel heavy attack charge if player is hit
+        if target.is_player and target.is_charging_heavy_attack():
+            target.cancel_heavy_attack()
+            self.state.log_action(f"{target_name}'s heavy attack interrupted!")
+
+        # Set hit flash for visual feedback
+        target['hit_flash_until'] = self.state.ticks + 2
+
+        # Clear face_target and intent - being hit interrupts current behavior
+        target['face_target'] = None
+        if target.intent and target.intent.get('reason') == 'bystander':
+            target.clear_intent()
+
+        # Target remembers being attacked
+        self.remember_attack(target, attacker, damage)
+
+        # Update attacker's intent if not already attacking someone
+        if attacker.intent is None or attacker.intent.get('action') != 'attack':
+            attacker.set_intent('attack', target, reason='initiated_attack', started_tick=self.state.ticks)
+
+        # Check if target was a criminal
+        target_was_criminal = self.is_known_criminal(target)
+
+        # Determine if attacker is a known criminal to anyone
+        attacker_is_criminal = self.is_known_criminal(attacker)
+
+        # If attacking an innocent, this is a crime
+        if not target_was_criminal:
+            if not attacker_is_criminal:
+                attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                   location=(attacker.x, attacker.y),
+                                   intensity=CRIME_INTENSITY_ASSAULT,
+                                   source='self',
+                                   crime_type='assault', victim=target)
+                attacker_is_criminal = True
+
+            # Witness attack
+            if target.health > 0:
+                self.witness_crime(attacker, target, 'assault')
+
+        # Handle death
+        if target.health <= 0:
+            result['killed'] = True
+
+            if target_was_criminal and not attacker_is_criminal:
+                # Justified kill
+                self.state.log_action(f"{attacker_name} killed {target_name} (justified)")
+            else:
+                # Murder - record and witness
+                attacker.add_memory('committed_crime', attacker, self.state.ticks,
+                                   location=(attacker.x, attacker.y),
+                                   intensity=CRIME_INTENSITY_MURDER,
+                                   source='self',
+                                   crime_type='murder', victim=target)
+                self.witness_crime(attacker, target, 'murder')
+
+            # Items remain in corpse (no automatic transfer)
+
+            # Clear intent if this was the target
+            if attacker.intent and attacker.intent.get('target') is target:
+                attacker.clear_intent()
+
+        # Broadcast violence
+        self.broadcast_violence(attacker, target)
+
+        return result
     
 
     def shoot_arrow(self, char, target_angle, draw_progress):
@@ -748,8 +1259,6 @@ class GameLogic:
         
         # Record attack tick for cooldown
         attacker['last_attack_tick'] = self.state.ticks
-
-    # TICK PROCESSING
     
 
     def _process_npc_combat_mode(self):
@@ -801,13 +1310,44 @@ class GameLogic:
 
     def _process_pending_attacks(self):
         """Process pending attacks when their animations complete.
-        
-        DELEGATED TO: combat_system.process_pending_attacks()
-        
+
         Called every tick. Checks all characters for pending attacks and
         resolves damage when the attack animation has finished.
         """
-        self.combat_system.process_pending_attacks()
+        for char in self.state.characters:
+            # Skip dead characters
+            if char.get('health', 100) <= 0:
+                continue
+
+            # Check if character has a pending attack and animation is complete
+            if char.has_pending_attack() and char.is_attack_animation_complete():
+                pending = char.get_and_clear_pending_attack()
+                if pending is None:
+                    continue
+
+                target = pending.get('target')
+
+                if target is not None:
+                    # NPC targeted melee attack
+                    result = self.resolve_melee_attack(char, target)
+
+                    # Clear attack intent if target killed
+                    if result.get('killed'):
+                        if char.intent and char.intent.get('action') == 'attack':
+                            char.clear_intent()
+                else:
+                    # Player AOE cone attack (or NPC without specific target)
+                    attack_dir = pending.get('direction', char.facing)
+                    multiplier = pending.get('multiplier', 1.0)
+
+                    # Temporarily set attack_angle for resolve_attack
+                    old_angle = char.attack_angle
+                    char.attack_angle = pending.get('angle')
+
+                    self.resolve_attack(char, attack_dir, damage_multiplier=multiplier)
+
+                    # Restore angle
+                    char.attack_angle = old_angle
     
 
     def equip_weapon(self, character, slot_index):
@@ -876,8 +1416,6 @@ class GameLogic:
     # =============================================================================
     # INVENTORY SYSTEM - Core Operations
     # =============================================================================
-    # Item usage, equipment, and core inventory operations
-    # =============================================================================
 
     def use_item(self, character, slot_index):
         """Use/consume an item from a specific inventory slot.
@@ -941,7 +1479,6 @@ class GameLogic:
 
         return {'success': True, 'item_type': item_type, 'amount': amount, 'display_name': display_name}
 
-
     def can_burn_items(self, character):
         """Check if character is adjacent to a usable stove or campfire.
 
@@ -966,7 +1503,6 @@ class GameLogic:
                         return True
 
         return False
-
 
     def transfer_item_to_inventory(self, item_type, amount, target_inventory, stack_limit):
         """Transfer items to an inventory with stacking logic.
@@ -1012,8 +1548,6 @@ class GameLogic:
                             break
 
         return amount_to_move
-
-
 
     def get_stack_limit(self, item_type):
         """Get stack limit for an item type. Returns None for unlimited."""
@@ -1064,9 +1598,7 @@ class GameLogic:
 
 
     # =============================================================================
-    # INVENTORY SYSTEM - Slot Interactions
-    # =============================================================================
-    # Inventory slot clicking and quick-move operations
+    # INVENTORY INTERACTIONS - Player inventory slot clicking and quick-move
     # =============================================================================
 
     def interact_inventory_slot_full(self, player, slot_index, held_item, held_was_equipped):
@@ -1263,9 +1795,7 @@ class GameLogic:
 
 
     # =============================================================================
-    # GROUND ITEMS SYSTEM
-    # =============================================================================
-    # Ground item interactions and dropping logic
+    # GROUND ITEMS - Picking up, dropping, and ground inventory interactions
     # =============================================================================
 
     def interact_ground_slot_full(self, ground_item, held_item, ground_items_manager, nearby_items_list, player):
@@ -1427,7 +1957,7 @@ class GameLogic:
     # =============================================================================
     # BARREL/CONTAINER SYSTEM
     # =============================================================================
-    # Storage container interactions
+    # BARRELS - Storage container interactions and wheat management
     # =============================================================================
 
     def take_from_barrel(self, char, max_amount=50, log_errors=True):
@@ -1654,9 +2184,7 @@ class GameLogic:
 
 
     # =============================================================================
-    # FARMING SYSTEM
-    # =============================================================================
-    # Crop planting, harvesting, and farm management
+    # FARMING - Crop planting, harvesting, and farm cell management
     # =============================================================================
 
     def player_harvest_cell(self, player):
@@ -1739,8 +2267,6 @@ class GameLogic:
         
         return True
     
-    
-
     def _update_farm_cells(self):
         """Update all farm cell states"""
         for cell, data in self.state.farm_cells.items():
@@ -1881,9 +2407,7 @@ class GameLogic:
         )
         return True
     # =============================================================================
-    # CRAFTING & COOKING SYSTEM
-    # =============================================================================
-    # Bread baking and crafting mechanics
+    # COOKING - Bread baking and stove/campfire interactions
     # =============================================================================
 
     def get_adjacent_cooking_spot(self, char):
@@ -2115,14 +2639,8 @@ class GameLogic:
         
         return False
 
-    
-    # PERCEPTION SYSTEM (Vision Cones and Sound Radii)
-    
-
     # =============================================================================
-    # CAMPFIRE & ENVIRONMENT
-    # =============================================================================
-    # Camp making and outdoor survival
+    # CAMPFIRES - Camp making and outdoor survival mechanics
     # =============================================================================
 
     def get_sleep_position(self, char):
@@ -2173,8 +2691,6 @@ class GameLogic:
             return True
         return False
     
-    
-
     def get_adjacent_camp(self, char):
         """Get any camp adjacent to the character.
         Returns (camp_position, owner_char) tuple or (None, None).
@@ -2186,7 +2702,6 @@ class GameLogic:
                 return camp_pos, other_char
         return None, None
     
-
     def _find_camp_spot(self, char):
         """Find a nearby position where the character can make a camp (outside village).
         Returns float position (center of cell).
@@ -2207,7 +2722,6 @@ class GameLogic:
         
         return best_spot
     
-
     def can_build_campfire(self, player):
         """Check if player can build a campfire at current location."""
         if not player:
@@ -2226,8 +2740,6 @@ class GameLogic:
 
     # =============================================================================
     # DIALOGUE SYSTEM
-    # =============================================================================
-    # NPC conversation management
     # =============================================================================
 
     def can_start_dialogue(self, npc):
@@ -2363,13 +2875,9 @@ class GameLogic:
         elif angle >= -3*math.pi/8 and angle < -math.pi/8:
             character.facing = 'up-right'
 
-    # ENVIRONMENT QUERIES
-
 
     # =============================================================================
-    # ENVIRONMENT QUERIES
-    # =============================================================================
-    # Finding nearby objects, NPCs, and interactive elements
+    # ENVIRONMENT QUERIES - Finding nearby objects, NPCs, and interactables
     # =============================================================================
 
     def get_nearest_interactable_npc(self, player, max_distance=ADJACENCY_DISTANCE):
@@ -2407,8 +2915,6 @@ class GameLogic:
                 nearest_npc = char
 
         return nearest_npc
-
-    # DIALOGUE SYSTEM
 
 
     def get_nearby_corpse(self, character, max_distance=1.5):
@@ -2449,7 +2955,6 @@ class GameLogic:
 
         return None
 
-
     def get_nearby_tree(self, character, max_distance=1.5):
         """
         Find a tree near the character (exterior only).
@@ -2478,7 +2983,6 @@ class GameLogic:
                 return tree
 
         return None
-
 
     # =============================================================================
     # PERCEPTION & VISION SYSTEM
@@ -3026,9 +3530,6 @@ class GameLogic:
         
         return (False, None)
     
-    # Criminal Status and Memory
-    
-
     def _update_facing_from_velocity(self, char):
         """Update character's facing direction based on velocity.
         
@@ -3094,8 +3595,6 @@ class GameLogic:
 
     # =============================================================================
     # CRIME & MEMORY SYSTEM
-    # =============================================================================
-    # Criminal status, memories, and defender logic
     # =============================================================================
 
     def is_known_criminal(self, char):
@@ -3246,11 +3745,8 @@ class GameLogic:
         
         return (None, None)
     
-
     # =============================================================================
-    # CRIME ACTIONS
-    # =============================================================================
-    # Theft, murder, and criminal behavior
+    # CRIME ACTIONS - Theft, murder, and criminal AI behavior
     # =============================================================================
 
     def get_hunger_factor(self, char):
@@ -3645,11 +4141,8 @@ class GameLogic:
 
         return True
     
-
     # =============================================================================
-    # WITNESS & CRIME REPORTING
-    # =============================================================================
-    # Crime witnessing and reporting to authorities
+    # CRIME WITNESSING - Crime detection and reporting to defenders
     # =============================================================================
 
     def witness_crime(self, criminal, victim, crime_type):
@@ -3809,12 +4302,8 @@ class GameLogic:
                     if criminal in self.state.characters:
                         self.report_crime_to(char, other, crime_memory)
 
-
-
     # =============================================================================
-    # ONGOING ACTIONS
-    # =============================================================================
-    # Timed player actions (harvest, plant, chop)
+    # ONGOING ACTIONS - Timed player actions (harvest, plant, chop)
     # =============================================================================
 
     def update_ongoing_actions(self):
@@ -3857,13 +4346,8 @@ class GameLogic:
             # Clear the ongoing action
             player.cancel_ongoing_action()
 
-    # MOVEMENT SYSTEM
-    
-
     # =============================================================================
-    # MOVEMENT SYSTEM
-    # =============================================================================
-    # Position updates, velocity, collision, and squeeze behavior
+    # MOVEMENT & PHYSICS - Position updates, collisions, and NPC movement
     # =============================================================================
 
     def _should_npc_sprint(self, char):
@@ -4348,11 +4832,8 @@ class GameLogic:
             # Equal space - pick randomly
             return random.choice([-1, 1])
 
-
     # =============================================================================
-    # PATHFINDING & NAVIGATION
-    # =============================================================================
-    # Goal selection, pathfinding, and AI navigation
+    # PATHFINDING - Goal selection, navigation, and movement AI
     # =============================================================================
 
     def _process_npc_movement(self):
@@ -4866,7 +5347,6 @@ class GameLogic:
         
         return None
     
-
     def _choose_idle_destination(self, char, area, is_village):
         """Choose a destination for idle wandering.
         70% chance to pick a point of interest (corners, center, edges)
@@ -5126,209 +5606,11 @@ class GameLogic:
     
     
 
+
+
     # =============================================================================
-    # TICK PROCESSING
+    # UTILITY HELPERS - General-purpose helper functions
     # =============================================================================
-    # Game loop tick processing and updates
-    # =============================================================================
-
-    def process_tick(self):
-        """Process one game tick - updates all game state"""
-        self.state.ticks += 1
-        
-        # Update hunger for all characters
-        for char in self.state.characters:
-            char['hunger'] = max(0, char['hunger'] - HUNGER_DECAY)
-        
-        # Update stamina for all characters (Skyrim-style)
-        self._process_stamina()
-        
-        # Process starvation
-        self._process_starvation()
-        
-        # Update NPC combat mode based on intent
-        self._process_npc_combat_mode()
-        
-        # Process pending attacks (resolve damage when animation completes)
-        self._process_pending_attacks()
-        
-        # Handle deaths IMMEDIATELY - remove from game logic, store visual info separately
-        # This must happen right after starvation before any other processing
-        self._process_deaths()
-        
-        # Update farm cells
-        self._update_farm_cells()
-        
-        # Age increment
-        if self.state.ticks > 0 and self.state.ticks % TICKS_PER_YEAR == 0:
-            for char in self.state.characters:
-                char['age'] += 1
-            self.state.log_action(f"A new year begins! Everyone is one year older.")
-        
-        # Tax grace period check - steward goes to collect if farmer is late
-        steward = self.state.get_steward()
-        if steward:
-            steward_allegiance = steward.get('allegiance')
-            for char in self.state.characters:
-                if char.get('job') == 'Farmer' and char.get('allegiance') == steward_allegiance:
-                    tax_due_tick = char.get('tax_due_tick')
-                    if tax_due_tick is not None and self.state.ticks >= tax_due_tick + TAX_GRACE_PERIOD:
-                        if steward.get('tax_collection_target') != char:
-                            steward_name = steward.get_display_name()
-                            char_name = char.get_display_name()
-                            self.state.log_action(f"Steward {steward_name} going to collect tax from {char_name}!")
-                            steward['tax_collection_target'] = char
-        
-        # Move NPCs with swap detection to prevent oscillation
-        self._process_npc_movement()
-        
-        # Process deaths again to catch combat kills
-        self._process_deaths()
-    
-
-    def _process_deaths(self):
-        """Remove dead characters from game and create corpse interactables"""
-        from world_objects import Corpse
-
-        dead_chars = [char for char in self.state.characters if char['health'] <= 0]
-        for char in dead_chars:
-            # Log death message
-            dead_name = char.get_display_name()
-            if char.is_player:
-                if char.get('is_starving'):
-                    self.state.log_action(f"{dead_name} (PLAYER) DIED from starvation! GAME OVER")
-                else:
-                    self.state.log_action(f"{dead_name} (PLAYER) DIED! GAME OVER")
-            else:
-                if char.get('is_starving'):
-                    self.state.log_action(f"{dead_name} DIED from starvation!")
-                else:
-                    self.state.log_action(f"{dead_name} DIED!")
-
-            # Get position (interior coords if in interior, world coords if outside)
-            if char.zone:
-                corpse_x = char.prevailing_x  # Local coords
-                corpse_y = char.prevailing_y
-            else:
-                corpse_x = char['x']  # World coords
-                corpse_y = char['y']
-
-            # Create corpse interactable with character's inventory
-            corpse_name = f"{char['name']}'s Corpse"
-            corpse = Corpse(
-                name=corpse_name,
-                character_name=char['name'],
-                x=corpse_x,
-                y=corpse_y,
-                zone=char.zone,
-                facing=char.get('facing', 'down'),
-                job=char.get('job'),
-                morality=char.get('morality', 5)
-            )
-
-            # Transfer inventory from character to corpse
-            for i, slot in enumerate(char.inventory):
-                if slot is not None:
-                    corpse.inventory[i] = {'type': slot['type'], 'amount': slot['amount']}
-
-            # Set interior projection params if in interior
-            if char.zone and hasattr(self.state, 'interiors'):
-                interior = self.state.interiors.get_interior(char.zone)
-                if interior:
-                    corpse.set_interior_projection(interior)
-
-            # Add corpse to game state
-            self.state.corpses.append(corpse)
-
-            # Immediately remove character from game - no more processing
-            self.state.remove_character(char)
-    
-
-    def _process_stamina(self):
-        """Process stamina drain/regeneration for all characters (Skyrim-style)."""
-        current_tick = self.state.ticks
-        
-        for char in self.state.characters:
-            # Skip dying characters
-            if char.get('health', 100) <= 0:
-                continue
-            
-            if char.is_sprinting:
-                # Drain stamina while sprinting
-                if not char.drain_stamina_sprint(current_tick):
-                    # Stamina depleted - force stop sprinting
-                    char.is_sprinting = False
-                    # Reduce velocity to walking speed
-                    if char.vx != 0 or char.vy != 0:
-                        speed_ratio = MOVEMENT_SPEED / SPRINT_SPEED
-                        char.vx *= speed_ratio
-                        char.vy *= speed_ratio
-            else:
-                # Regenerate stamina when not sprinting
-                char.regenerate_stamina(current_tick)
-    
-
-    def _process_starvation(self):
-        """Process starvation for all characters"""
-        for char in self.state.characters:
-            # Skip dying characters
-            if char.get('health', 100) <= 0:
-                continue
-            
-            name = char.get_display_name()
-            
-            # Check if character should enter starvation (hunger = 0)
-            if char['hunger'] <= STARVATION_THRESHOLD:
-                was_starving = char.get('is_starving', False)
-                
-                if not was_starving:
-                    # Just entered starvation
-                    char['is_starving'] = True
-                    char['starvation_health_lost'] = 0
-                    char['ticks_starving'] = 0
-                    self.state.log_action(f"{name} is STARVING! Losing health...")
-                    
-                    # Soldiers quit when they start starving - lose job and home, but keep allegiance
-                    # This gives them a chance to buy wheat from a farmer and rejoin
-                    # If no farmer will sell to them, wheat timeout will naturally remove allegiance
-                    if char.get('job') == 'Soldier':
-                        char['job'] = None
-                        char['home'] = None
-                        # Remove bed ownership
-                        self.state.interactables.unassign_bed_owner(char['name'])
-                        self.state.log_action(f"{name} QUIT being a Soldier due to starvation!")
-                
-                # Increment ticks starving
-                char['ticks_starving'] = char.get('ticks_starving', 0) + 1
-                
-                # Apply starvation damage
-                char['health'] -= STARVATION_DAMAGE
-                char['starvation_health_lost'] += STARVATION_DAMAGE
-                
-                # Check if should freeze (health <= 20)
-                if char['health'] <= STARVATION_FREEZE_HEALTH:
-                    if not char.get('is_frozen', False):
-                        char['is_frozen'] = True
-                        # Clear any intent when freezing
-                        char.clear_intent()
-                        self.state.log_action(f"{name} is too weak to move! (health: {char['health']})")
-                
-                # Check for morality loss every STARVATION_MORALITY_INTERVAL health lost
-                if char['starvation_health_lost'] >= STARVATION_MORALITY_INTERVAL:
-                    char['starvation_health_lost'] -= STARVATION_MORALITY_INTERVAL
-                    if random.random() < STARVATION_MORALITY_CHANCE:
-                        old_morality = char.get('morality', 5)
-                        if old_morality > 1:
-                            char['morality'] = old_morality - 1
-                            self.state.log_action(f"{name}'s morality dropped from {old_morality} to {char['morality']} due to starvation!")
-            else:
-                # Not starving anymore
-                if char.get('is_starving', False):
-                    char['is_starving'] = False
-                    char['is_frozen'] = False
-                    char['starvation_health_lost'] = 0
-                    char['ticks_starving'] = 0
-    
 
     def _get_direction_vector(self, facing):
         """Get unit direction vector for a facing direction."""
@@ -5344,14 +5626,6 @@ class GameLogic:
         }
         return vectors.get(facing, (0, 1))
 
-
-
-    # =============================================================================
-    # UTILITY & HELPER METHODS
-    # =============================================================================
-    # General-purpose helper functions
-    # =============================================================================
-
     def _face_toward_character(self, char, target):
         """Make char face toward target character."""
         if char.zone == target.zone and char.zone is not None:
@@ -5364,7 +5638,6 @@ class GameLogic:
         if abs(dx) > 0.01 or abs(dy) > 0.01:
             self._update_facing(char, dx, dy)
     
-    
 
     def _reset_idle_state(self, char):
         """Reset idle state when character is no longer idling."""
@@ -5376,7 +5649,7 @@ class GameLogic:
     
 
     # =========================================================================
-    # NPC BEHAVIOR METHODS (from jobs.py)
+    # AI BEHAVIOR CHECKS - Decision checks for NPC AI (check_* methods)
     # =========================================================================
     def check_flee(self, char):
         """Should flee from an attacker (victim) or violence (bystander)?"""
@@ -5558,7 +5831,7 @@ class GameLogic:
         return True
     
     # =========================================================================
-    # ACTIONS - The actual behavior implementations
+    # AI BEHAVIOR ACTIONS - Action implementations for NPC AI (do_* methods)
     # =========================================================================
     
     def do_flee(self, char):
@@ -6402,9 +6675,7 @@ class GameLogic:
         return False
     
     # =========================================================================
-
-    # =========================================================================
-    # SOLDIER-SPECIFIC BEHAVIOR METHODS
+    # SOLDIER AI - Soldier-specific behavior and patrol logic
     # =========================================================================
     
     def check_fight_back_soldier(self, char):
@@ -6486,7 +6757,8 @@ class GameLogic:
         char.goal_zone = None  # Patrol is always exterior
         return False
 
-    # UTILITY METHODS
+    # =========================================================================
+    # UTILITY - Face targeting and general helpers
     # =========================================================================
     
     def face_target(self, char, target):
@@ -6502,8 +6774,9 @@ class GameLogic:
             char.facing = 'right' if dx > 0 else 'left'
         else:
             char.facing = 'down' if dy > 0 else 'up'
+
     # =========================================================================
-    # PLAYER INTERACTION QUERIES (for player_controller.py)
+    # PLAYER QUERIES - Nearby object queries for player interactions
     # =========================================================================
 
     def get_player_nearby_corpse(self, player):
@@ -6593,7 +6866,7 @@ class GameLogic:
         return None
 
     # =========================================================================
-    # ATTACK CONE DETECTION (shared by player UI and combat resolution)
+    # ATTACK CONES - Cone detection for UI and combat resolution
     # =========================================================================
 
     def is_char_in_attack_cone(self, attacker, target, attack_angle):
@@ -6677,7 +6950,7 @@ class GameLogic:
         return chars_in_cone
 
     # =========================================================================
-    # NPC THREAT DETECTION
+    # THREAT DETECTION - Finding active attackers and threats
     # =========================================================================
 
     def get_active_attacker(self, char, max_ticks_ago=50, max_distance=8.0):
@@ -6714,7 +6987,7 @@ class GameLogic:
         return None
 
     # =========================================================================
-    # MOVEMENT COLLISION SYSTEM (shared by player and NPCs)
+    # COLLISION SYSTEM - Movement collision and sliding for player/NPCs
     # =========================================================================
 
     def apply_movement_with_collision(self, char, new_x, new_y, vx, vy, dt):

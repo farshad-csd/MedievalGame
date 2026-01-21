@@ -24,7 +24,7 @@ from world_objects import InteractableManager, InteriorManager, GroundItemManage
 class GameState:
     """
     Data container for all game state with pure query methods.
-    
+
     This class:
     - Holds all mutable game data (characters, areas, ticks, etc.)
     - Provides pure query methods (lookups, distance, etc.)
@@ -32,7 +32,11 @@ class GameState:
     - Does NOT contain game rules/behavior (that's in game_logic.py)
     - Does NOT contain rendering code (that's in gui.py)
     """
-    
+
+    # =============================================================================
+    # INITIALIZATION
+    # =============================================================================
+
     def __init__(self):
         # Time tracking
         self.ticks = 0
@@ -222,7 +226,6 @@ class GameState:
         # Fallback to center
         return (center_x, center_y)
     
-    
     def _assign_job_resources(self, char, job, home_area):
         """Assign bed and barrel ownership based on job."""
         char_name = char.name
@@ -267,11 +270,11 @@ class GameState:
         
         # Last resort: just return something
         return random.randint(0, SIZE - 1), random.randint(0, SIZE - 1)
-    
-    # =========================================================================
-    # QUERY METHODS (pure data access, no side effects)
-    # =========================================================================
-    
+
+    # =============================================================================
+    # CHARACTER QUERIES - Finding and retrieving character objects
+    # =============================================================================
+
     def get_character(self, name):
         """Get a character by name"""
         for char in self.characters:
@@ -282,7 +285,11 @@ class GameState:
     def get_characters_by_job(self, job):
         """Get all characters with a specific job"""
         return [c for c in self.characters if c.get('job') == job]
-    
+
+    # =============================================================================
+    # AREA QUERIES - Area lookups, roles, and allegiances
+    # =============================================================================
+
     def get_area_at(self, x, y):
         """Get the area name at a position. Works with float positions."""
         cell_x = int(x)
@@ -351,7 +358,11 @@ class GameState:
             if char.get('job') == 'Steward' and char.get('allegiance') == allegiance:
                 return char
         return None
-    
+
+    # =============================================================================
+    # COLLISION & POSITION VALIDATION - Obstacle and character collision checks
+    # =============================================================================
+
     def is_position_valid(self, x, y):
         """Check if position is within bounds (works with float positions)"""
         return 0 <= x < SIZE and 0 <= y < SIZE
@@ -478,7 +489,11 @@ class GameState:
                     if dist < collision_dist:
                         return True
         return False
-    
+
+    # =============================================================================
+    # CHARACTER POSITION QUERIES - Grid-based character lookups
+    # =============================================================================
+
     def is_occupied(self, x, y):
         """Check if a cell is occupied by any character (for grid-based queries).
         Converts float position to cell and checks if any character's center is in that cell.
@@ -522,9 +537,13 @@ class GameState:
             if dist < radius and dist < closest_dist:
                 closest = char
                 closest_dist = dist
-        
+
         return closest
-    
+
+    # =============================================================================
+    # AREA & ALLEGIANCE POSITION CHECKS - Zone membership queries
+    # =============================================================================
+
     def is_in_village(self, x, y):
         """Check if position is in any village or area belonging to a village.
         Returns True if the area has an allegiance (is part of a settlement).
@@ -563,7 +582,11 @@ class GameState:
         if area:
             return self.get_allegiance_of_area(area)
         return None
-    
+
+    # =============================================================================
+    # AREA BOUNDS & GEOMETRY - Cell lists, bounds, and points of interest
+    # =============================================================================
+
     def get_area_cells(self, area_name):
         """Get all cells belonging to an area"""
         cells = []
@@ -734,7 +757,11 @@ class GameState:
                     if self.get_area_at(x, y) == area_name:
                         valid_positions.append((x + 0.5, y + 0.5))
         return valid_positions
-    
+
+    # =============================================================================
+    # PATROL & PERIMETER - Soldier patrol routes and village boundaries
+    # =============================================================================
+
     def get_village_perimeter(self):
         """Get cells forming the perimeter around the village in clockwise order"""
         # Find village bounds
@@ -839,9 +866,13 @@ class GameState:
                         continue
                 
                 waypoints.append((px, py))
-        
+
         return waypoints
-    
+
+    # =============================================================================
+    # FARM & TEMPLATE QUERIES - Farm cells and character template lookups
+    # =============================================================================
+
     def get_farm_cell_state(self, x, y):
         """Get the state of a farm cell. Works with float positions."""
         cell_x = int(x)
@@ -866,7 +897,11 @@ class GameState:
     def get_template(self, name):
         """Get the static template for a character by name"""
         return CHARACTER_TEMPLATES.get(name)
-    
+
+    # =============================================================================
+    # DISTANCE CALCULATIONS - Character distance queries
+    # =============================================================================
+
     def get_distance(self, char1, char2):
         """Euclidean distance between two characters (float-based).
         Uses prevailing coords when both in same zone for correct interior distances.
@@ -878,7 +913,11 @@ class GameState:
                            (char1.prevailing_y - char2.prevailing_y) ** 2)
         # Different zones or exterior - use world coords
         return math.sqrt((char1['x'] - char2['x']) ** 2 + (char1['y'] - char2['y']) ** 2)
-    
+
+    # =============================================================================
+    # MISCELLANEOUS QUERIES - Stewards, allegiance counts, beds, sleep time
+    # =============================================================================
+
     def get_steward(self):
         """Get the steward character, or None if no steward exists."""
         for char in self.characters:
@@ -899,11 +938,11 @@ class GameState:
         from constants import TICKS_PER_DAY, SLEEP_START_FRACTION
         day_tick = self.ticks % TICKS_PER_DAY
         return day_tick >= TICKS_PER_DAY * SLEEP_START_FRACTION
-    
-    # =========================================================================
-    # ZONE/INTERIOR METHODS
-    # =========================================================================
-    
+
+    # =============================================================================
+    # ZONE & INTERIOR QUERIES - Zone distances, same-zone checks, and perception
+    # =============================================================================
+
     def get_world_distance(self, char1, char2):
         """
         Euclidean distance between two characters using world coordinates.
@@ -985,11 +1024,11 @@ class GameState:
                 if dx < 1.0 and dy < 1.0:
                     return house
         return None
-    
-    # =========================================================================
-    # MODIFICATION METHODS (simple state changes)
-    # =========================================================================
-    
+
+    # =============================================================================
+    # STATE MODIFICATION - Character removal and action logging
+    # =============================================================================
+
     def remove_character(self, char):
         """Remove a character from the game and clear all references to them"""
         if char in self.characters:
@@ -1028,7 +1067,11 @@ class GameState:
         # Keep only last 1000 entries (increased from 100)
         if len(self.action_log) > 1000:
             self.action_log = self.action_log[-1000:]
-    
+
+    # =============================================================================
+    # GAME RESET
+    # =============================================================================
+
     def reset(self):
         """Reset game to initial state"""
         self.ticks = 0

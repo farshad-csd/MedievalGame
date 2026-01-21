@@ -737,6 +737,7 @@ class BoardGUI:
         self.input.block = rl.is_key_down(rl.KEY_SPACE)
         
         # Shoot arrow (F key) - track pressed/held/released like attack
+    
     def _handle_mouse_input(self):
         """Handle mouse input"""
         self.input.mouse_x = rl.get_mouse_x()
@@ -981,7 +982,6 @@ class BoardGUI:
                 player.cancel_bow_draw()
             if player.is_charging_heavy_attack():
                 player.cancel_heavy_attack()
-    
     
     def _toggle_window_view_off(self):
         """Stop window viewing and recenter on player."""
@@ -2495,43 +2495,43 @@ class BoardGUI:
             return self._composite_shader
         
         fragment_shader = """
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-uniform sampler2D texture0;  // Outline render texture
-uniform sampler2D texture1;  // Tree mask
-out vec4 finalColor;
+            #version 330
+            in vec2 fragTexCoord;
+            in vec4 fragColor;
+            uniform sampler2D texture0;  // Outline render texture
+            uniform sampler2D texture1;  // Tree mask
+            out vec4 finalColor;
 
-void main() {
-    vec4 outline = texture(texture0, fragTexCoord);
-    // Mask texture is also a render texture, so flip Y
-    vec2 maskCoord = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
-    vec4 mask = texture(texture1, maskCoord);
-    
-    // Only show outline where mask (tree) is opaque
-    if (mask.a < 0.1) {
-        discard;
-    }
-    
-    finalColor = outline;
-}
-"""
+            void main() {
+                vec4 outline = texture(texture0, fragTexCoord);
+                // Mask texture is also a render texture, so flip Y
+                vec2 maskCoord = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
+                vec4 mask = texture(texture1, maskCoord);
+                
+                // Only show outline where mask (tree) is opaque
+                if (mask.a < 0.1) {
+                    discard;
+                }
+                
+                finalColor = outline;
+            }
+            """
         
         vertex_shader = """
-#version 330
-in vec3 vertexPosition;
-in vec2 vertexTexCoord;
-in vec4 vertexColor;
-uniform mat4 mvp;
-out vec2 fragTexCoord;
-out vec4 fragColor;
+            #version 330
+            in vec3 vertexPosition;
+            in vec2 vertexTexCoord;
+            in vec4 vertexColor;
+            uniform mat4 mvp;
+            out vec2 fragTexCoord;
+            out vec4 fragColor;
 
-void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor = vertexColor;
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
-}
-"""
+            void main() {
+                fragTexCoord = vertexTexCoord;
+                fragColor = vertexColor;
+                gl_Position = mvp * vec4(vertexPosition, 1.0);
+            }
+            """
         
         self._composite_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
         self._composite_mask_loc = rl.get_shader_location(self._composite_shader, "texture1")
@@ -2545,61 +2545,61 @@ void main() {
         
         # Fragment shader that draws white outline around opaque pixels
         fragment_shader = """
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-uniform sampler2D texture0;
-uniform vec2 textureSize;
-uniform float outlineWidth;
-out vec4 finalColor;
+            #version 330
+            in vec2 fragTexCoord;
+            in vec4 fragColor;
+            uniform sampler2D texture0;
+            uniform vec2 textureSize;
+            uniform float outlineWidth;
+            out vec4 finalColor;
 
-void main() {
-    vec4 texel = texture(texture0, fragTexCoord);
-    
-    // If this pixel is transparent, check if neighbors are opaque
-    if (texel.a < 0.1) {
-        vec2 pixelSize = vec2(1.0 / textureSize.x, 1.0 / textureSize.y) * outlineWidth;
-        
-        // Sample in 8 directions
-        float neighborAlpha = 0.0;
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, 0)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, 0)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, -pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, -pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, -pixelSize.y)).a);
-        
-        // If any neighbor is opaque, draw white outline
-        if (neighborAlpha > 0.5) {
-            finalColor = vec4(1.0, 1.0, 1.0, 0.8);
-        } else {
-            finalColor = vec4(0.0, 0.0, 0.0, 0.0);
-        }
-    } else {
-        // Opaque pixel - draw as semi-transparent white silhouette
-        finalColor = vec4(1.0, 1.0, 1.0, texel.a * 0.3);
-    }
-}
-"""
+            void main() {
+                vec4 texel = texture(texture0, fragTexCoord);
+                
+                // If this pixel is transparent, check if neighbors are opaque
+                if (texel.a < 0.1) {
+                    vec2 pixelSize = vec2(1.0 / textureSize.x, 1.0 / textureSize.y) * outlineWidth;
+                    
+                    // Sample in 8 directions
+                    float neighborAlpha = 0.0;
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, 0)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, 0)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, -pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, -pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, -pixelSize.y)).a);
+                    
+                    // If any neighbor is opaque, draw white outline
+                    if (neighborAlpha > 0.5) {
+                        finalColor = vec4(1.0, 1.0, 1.0, 0.8);
+                    } else {
+                        finalColor = vec4(0.0, 0.0, 0.0, 0.0);
+                    }
+                } else {
+                    // Opaque pixel - draw as semi-transparent white silhouette
+                    finalColor = vec4(1.0, 1.0, 1.0, texel.a * 0.3);
+                }
+            }
+            """
         
         # Default vertex shader
         vertex_shader = """
-#version 330
-in vec3 vertexPosition;
-in vec2 vertexTexCoord;
-in vec4 vertexColor;
-uniform mat4 mvp;
-out vec2 fragTexCoord;
-out vec4 fragColor;
+            #version 330
+            in vec3 vertexPosition;
+            in vec2 vertexTexCoord;
+            in vec4 vertexColor;
+            uniform mat4 mvp;
+            out vec2 fragTexCoord;
+            out vec4 fragColor;
 
-void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor = vertexColor;
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
-}
-"""
+            void main() {
+                fragTexCoord = vertexTexCoord;
+                fragColor = vertexColor;
+                gl_Position = mvp * vec4(vertexPosition, 1.0);
+            }
+            """
         
         self._outline_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
         self._outline_texture_size_loc = rl.get_shader_location(self._outline_shader, "textureSize")
@@ -2614,61 +2614,61 @@ void main() {
         
         # Fragment shader that draws red outline around opaque pixels
         fragment_shader = """
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-uniform sampler2D texture0;
-uniform vec2 textureSize;
-uniform float outlineWidth;
-out vec4 finalColor;
+            #version 330
+            in vec2 fragTexCoord;
+            in vec4 fragColor;
+            uniform sampler2D texture0;
+            uniform vec2 textureSize;
+            uniform float outlineWidth;
+            out vec4 finalColor;
 
-void main() {
-    vec4 texel = texture(texture0, fragTexCoord);
-    
-    // If this pixel is transparent, check if neighbors are opaque
-    if (texel.a < 0.1) {
-        vec2 pixelSize = vec2(1.0 / textureSize.x, 1.0 / textureSize.y) * outlineWidth;
-        
-        // Sample in 8 directions
-        float neighborAlpha = 0.0;
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, 0)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, 0)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, -pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, -pixelSize.y)).a);
-        neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, -pixelSize.y)).a);
-        
-        // If any neighbor is opaque, draw red outline
-        if (neighborAlpha > 0.5) {
-            finalColor = vec4(1.0, 1.0, 1.0, 0.8);
-        } else {
-            finalColor = vec4(0.0, 0.0, 0.0, 0.0);
-        }
-    } else {
-        // Opaque pixel - discard (we only want the outline)
-        finalColor = vec4(0.0, 0.0, 0.0, 0.0);
-    }
-}
-"""
+            void main() {
+                vec4 texel = texture(texture0, fragTexCoord);
+                
+                // If this pixel is transparent, check if neighbors are opaque
+                if (texel.a < 0.1) {
+                    vec2 pixelSize = vec2(1.0 / textureSize.x, 1.0 / textureSize.y) * outlineWidth;
+                    
+                    // Sample in 8 directions
+                    float neighborAlpha = 0.0;
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, 0)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, 0)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(0, -pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(pixelSize.x, -pixelSize.y)).a);
+                    neighborAlpha = max(neighborAlpha, texture(texture0, fragTexCoord + vec2(-pixelSize.x, -pixelSize.y)).a);
+                    
+                    // If any neighbor is opaque, draw red outline
+                    if (neighborAlpha > 0.5) {
+                        finalColor = vec4(1.0, 1.0, 1.0, 0.8);
+                    } else {
+                        finalColor = vec4(0.0, 0.0, 0.0, 0.0);
+                    }
+                } else {
+                    // Opaque pixel - discard (we only want the outline)
+                    finalColor = vec4(0.0, 0.0, 0.0, 0.0);
+                }
+            }
+            """
         
         # Default vertex shader
         vertex_shader = """
-#version 330
-in vec3 vertexPosition;
-in vec2 vertexTexCoord;
-in vec4 vertexColor;
-uniform mat4 mvp;
-out vec2 fragTexCoord;
-out vec4 fragColor;
+            #version 330
+            in vec3 vertexPosition;
+            in vec2 vertexTexCoord;
+            in vec4 vertexColor;
+            uniform mat4 mvp;
+            out vec2 fragTexCoord;
+            out vec4 fragColor;
 
-void main() {
-    fragTexCoord = vertexTexCoord;
-    fragColor = vertexColor;
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
-}
-"""
+            void main() {
+                fragTexCoord = vertexTexCoord;
+                fragColor = vertexColor;
+                gl_Position = mvp * vec4(vertexPosition, 1.0);
+            }
+            """
         
         self._red_outline_shader = rl.load_shader_from_memory(vertex_shader, fragment_shader)
         self._red_outline_texture_size_loc = rl.get_shader_location(self._red_outline_shader, "textureSize")
@@ -3195,7 +3195,6 @@ void main() {
             if SHOW_ATTACK_CONE and char.is_player and char.get('combat_mode', False):
                 self._draw_player_attack_cone(char, pixel_cx, pixel_cy, cell_size)
 
-    
     def _draw_player_attack_cone(self, player, pixel_cx, pixel_cy, cell_size):
         """Draw the player's directional attack cone as a truncated wedge.
         
