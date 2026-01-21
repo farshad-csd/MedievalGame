@@ -18,13 +18,9 @@ import math
 import time
 from constants import (
     MOVEMENT_SPEED, SPRINT_SPEED, BLOCK_MOVEMENT_SPEED, ENCUMBERED_SPEED,
-    CHARACTER_WIDTH, CHARACTER_HEIGHT,
-    ATTACK_ANIMATION_DURATION,
-    BREAD_PER_BITE, ITEMS, MAX_HUNGER, STARVATION_THRESHOLD,
-    WHEAT_TO_BREAD_RATIO,
+    ITEMS,
     DIRECTION_TO_FACINGS, OPPOSITE_DIRECTIONS,
     INTERACT_DISTANCE, FISTS,
-    ATTACK_CONE_BASE_ANGLE, ATTACK_CONE_ANGLE,
 )
 from scenario.scenario_world import SIZE
 
@@ -63,9 +59,9 @@ class PlayerController:
         return self.state.player
     
     # =========================================================================
-    # MOVEMENT
+    # MOVEMENT INPUT & POSITION UPDATES
     # =========================================================================
-    
+
     def handle_movement_input(self, dx, dy, sprinting=False):
         """Handle movement input from held keys.
         
@@ -93,19 +89,9 @@ class PlayerController:
         # Update facing based on input
         self._update_facing(player, dx, dy)
         
-        # Calculate speed (encumbrance overrides all, then blocking overrides sprint)
-        if player.is_over_encumbered():
-            speed = ENCUMBERED_SPEED
-            player.is_sprinting = False
-        elif player.is_blocking:
-            speed = BLOCK_MOVEMENT_SPEED
-            player.is_sprinting = False
-        elif sprinting:
-            speed = SPRINT_SPEED
-            player.is_sprinting = True
-        else:
-            speed = MOVEMENT_SPEED
-            player.is_sprinting = False
+        # Calculate speed based on character state
+        speed, is_sprinting = player.calculate_movement_speed(wants_sprint=sprinting, is_blocking=player.is_blocking)
+        player.is_sprinting = is_sprinting
         
         # Normalize diagonal movement
         if dx != 0 and dy != 0:
@@ -182,54 +168,46 @@ class PlayerController:
     
     def _apply_movement_with_collision(self, player, new_x, new_y, vx, vy, dt):
         """Apply movement with ALTTP-style collision sliding."""
-        # Try full movement first
-        if not self.state.is_position_blocked(new_x, new_y, exclude_char=player):
-            player.x = new_x
-            player.y = new_y
-            return
-        
-        # Blocked - try sliding along axes
-        moved = False
-        
-        if abs(vx) > abs(vy):
-            # Moving mostly horizontal - try X first, then Y
-            if not self.state.is_position_blocked(new_x, player.y, exclude_char=player):
-                player.x = new_x
-                moved = True
-            elif not self.state.is_position_blocked(player.x, new_y, exclude_char=player):
-                player.y = new_y
-                moved = True
-        else:
-            # Moving mostly vertical - try Y first, then X
-            if not self.state.is_position_blocked(player.x, new_y, exclude_char=player):
-                player.y = new_y
-                moved = True
-            elif not self.state.is_position_blocked(new_x, player.y, exclude_char=player):
-                player.x = new_x
-                moved = True
-        
-        # If still blocked, try perpendicular jostling
-        if not moved:
-            jostle_amount = MOVEMENT_SPEED * dt * 0.3
-            if abs(vx) > abs(vy):
-                # Moving horizontal, jostle vertical
-                for jostle_dir in [1, -1]:
-                    jostle_y = player.y + jostle_dir * jostle_amount
-                    if not self.state.is_position_blocked(player.x, jostle_y, exclude_char=player):
-                        player.y = jostle_y
-                        break
-            else:
-                # Moving vertical, jostle horizontal
-                for jostle_dir in [1, -1]:
-                    jostle_x = player.x + jostle_dir * jostle_amount
-                    if not self.state.is_position_blocked(jostle_x, player.y, exclude_char=player):
-                        player.x = jostle_x
-                        break
+        self.logic.apply_movement_with_collision(player, new_x, new_y, vx, vy, dt)
     
     # =========================================================================
-    # ACTIONS
+    # BASIC ACTIONS (eat, bake, barrel)
     # =========================================================================
-    
+
+    def handle_bake_input(self):
+        """Handle bake key press.
+
+        Returns:
+            True if baked successfully
+        """
+        player = self.player
+        if not player:
+            return False
+
+        # Game logic handles ALL validation and logging
+        amount_baked = self.logic.bake_bread(player, amount=1, log_errors=True)
+        return amount_baked > 0
+
+    def handle_barrel_input(self):
+        """Handle barrel interaction key press.
+
+        Takes wheat from an adjacent barrel if possible.
+
+        Returns:
+            True if successfully took wheat
+        """
+        player = self.player
+        if not player:
+            return False
+
+        # Game logic handles ALL validation and logging
+        amount_taken = self.logic.take_from_barrel(player, max_amount=50, log_errors=True)
+        return amount_taken > 0
+
+    # =========================================================================
+    # MELEE COMBAT INPUT (quick and heavy attacks)
+    # =========================================================================
+
     def handle_attack_input(self):
         """Handle attack key press (quick attack, no heavy charge).
         
@@ -320,9 +298,9 @@ class PlayerController:
         return True
 
     # =========================================================================
-    # BOW DRAW (Ranged Attack)
+    # RANGED COMBAT INPUT (bow draw and shoot)
     # =========================================================================
-    
+
     def handle_shoot_button_down(self, current_tick):
         """Handle shoot button being pressed down (start bow draw).
         
@@ -359,38 +337,8 @@ class PlayerController:
 
         return player.update_bow_draw(current_tick)
 
-    def handle_bake_input(self):
-        """Handle bake key press.
-
-        Returns:
-            True if baked successfully
-        """
-        player = self.player
-        if not player:
-            return False
-
-        # Game logic handles ALL validation and logging
-        amount_baked = self.logic.bake_bread(player, amount=1, log_errors=True)
-        return amount_baked > 0
-    
-    def handle_barrel_input(self):
-        """Handle barrel interaction key press.
-
-        Takes wheat from an adjacent barrel if possible.
-
-        Returns:
-            True if successfully took wheat
-        """
-        player = self.player
-        if not player:
-            return False
-
-        # Game logic handles ALL validation and logging
-        amount_taken = self.logic.take_from_barrel(player, max_amount=50, log_errors=True)
-        return amount_taken > 0
-    
     # =========================================================================
-    # DOOR/BUILDING INTERACTION
+    # BUILDING INTERACTION (doors and interiors)
     # =========================================================================
     
     def handle_door_input(self):
@@ -442,9 +390,9 @@ class PlayerController:
         return True
     
     # =========================================================================
-    # WINDOW "SECURITY CAMERA" VIEW
+    # WINDOW SYSTEM (looking through windows from inside/outside)
     # =========================================================================
-    
+
     def handle_window_input(self):
         """Handle window interaction key press.
         
@@ -507,9 +455,9 @@ class PlayerController:
         return window.get_exterior_look_position()
     
     # =========================================================================
-    # INTERIOR MOVEMENT
+    # INTERIOR MOVEMENT (position updates inside buildings)
     # =========================================================================
-    
+
     def update_position_interior(self, dt):
         """Update player position when inside an interior.
         Called every frame by GUI when player is in an interior.
@@ -552,7 +500,7 @@ class PlayerController:
                 player.prevailing_y = new_y
 
     # =========================================================================
-    # INTERACT / E KEY
+    # UNIFIED INTERACTION SYSTEM (E key / A button)
     # =========================================================================
 
     def get_facing_npc(self):
@@ -813,7 +761,7 @@ class PlayerController:
         return None
 
     # =========================================================================
-    # COMBAT INPUT
+    # UNIFIED COMBAT INPUT (melee + ranged routing)
     # =========================================================================
 
     def handle_combat_input(self, attack, attack_held, attack_released, current_tick):
@@ -885,7 +833,7 @@ class PlayerController:
         return result
 
     # =========================================================================
-    # PLAYER STATE QUERIES
+    # PLAYER STATE & AIMING (mouse tracking, backpedaling, attack cones)
     # =========================================================================
 
     def update_facing_to_mouse(self, mouse_x, mouse_y, screen_to_world_func):
@@ -919,22 +867,7 @@ class PlayerController:
         player.attack_angle = angle
 
         # Determine 8-direction facing (for sprite animation)
-        if angle >= -math.pi/8 and angle < math.pi/8:
-            player.facing = 'right'
-        elif angle >= math.pi/8 and angle < 3*math.pi/8:
-            player.facing = 'down-right'
-        elif angle >= 3*math.pi/8 and angle < 5*math.pi/8:
-            player.facing = 'down'
-        elif angle >= 5*math.pi/8 and angle < 7*math.pi/8:
-            player.facing = 'down-left'
-        elif angle >= 7*math.pi/8 or angle < -7*math.pi/8:
-            player.facing = 'left'
-        elif angle >= -7*math.pi/8 and angle < -5*math.pi/8:
-            player.facing = 'up-left'
-        elif angle >= -5*math.pi/8 and angle < -3*math.pi/8:
-            player.facing = 'up'
-        elif angle >= -3*math.pi/8 and angle < -math.pi/8:
-            player.facing = 'up-right'
+        player.set_facing_from_angle(angle)
 
     def update_backpedal_state(self, move_dx, move_dy):
         """Check if player is backpedaling (moving opposite to facing).
@@ -950,40 +883,7 @@ class PlayerController:
         if not player:
             return 0
 
-        facing = player.get('facing', 'down')
-
-        facing_vectors = {
-            'right': (1, 0),
-            'left': (-1, 0),
-            'up': (0, -1),
-            'down': (0, 1),
-            'up-right': (1, -1),
-            'up-left': (-1, -1),
-            'down-right': (1, 1),
-            'down-left': (-1, 1),
-        }
-
-        face_dx, face_dy = facing_vectors.get(facing, (0, 1))
-
-        # Normalize
-        move_mag = math.sqrt(move_dx * move_dx + move_dy * move_dy)
-        if move_mag > 0:
-            move_dx_norm = move_dx / move_mag
-            move_dy_norm = move_dy / move_mag
-        else:
-            move_dx_norm, move_dy_norm = 0, 0
-
-        face_mag = math.sqrt(face_dx * face_dx + face_dy * face_dy)
-        if face_mag > 0:
-            face_dx_norm = face_dx / face_mag
-            face_dy_norm = face_dy / face_mag
-        else:
-            face_dx_norm, face_dy_norm = 0, 1
-
-        dot = move_dx_norm * face_dx_norm + move_dy_norm * face_dy_norm
-        player['is_backpedaling'] = dot < 0
-
-        return dot
+        return player.update_backpedal_state(move_dx, move_dy)
 
     def handle_movement_no_facing(self, dx, dy, sprinting=False, movement_dot=0):
         """Handle movement input without changing facing direction.

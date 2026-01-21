@@ -4196,10 +4196,10 @@ class GameLogic:
                                        source='self',
                                        crime_type='murder', victim=target)
                     self.witness_crime(owner, target, 'murder')
-                
-                # Transfer items
-                owner.transfer_all_items_from(target)
-            
+
+                # Don't transfer items here - corpse will be created by _process_deaths()
+                # with inventory intact for looting
+
             # Broadcast violence to nearby characters
             self.broadcast_violence(owner, target)
         else:
@@ -6712,3 +6712,66 @@ class GameLogic:
                 return attacker
 
         return None
+
+    # =========================================================================
+    # MOVEMENT COLLISION SYSTEM (shared by player and NPCs)
+    # =========================================================================
+
+    def apply_movement_with_collision(self, char, new_x, new_y, vx, vy, dt):
+        """Apply movement with ALTTP-style collision sliding.
+        
+        Tries full movement, then axis sliding, then perpendicular jostling.
+        
+        Args:
+            char: Character to move
+            new_x: Desired new X position
+            new_y: Desired new Y position
+            vx: X velocity
+            vy: Y velocity
+            dt: Delta time
+        """
+        from constants import MOVEMENT_SPEED
+        
+        # Try full movement first
+        if not self.state.is_position_blocked(new_x, new_y, exclude_char=char):
+            char.x = new_x
+            char.y = new_y
+            return
+        
+        # Blocked - try sliding along axes
+        moved = False
+        
+        if abs(vx) > abs(vy):
+            # Moving mostly horizontal - try X first, then Y
+            if not self.state.is_position_blocked(new_x, char.y, exclude_char=char):
+                char.x = new_x
+                moved = True
+            elif not self.state.is_position_blocked(char.x, new_y, exclude_char=char):
+                char.y = new_y
+                moved = True
+        else:
+            # Moving mostly vertical - try Y first, then X
+            if not self.state.is_position_blocked(char.x, new_y, exclude_char=char):
+                char.y = new_y
+                moved = True
+            elif not self.state.is_position_blocked(new_x, char.y, exclude_char=char):
+                char.x = new_x
+                moved = True
+        
+        # If still blocked, try perpendicular jostling
+        if not moved:
+            jostle_amount = MOVEMENT_SPEED * dt * 0.3
+            if abs(vx) > abs(vy):
+                # Moving horizontal, jostle vertical
+                for jostle_dir in [1, -1]:
+                    jostle_y = char.y + jostle_dir * jostle_amount
+                    if not self.state.is_position_blocked(char.x, jostle_y, exclude_char=char):
+                        char.y = jostle_y
+                        break
+            else:
+                # Moving vertical, jostle horizontal
+                for jostle_dir in [1, -1]:
+                    jostle_x = char.x + jostle_dir * jostle_amount
+                    if not self.state.is_position_blocked(jostle_x, char.y, exclude_char=char):
+                        char.x = jostle_x
+                        break

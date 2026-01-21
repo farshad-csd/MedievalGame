@@ -203,29 +203,29 @@ class SoldierJob(Job):
     
     def decide(self, char, state, logic):
         """Soldier decision logic - soldiers don't flee, they fight."""
-        
+
         # ===== COMBAT (soldiers always fight) =====
         if logic.check_fight_back_soldier(char):
-            return self._do_fight_back(char, state, logic)
-        
-        if self._check_combat(char, state, logic):
-            return self._do_combat(char, state, logic)
-        
+            return logic.do_fight_back(char)
+
+        if logic.check_combat(char):
+            return logic.do_combat(char)
+
         # ===== RESPOND TO CRIMINALS =====
         criminal, intensity = logic.find_known_criminal_nearby(char)
         if criminal:
             return logic.do_confront_criminal_soldier(char, criminal)
-        
+
         # ===== BASIC NEEDS =====
-        if self._check_eat(char, state, logic):
-            return self._do_eat(char, state, logic)
-        
-        if self._check_cook(char, state, logic):
-            return self._do_cook(char, state, logic)
-        
-        if self._check_sleep(char, state, logic):
-            return self._do_sleep(char, state, logic)
-        
+        if logic.check_eat(char):
+            return logic.do_eat(char)
+
+        if logic.check_cook(char):
+            return logic.do_cook(char)
+
+        if logic.check_sleep(char):
+            return logic.do_sleep(char)
+
         # ===== PATROL (default duty) =====
         return logic.do_patrol(char)
     

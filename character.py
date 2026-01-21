@@ -220,9 +220,9 @@ class Character:
         self.ongoing_action = None
     
     # =========================================================================
-    # PROPERTIES
+    # PROPERTIES AND GETTERS
     # =========================================================================
-    
+
     @property
     def is_player(self):
         """Whether this character is player-controlled."""
@@ -258,10 +258,67 @@ class Character:
         return self.name.split()[0]
     
     # =========================================================================
-    # POSITION PROPERTIES
+    # SPATIAL QUERIES
+    # =========================================================================
+
+    def is_facing_position(self, target_x, target_y):
+        """Check if character is roughly facing toward a target position.
+
+        Uses a generous ~53-degree cone in the facing direction.
+        Automatically uses correct coordinate system (prevailing for interiors, x/y for exterior).
+
+        Args:
+            target_x: Target X in local coords
+            target_y: Target Y in local coords
+
+        Returns:
+            True if facing toward the target
+        """
+        # Use zone to determine coordinate system
+        if self.zone is not None:
+            # Interior - use local/prevailing coords
+            px, py = self.prevailing_x, self.prevailing_y
+        else:
+            # Exterior - use world coords
+            px, py = self.x, self.y
+
+        # Direction to target
+        dx = target_x - px
+        dy = target_y - py
+
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return True  # On top of target, always valid
+
+        # Get facing direction vector
+        facing_vectors = {
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+            'up-left': (-0.707, -0.707),
+            'up-right': (0.707, -0.707),
+            'down-left': (-0.707, 0.707),
+            'down-right': (0.707, 0.707),
+        }
+        fx, fy = facing_vectors.get(self.facing, (0, 1))
+
+        # Normalize direction to target
+        dist = math.sqrt(dx*dx + dy*dy)
+        dx /= dist
+        dy /= dist
+
+        # Dot product gives cosine of angle between vectors
+        # cos(45°) ≈ 0.707, cos(53°) ≈ 0.6, cos(60°) = 0.5, cos(90°) = 0
+        dot = dx * fx + dy * fy
+
+        # Require ~53 degree cone (dot > 0.6) for tighter targeting
+        return dot > 0.6
+
+    # =========================================================================
+    # COORDINATE SYSTEM & POSITION
     #
-    # Two coordinate systems:
-    # 1. World coordinates (x, y getters) - projected position on the world map
+    # Two coordinate systems are supported:
+    # 1. World coordinates (x, y properties) - projected position on the world map
     #    - In exterior: same as prevailing coords
     #    - In interior: projected to building's world position
     #
@@ -407,159 +464,133 @@ class Character:
         return 0
     
     # =========================================================================
-    # MEMORY SYSTEM
+    # MOVEMENT MECHANICS (for both player and NPCs)
     # =========================================================================
-    
-    def add_memory(self, memory_type, subject, tick, location=None, intensity=5,
-                   source='witnessed', reported=False, **details):
-        """Add a memory to this character.
-        
+
+    def calculate_movement_speed(self, wants_sprint=False, is_blocking=False):
+        """Calculate movement speed based on character state.
+
+        Priority: encumbered > blocking > sprint > walk
+
         Args:
-            memory_type: Type of memory ('crime', 'attacked_by', 'helped_by', 
-                        'home_of', 'sighting', 'location', 'object')
-            subject: What/who this memory is about (Character, position tuple, 
-                    object ref, or string)
-            tick: Game tick when this was learned
-            location: (x, y) where it happened/was learned (optional)
-            intensity: How significant (1-20), affects reaction range
-            source: How we learned this ('witnessed', 'told_by', 'experienced', 'discovered')
-            reported: Whether we've told someone about this (for crimes)
-            **details: Type-specific extra data
-        
+            wants_sprint: Whether trying to sprint
+            is_blocking: Whether blocking with shield
+
         Returns:
-            The created memory dict
+            Tuple of (speed, is_actually_sprinting)
         """
-        memory = {
-            'type': memory_type,
-            'subject': subject,
-            'tick': tick,
-            'location': location,
-            'intensity': intensity,
-            'source': source,
-            'reported': reported,
-            'details': details
+        from constants import ENCUMBERED_SPEED, BLOCK_MOVEMENT_SPEED, SPRINT_SPEED, MOVEMENT_SPEED
+
+        # Encumbered overrides everything
+        if self.is_over_encumbered():
+            return (ENCUMBERED_SPEED, False)
+
+        # Blocking prevents sprinting
+        if is_blocking:
+            return (BLOCK_MOVEMENT_SPEED, False)
+
+        # Sprint if requested and able
+        if wants_sprint:
+            return (SPRINT_SPEED, True)
+
+        # Default walk speed
+        return (MOVEMENT_SPEED, False)
+
+    def update_backpedal_state(self, move_dx, move_dy):
+        """Check if character is backpedaling (moving opposite to facing).
+
+        Updates self['is_backpedaling'] flag based on dot product of movement vs facing.
+
+        Args:
+            move_dx: Movement direction X
+            move_dy: Movement direction Y
+
+        Returns:
+            Dot product of movement and facing vectors (negative = backpedaling)
+        """
+        import math
+
+        facing_vectors = {
+            'right': (1, 0),
+            'left': (-1, 0),
+            'up': (0, -1),
+            'down': (0, 1),
+            'up-right': (1, -1),
+            'up-left': (-1, -1),
+            'down-right': (1, 1),
+            'down-left': (-1, 1),
         }
-        self.memories.append(memory)
-        return memory
-    
-    def get_memories(self, memory_type=None, subject=None, source=None, 
-                     unreported_only=False, min_intensity=None):
-        """Query memories with optional filters.
-        
+
+        face_dx, face_dy = facing_vectors.get(self.facing, (0, 1))
+
+        # Normalize movement vector
+        move_mag = math.sqrt(move_dx * move_dx + move_dy * move_dy)
+        if move_mag > 0:
+            move_dx_norm = move_dx / move_mag
+            move_dy_norm = move_dy / move_mag
+        else:
+            move_dx_norm, move_dy_norm = 0, 0
+
+        # Normalize facing vector
+        face_mag = math.sqrt(face_dx * face_dx + face_dy * face_dy)
+        if face_mag > 0:
+            face_dx_norm = face_dx / face_mag
+            face_dy_norm = face_dy / face_mag
+        else:
+            face_dx_norm, face_dy_norm = 0, 1
+
+        # Dot product
+        dot = move_dx_norm * face_dx_norm + move_dy_norm * face_dy_norm
+        self['is_backpedaling'] = dot < 0
+
+        return dot
+
+    def set_facing_from_angle(self, angle_radians):
+        """Set character facing based on an angle in radians.
+
+        Converts precise angle to 8-direction facing (right, down-right, down, etc.).
+
         Args:
-            memory_type: Filter by type (str or list of str)
-            subject: Filter by subject (exact match)
-            source: Filter by source ('witnessed', 'told_by', etc.)
-            unreported_only: Only return memories with reported=False
-            min_intensity: Only return memories with intensity >= this
-        
-        Returns:
-            List of matching memory dicts
+            angle_radians: Angle in radians (0 = right, pi/2 = down)
         """
-        results = self.memories
-        
-        if memory_type is not None:
-            if isinstance(memory_type, str):
-                results = [m for m in results if m['type'] == memory_type]
-            else:
-                # List of types
-                results = [m for m in results if m['type'] in memory_type]
-        
-        if subject is not None:
-            results = [m for m in results if m['subject'] is subject]
-        
-        if source is not None:
-            results = [m for m in results if m.get('source') == source]
-        
-        if unreported_only:
-            results = [m for m in results if not m.get('reported', False)]
-        
-        if min_intensity is not None:
-            results = [m for m in results if m.get('intensity', 0) >= min_intensity]
-        
-        return results
-    
-    def has_memory_of(self, memory_type, subject):
-        """Check if we have any memory of this type about this subject."""
-        return len(self.get_memories(memory_type=memory_type, subject=subject)) > 0
-    
-    def forget_memories_about(self, subject):
-        """Remove all memories about a subject (e.g., when they die)."""
-        self.memories = [m for m in self.memories if m['subject'] is not subject]
-        
-        # Clear intent if it was about this subject
-        if self.intent and self.intent.get('target') is subject:
-            self.intent = None
-    
-    def clear_intent(self):
-        """Clear current intent."""
-        self.intent = None
-        self['face_target'] = None  # Also clear face target
-    
-    def set_intent(self, action, target, reason=None, started_tick=None):
-        """Set current intent.
-        
-        Args:
-            action: 'attack', 'flee', 'follow', 'goto', 'stay_near'
-            target: Character, position, or other target
-            reason: Memory or string explaining why
-            started_tick: When this intent started (for timeouts)
-        """
-        self.intent = {
-            'action': action,
-            'target': target,
-            'reason': reason,
-            'started_tick': started_tick
-        }
-    
-    def get_active_attacker(self, current_tick, alive_characters, max_ticks_ago=50, max_distance=8.0):
-        """Find someone actively attacking me right now.
-        
-        Checks for recent attacked_by memories where attacker is still nearby.
-        
-        Args:
-            current_tick: Current game tick
-            alive_characters: List of alive characters
-            max_ticks_ago: How recent the attack must be
-            max_distance: How close attacker must still be
-        
-        Returns:
-            Attacker Character or None
-        """
-        alive_set = set(alive_characters)
-        
-        for m in self.get_memories(memory_type='attacked_by'):
-            # Recent?
-            if current_tick - m['tick'] > max_ticks_ago:
-                continue
-            
-            attacker = m['subject']
-            
-            # Still alive?
-            if attacker not in alive_set:
-                continue
-            
-            # Still nearby?
-            dist = math.sqrt((self.x - attacker.x)**2 + (self.y - attacker.y)**2)
-            if dist < max_distance:
-                return attacker
-        
-        return None
-    
-    def has_committed_crime(self, crime_type=None):
-        """Check if this character has committed a crime (has crime memory about self).
-        
-        Note: This checks our OWN memory of committing crimes, not what others know.
-        Use this for self-knowledge (e.g., "I know I'm a thief").
-        
-        For what others know, check their memories.
-        """
-        # We store self-knowledge of our own crimes as 'committed_crime' type
-        memories = self.get_memories(memory_type='committed_crime')
-        if crime_type:
-            memories = [m for m in memories if m['details'].get('crime_type') == crime_type]
-        return len(memories) > 0
-    
+        import math
+
+        # Convert angle to degrees
+        angle_deg = math.degrees(angle_radians)
+
+        # Normalize to [0, 360)
+        while angle_deg < 0:
+            angle_deg += 360
+        while angle_deg >= 360:
+            angle_deg -= 360
+
+        # Map to 8 directions (each direction is 45°, centered on angle)
+        # Right: -22.5 to 22.5
+        # Down-right: 22.5 to 67.5
+        # Down: 67.5 to 112.5
+        # Down-left: 112.5 to 157.5
+        # Left: 157.5 to 202.5
+        # Up-left: 202.5 to 247.5
+        # Up: 247.5 to 292.5
+        # Up-right: 292.5 to 337.5
+
+        if angle_deg < 22.5 or angle_deg >= 337.5:
+            self.facing = 'right'
+        elif angle_deg < 67.5:
+            self.facing = 'down-right'
+        elif angle_deg < 112.5:
+            self.facing = 'down'
+        elif angle_deg < 157.5:
+            self.facing = 'down-left'
+        elif angle_deg < 202.5:
+            self.facing = 'left'
+        elif angle_deg < 247.5:
+            self.facing = 'up-left'
+        elif angle_deg < 292.5:
+            self.facing = 'up'
+        else:
+            self.facing = 'up-right'
+
     # =========================================================================
     # INVENTORY MANAGEMENT
     # =========================================================================
@@ -746,14 +777,262 @@ class Character:
             if slot['amount'] < stack_size:
                 return False
         return True
+
+    # =========================================================================
+    # BASIC ACTIONS (used by both player and NPCs)
+    # =========================================================================
+
+    def eat(self):
+        """Consume bread to restore hunger.
+        
+        Returns:
+            dict with 'success' bool and optionally 'recovered_from_starvation'
+        """
+        result = {'success': False}
+        
+        if self.get_item('bread') < BREAD_PER_BITE:
+            return result
+        
+        self.remove_item('bread', BREAD_PER_BITE)
+        self.hunger = min(MAX_HUNGER, self.hunger + ITEMS["bread"]["hunger_value"])
+        result['success'] = True
+        
+        # Check if recovered from starvation
+        if self.hunger > STARVATION_THRESHOLD:
+            if self.is_starving or self.is_frozen:
+                self.is_starving = False
+                self.is_frozen = False
+                self.starvation_health_lost = 0
+                self.ticks_starving = 0
+                result['recovered_from_starvation'] = True
+        
+        return result
+
+    def start_ongoing_action(self, action_type, duration, data=None):
+        """Start an ongoing action (freezes player until complete or cancelled).
+        
+        Args:
+            action_type: Type of action ('harvest', 'plant', 'chop')
+            duration: Duration in seconds (real-time)
+            data: Optional dict with action-specific data (e.g., cell coords)
+            
+        Returns:
+            True if action started, False if already doing an action
+        """
+        if self.ongoing_action is not None:
+            return False
+        
+        self.ongoing_action = {
+            'action': action_type,
+            'start_time': time.time(),
+            'duration': duration,
+            'data': data or {}
+        }
+        return True
     
-    def transfer_all_items_from(self, other):
-        """Transfer all items from another character to self (for looting)."""
-        for item_type in ['gold', 'wheat', 'bread']:
-            amount = other.get_item(item_type)
-            if amount > 0:
-                other.remove_item(item_type, amount)
-                self.add_item(item_type, amount)
+    def cancel_ongoing_action(self):
+        """Cancel the current ongoing action.
+        
+        Returns:
+            The action that was cancelled, or None if no action was in progress
+        """
+        if self.ongoing_action is None:
+            return None
+        
+        cancelled = self.ongoing_action
+        self.ongoing_action = None
+        return cancelled
+    
+    def get_ongoing_action_progress(self):
+        """Get the progress of the current ongoing action.
+        
+        Returns:
+            Float from 0.0 to 1.0 representing progress, or None if no action
+        """
+        if self.ongoing_action is None:
+            return None
+        
+        elapsed = time.time() - self.ongoing_action['start_time']
+        progress = elapsed / self.ongoing_action['duration']
+        return min(1.0, max(0.0, progress))
+    
+    def is_ongoing_action_complete(self):
+        """Check if the current ongoing action is complete.
+        
+        Returns:
+            True if complete (progress >= 1.0), False otherwise or if no action
+        """
+        progress = self.get_ongoing_action_progress()
+        if progress is None:
+            return False
+        return progress >= 1.0
+    
+    def has_ongoing_action(self):
+        """Check if player has an ongoing action in progress.
+
+        Returns:
+            True if an ongoing action is in progress
+        """
+        return self.ongoing_action is not None
+
+
+    # =========================================================================
+    # MEMORY SYSTEM
+    # =========================================================================
+    
+    def add_memory(self, memory_type, subject, tick, location=None, intensity=5,
+                   source='witnessed', reported=False, **details):
+        """Add a memory to this character.
+        
+        Args:
+            memory_type: Type of memory ('crime', 'attacked_by', 'helped_by', 
+                        'home_of', 'sighting', 'location', 'object')
+            subject: What/who this memory is about (Character, position tuple, 
+                    object ref, or string)
+            tick: Game tick when this was learned
+            location: (x, y) where it happened/was learned (optional)
+            intensity: How significant (1-20), affects reaction range
+            source: How we learned this ('witnessed', 'told_by', 'experienced', 'discovered')
+            reported: Whether we've told someone about this (for crimes)
+            **details: Type-specific extra data
+        
+        Returns:
+            The created memory dict
+        """
+        memory = {
+            'type': memory_type,
+            'subject': subject,
+            'tick': tick,
+            'location': location,
+            'intensity': intensity,
+            'source': source,
+            'reported': reported,
+            'details': details
+        }
+        self.memories.append(memory)
+        return memory
+    
+    def get_memories(self, memory_type=None, subject=None, source=None, 
+                     unreported_only=False, min_intensity=None):
+        """Query memories with optional filters.
+        
+        Args:
+            memory_type: Filter by type (str or list of str)
+            subject: Filter by subject (exact match)
+            source: Filter by source ('witnessed', 'told_by', etc.)
+            unreported_only: Only return memories with reported=False
+            min_intensity: Only return memories with intensity >= this
+        
+        Returns:
+            List of matching memory dicts
+        """
+        results = self.memories
+        
+        if memory_type is not None:
+            if isinstance(memory_type, str):
+                results = [m for m in results if m['type'] == memory_type]
+            else:
+                # List of types
+                results = [m for m in results if m['type'] in memory_type]
+        
+        if subject is not None:
+            results = [m for m in results if m['subject'] is subject]
+        
+        if source is not None:
+            results = [m for m in results if m.get('source') == source]
+        
+        if unreported_only:
+            results = [m for m in results if not m.get('reported', False)]
+        
+        if min_intensity is not None:
+            results = [m for m in results if m.get('intensity', 0) >= min_intensity]
+        
+        return results
+    
+    def has_memory_of(self, memory_type, subject):
+        """Check if we have any memory of this type about this subject."""
+        return len(self.get_memories(memory_type=memory_type, subject=subject)) > 0
+    
+    def forget_memories_about(self, subject):
+        """Remove all memories about a subject (e.g., when they die)."""
+        self.memories = [m for m in self.memories if m['subject'] is not subject]
+        
+        # Clear intent if it was about this subject
+        if self.intent and self.intent.get('target') is subject:
+            self.intent = None
+    
+    def clear_intent(self):
+        """Clear current intent."""
+        self.intent = None
+        self['face_target'] = None  # Also clear face target
+    
+    def set_intent(self, action, target, reason=None, started_tick=None):
+        """Set current intent.
+        
+        Args:
+            action: 'attack', 'flee', 'follow', 'goto', 'stay_near'
+            target: Character, position, or other target
+            reason: Memory or string explaining why
+            started_tick: When this intent started (for timeouts)
+        """
+        self.intent = {
+            'action': action,
+            'target': target,
+            'reason': reason,
+            'started_tick': started_tick
+        }
+    
+    def get_active_attacker(self, current_tick, alive_characters, max_ticks_ago=50, max_distance=8.0):
+        """Find someone actively attacking me right now.
+        
+        Checks for recent attacked_by memories where attacker is still nearby.
+        
+        Args:
+            current_tick: Current game tick
+            alive_characters: List of alive characters
+            max_ticks_ago: How recent the attack must be
+            max_distance: How close attacker must still be
+        
+        Returns:
+            Attacker Character or None
+        """
+        alive_set = set(alive_characters)
+        
+        for m in self.get_memories(memory_type='attacked_by'):
+            # Recent?
+            if current_tick - m['tick'] > max_ticks_ago:
+                continue
+            
+            attacker = m['subject']
+            
+            # Still alive?
+            if attacker not in alive_set:
+                continue
+            
+            # Still nearby?
+            dist = math.sqrt((self.x - attacker.x)**2 + (self.y - attacker.y)**2)
+            if dist < max_distance:
+                return attacker
+        
+        return None
+    
+    def has_committed_crime(self, crime_type=None):
+        """Check if this character has committed a crime (has crime memory about self).
+        
+        Note: This checks our OWN memory of committing crimes, not what others know.
+        Use this for self-knowledge (e.g., "I know I'm a thief").
+        
+        For what others know, check their memories.
+        """
+        # We store self-knowledge of our own crimes as 'committed_crime' type
+        memories = self.get_memories(memory_type='committed_crime')
+        if crime_type:
+            memories = [m for m in memories if m['details'].get('crime_type') == crime_type]
+        return len(memories) > 0
+    
+    # =========================================================================
+    # COMBAT SYSTEM (basic attacks)
+    # =========================================================================
 
     def get_strongest_weapon_slot(self):
         """Find the inventory slot with the strongest weapon (melee or ranged).
@@ -885,123 +1164,6 @@ class Character:
             # No ranged weapon available
             return 0.0
 
-    # =========================================================================
-    # ACTIONS (used by both player and NPCs)
-    # =========================================================================
-    
-    def eat(self):
-        """Consume bread to restore hunger.
-        
-        Returns:
-            dict with 'success' bool and optionally 'recovered_from_starvation'
-        """
-        result = {'success': False}
-        
-        if self.get_item('bread') < BREAD_PER_BITE:
-            return result
-        
-        self.remove_item('bread', BREAD_PER_BITE)
-        self.hunger = min(MAX_HUNGER, self.hunger + ITEMS["bread"]["hunger_value"])
-        result['success'] = True
-        
-        # Check if recovered from starvation
-        if self.hunger > STARVATION_THRESHOLD:
-            if self.is_starving or self.is_frozen:
-                self.is_starving = False
-                self.is_frozen = False
-                self.starvation_health_lost = 0
-                self.ticks_starving = 0
-                result['recovered_from_starvation'] = True
-        
-        return result
-    
-    # =========================================================================
-    # STAMINA SYSTEM (Skyrim-style sprinting)
-    # =========================================================================
-    
-    def can_start_sprint(self):
-        """Check if character can START sprinting.
-        
-        Requires stamina above threshold. Once sprinting, can continue
-        until stamina hits 0 (handled by drain_stamina_sprint).
-        
-        Returns:
-            True if can start sprinting
-        """
-        # Can't sprint if frozen/dying
-        if self.is_frozen or self.health <= 0:
-            return False
-        
-        # If stamina was depleted, must wait for it to recover above threshold
-        if self._stamina_depleted:
-            if self.stamina >= STAMINA_SPRINT_THRESHOLD:
-                self._stamina_depleted = False
-            else:
-                return False
-        
-        return self.stamina > 0
-    
-    def can_continue_sprint(self):
-        """Check if character can CONTINUE sprinting.
-        
-        Can continue as long as stamina > 0.
-        
-        Returns:
-            True if can continue sprinting
-        """
-        if self.is_frozen or self.health <= 0:
-            return False
-        return self.stamina > 0
-    
-    def drain_stamina_sprint(self, current_tick):
-        """Drain stamina while sprinting. Called once per tick.
-        
-        Args:
-            current_tick: Current game tick
-            
-        Returns:
-            True if still have stamina, False if depleted
-        """
-        self.stamina = max(0, self.stamina - STAMINA_DRAIN_PER_TICK)
-        
-        # Track when we last sprinted (for regen delay)
-        self._last_sprint_tick = current_tick
-        
-        if self.stamina <= 0:
-            self._stamina_depleted = True
-            return False
-        return True
-    
-    def regenerate_stamina(self, current_tick):
-        """Regenerate stamina when not sprinting. Called once per tick.
-        
-        Only regenerates if enough ticks have passed since last sprint
-        (simulates Skyrim's brief pause before regen kicks in).
-        
-        Args:
-            current_tick: Current game tick
-            
-        Returns:
-            Amount regenerated
-        """
-        # Check if we've waited long enough since sprinting
-        ticks_since_sprint = current_tick - self._last_sprint_tick
-        if ticks_since_sprint < STAMINA_REGEN_DELAY_TICKS:
-            return 0
-        
-        # Already full
-        if self.stamina >= MAX_STAMINA:
-            return 0
-        
-        old_stamina = self.stamina
-        self.stamina = min(MAX_STAMINA, self.stamina + STAMINA_REGEN_PER_TICK)
-        
-        return self.stamina - old_stamina
-    
-    def get_stamina_fraction(self):
-        """Get stamina as a fraction (0-1) for UI display."""
-        return self.stamina / MAX_STAMINA
-    
     def can_attack(self):
         """Check if character can attack (animation not in progress, not blocking).
         
@@ -1092,9 +1254,9 @@ class Character:
         return 'down'  # Fallback
     
     # =========================================================================
-    # HEAVY ATTACK (Player charged attack)
+    # HEAVY ATTACK SYSTEM (Player melee charged attacks)
     # =========================================================================
-    
+
     def start_heavy_attack_hold(self, current_tick):
         """Called when attack button is first pressed. Records the tick.
         
@@ -1213,9 +1375,9 @@ class Character:
         return self.heavy_attack_charging
     
     # =========================================================================
-    # BOW DRAW (Player ranged attack)
+    # BOW DRAW SYSTEM (Player ranged attacks)
     # =========================================================================
-    
+
     def start_bow_draw(self, current_tick):
         """Called when shoot button is first pressed. Records the tick.
         
@@ -1319,133 +1481,93 @@ class Character:
         spread = spread_max - progress * (spread_max - spread_min)
         return spread
     
+
     # =========================================================================
-    # ONGOING ACTIONS (Player timed actions)
+    # STAMINA SYSTEM (Skyrim-style sprint mechanics)
     # =========================================================================
+
+    def can_start_sprint(self):
+        """Check if character can START sprinting.
+        
+        Requires stamina above threshold. Once sprinting, can continue
+        until stamina hits 0 (handled by drain_stamina_sprint).
+        
+        Returns:
+            True if can start sprinting
+        """
+        # Can't sprint if frozen/dying
+        if self.is_frozen or self.health <= 0:
+            return False
+        
+        # If stamina was depleted, must wait for it to recover above threshold
+        if self._stamina_depleted:
+            if self.stamina >= STAMINA_SPRINT_THRESHOLD:
+                self._stamina_depleted = False
+            else:
+                return False
+        
+        return self.stamina > 0
     
-    def start_ongoing_action(self, action_type, duration, data=None):
-        """Start an ongoing action (freezes player until complete or cancelled).
+    def can_continue_sprint(self):
+        """Check if character can CONTINUE sprinting.
+        
+        Can continue as long as stamina > 0.
+        
+        Returns:
+            True if can continue sprinting
+        """
+        if self.is_frozen or self.health <= 0:
+            return False
+        return self.stamina > 0
+    
+    def drain_stamina_sprint(self, current_tick):
+        """Drain stamina while sprinting. Called once per tick.
         
         Args:
-            action_type: Type of action ('harvest', 'plant', 'chop')
-            duration: Duration in seconds (real-time)
-            data: Optional dict with action-specific data (e.g., cell coords)
+            current_tick: Current game tick
             
         Returns:
-            True if action started, False if already doing an action
+            True if still have stamina, False if depleted
         """
-        if self.ongoing_action is not None:
-            return False
+        self.stamina = max(0, self.stamina - STAMINA_DRAIN_PER_TICK)
         
-        self.ongoing_action = {
-            'action': action_type,
-            'start_time': time.time(),
-            'duration': duration,
-            'data': data or {}
-        }
+        # Track when we last sprinted (for regen delay)
+        self._last_sprint_tick = current_tick
+        
+        if self.stamina <= 0:
+            self._stamina_depleted = True
+            return False
         return True
     
-    def cancel_ongoing_action(self):
-        """Cancel the current ongoing action.
+    def regenerate_stamina(self, current_tick):
+        """Regenerate stamina when not sprinting. Called once per tick.
         
-        Returns:
-            The action that was cancelled, or None if no action was in progress
-        """
-        if self.ongoing_action is None:
-            return None
+        Only regenerates if enough ticks have passed since last sprint
+        (simulates Skyrim's brief pause before regen kicks in).
         
-        cancelled = self.ongoing_action
-        self.ongoing_action = None
-        return cancelled
-    
-    def get_ongoing_action_progress(self):
-        """Get the progress of the current ongoing action.
-        
-        Returns:
-            Float from 0.0 to 1.0 representing progress, or None if no action
-        """
-        if self.ongoing_action is None:
-            return None
-        
-        elapsed = time.time() - self.ongoing_action['start_time']
-        progress = elapsed / self.ongoing_action['duration']
-        return min(1.0, max(0.0, progress))
-    
-    def is_ongoing_action_complete(self):
-        """Check if the current ongoing action is complete.
-        
-        Returns:
-            True if complete (progress >= 1.0), False otherwise or if no action
-        """
-        progress = self.get_ongoing_action_progress()
-        if progress is None:
-            return False
-        return progress >= 1.0
-    
-    def has_ongoing_action(self):
-        """Check if player has an ongoing action in progress.
-
-        Returns:
-            True if an ongoing action is in progress
-        """
-        return self.ongoing_action is not None
-
-    # =========================================================================
-    # SPATIAL QUERIES
-    # =========================================================================
-
-    def is_facing_position(self, target_x, target_y):
-        """Check if character is roughly facing toward a target position.
-
-        Uses a generous ~53-degree cone in the facing direction.
-        Automatically uses correct coordinate system (prevailing for interiors, x/y for exterior).
-
         Args:
-            target_x: Target X in local coords
-            target_y: Target Y in local coords
-
+            current_tick: Current game tick
+            
         Returns:
-            True if facing toward the target
+            Amount regenerated
         """
-        # Use zone to determine coordinate system
-        if self.zone is not None:
-            # Interior - use local/prevailing coords
-            px, py = self.prevailing_x, self.prevailing_y
-        else:
-            # Exterior - use world coords
-            px, py = self.x, self.y
-
-        # Direction to target
-        dx = target_x - px
-        dy = target_y - py
-
-        if abs(dx) < 0.01 and abs(dy) < 0.01:
-            return True  # On top of target, always valid
-
-        # Get facing direction vector
-        facing_vectors = {
-            'up': (0, -1),
-            'down': (0, 1),
-            'left': (-1, 0),
-            'right': (1, 0),
-            'up-left': (-0.707, -0.707),
-            'up-right': (0.707, -0.707),
-            'down-left': (-0.707, 0.707),
-            'down-right': (0.707, 0.707),
-        }
-        fx, fy = facing_vectors.get(self.facing, (0, 1))
-
-        # Normalize direction to target
-        dist = math.sqrt(dx*dx + dy*dy)
-        dx /= dist
-        dy /= dist
-
-        # Dot product gives cosine of angle between vectors
-        # cos(45°) ≈ 0.707, cos(53°) ≈ 0.6, cos(60°) = 0.5, cos(90°) = 0
-        dot = dx * fx + dy * fy
-
-        # Require ~53 degree cone (dot > 0.6) for tighter targeting
-        return dot > 0.6
+        # Check if we've waited long enough since sprinting
+        ticks_since_sprint = current_tick - self._last_sprint_tick
+        if ticks_since_sprint < STAMINA_REGEN_DELAY_TICKS:
+            return 0
+        
+        # Already full
+        if self.stamina >= MAX_STAMINA:
+            return 0
+        
+        old_stamina = self.stamina
+        self.stamina = min(MAX_STAMINA, self.stamina + STAMINA_REGEN_PER_TICK)
+        
+        return self.stamina - old_stamina
+    
+    def get_stamina_fraction(self):
+        """Get stamina as a fraction (0-1) for UI display."""
+        return self.stamina / MAX_STAMINA
 
     # =========================================================================
     # DICT-LIKE ACCESS (backward compatibility)
@@ -1497,18 +1619,18 @@ class Character:
 def create_character(name, x, y, home_area=None):
     """
     Create a character from CHARACTER_TEMPLATES.
-    
+
     Args:
         name: Character name (must be key in CHARACTER_TEMPLATES)
         x: Starting x cell coordinate
         y: Starting y cell coordinate
         home_area: Home area name (optional, usually determined by job)
-    
+
     Returns:
         Character instance
     """
     template = CHARACTER_TEMPLATES.get(name)
     if not template:
         raise ValueError(f"Unknown character template: {name}")
-    
+
     return Character(name, template, x, y, home_area)
