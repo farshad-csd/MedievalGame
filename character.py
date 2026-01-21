@@ -187,7 +187,6 @@ class Character:
         
         # Theft state (ongoing goal-directed behavior, not a reaction)
         self.theft_target = None  # Farm cell (x,y) being targeted
-        self.theft_waiting = False  # Waiting at farm for crops
         self.theft_start_tick = None  # When attempt started
         
 

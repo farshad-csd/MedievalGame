@@ -186,11 +186,16 @@ class GameState:
                 char = create_character(name, x, y, home_area)
             
             self.characters.append(char)
-            
-            # Assign bed and barrel based on job
+
+            # Assign bed and barrel based on job or home
             if starting_job:
                 self._assign_job_resources(char, starting_job, home_area)
-            
+            elif home_area:
+                # Characters with a home but no job still get a bed
+                bed = self.interactables.get_unowned_bed_by_home(home_area)
+                if bed:
+                    bed.assign_owner(char.name)
+
             if char.is_player:
                 self.player = char
     

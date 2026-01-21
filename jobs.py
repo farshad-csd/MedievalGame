@@ -82,6 +82,10 @@ class Job:
 
         Returns True if an action was taken, False otherwise.
         """
+        # ===== SLEEPING (do nothing until woken) =====
+        if char.get('is_sleeping'):
+            return True
+
         # ===== SURVIVAL (highest priority) =====
         if logic.check_flee(char):
             return logic.do_flee(char)
@@ -203,6 +207,10 @@ class SoldierJob(Job):
     
     def decide(self, char, state, logic):
         """Soldier decision logic - soldiers don't flee, they fight."""
+
+        # ===== SLEEPING (do nothing until woken) =====
+        if char.get('is_sleeping'):
+            return True
 
         # ===== COMBAT (soldiers always fight) =====
         if logic.check_fight_back_soldier(char):

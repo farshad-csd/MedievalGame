@@ -2530,13 +2530,10 @@ class GameLogic:
         best_pos = None
         best_dist = float('inf')
         
-        # Check stoves the character can use (home matches and same zone)
-        char_zone = getattr(char, 'zone', None)
+        # Check stoves the character can use (home matches)
+        # Note: we don't filter by zone here - do_cook uses set_goal_to_object for cross-zone nav
         for stove in self.state.interactables.stoves.values():
             if not stove.can_use(char):
-                continue
-            # Only consider stoves in the same zone
-            if stove.zone != char_zone:
                 continue
             stove_cx = stove.x + 0.5
             stove_cy = stove.y + 0.5
@@ -3863,79 +3860,48 @@ class GameLogic:
                     best_cell = (cx, cy)
         
         return best_cell
-    
 
-    def get_farm_waiting_position(self, char):
-        """Get a position near the farm to wait for crops."""
-        # Find any farm cell and return a position adjacent to the farm area
-        if not self.state.farm_cells:
-            return None
-        
-        # Get the farm area bounds
-        farm_cells = list(self.state.farm_cells.keys())
-        min_x = min(c[0] for c in farm_cells)
-        max_x = max(c[0] for c in farm_cells)
-        min_y = min(c[1] for c in farm_cells)
-        max_y = max(c[1] for c in farm_cells)
-        
-        # Return center of farm area
-        return ((min_x + max_x) / 2 + 0.5, (min_y + max_y) / 2 + 0.5)
-    
 
     def try_farm_theft(self, char):
         """Character attempts to steal from a farm. Returns True if action taken."""
         # If already pursuing theft, continue
-        if char.get('theft_target') or char.get('theft_waiting'):
+        if char.get('theft_target'):
             return self.continue_theft(char)
-        
+
         cell = self.find_nearby_ready_farm_cell(char)
         name = char.get_display_name()
-        
+
         if cell:
             # Start pursuing the cell (not a crime yet - just walking to farm)
             char['theft_target'] = cell
             char['theft_start_tick'] = self.state.ticks
             self.state.log_action(f"{name} heading toward farm at {cell}")
-        else:
-            # No ready cells - go wait at the farm
-            char['theft_waiting'] = True
-            char['theft_start_tick'] = self.state.ticks
-            self.state.log_action(f"{name} heading to farm to steal")
-        
-        return self.continue_theft(char)
+            return self.continue_theft(char)
+
+        # No ready cells - return False to fall through to other behaviors
+        return False
     
 
     def continue_theft(self, char):
         """Continue theft in progress. Returns True if still stealing."""
         cell = char.get('theft_target')
         name = char.get_display_name()
-        
+
+        # No target - nothing to continue
+        if not cell:
+            return False
+
         # Check if we've been trying too long (tick-based, scales with game speed)
         start_tick = char.get('theft_start_tick')
         if start_tick and self.state.ticks - start_tick > THEFT_PATIENCE_TICKS:
             char['theft_target'] = None
-            char['theft_waiting'] = False
             char['theft_start_tick'] = None
             char['theft_cooldown_until_tick'] = self.state.ticks + THEFT_COOLDOWN_TICKS
-            self.state.log_action(f"{name} gave up waiting to steal from farm")
+            self.state.log_action(f"{name} gave up trying to steal from farm")
             return False
-        
-        if not cell:
-            # No specific cell - look for one or wait
-            cell = self.find_nearby_ready_farm_cell(char)
-            if cell:
-                char['theft_target'] = cell
-                char['theft_waiting'] = False
-                self.state.log_action(f"{name} heading toward farm at {cell}")
-            else:
-                # No ready cells - mark as waiting
-                if not char.get('theft_waiting'):
-                    char['theft_waiting'] = True
-                    self.state.log_action(f"{name} waiting at farm for crops to grow")
-                return True  # Still in theft mode, just waiting
-        
+
         cx, cy = cell
-        
+
         # Check if cell is still ready
         data = self.state.farm_cells.get(cell)
         if not data or data['state'] != 'ready':
@@ -3944,14 +3910,10 @@ class GameLogic:
             new_cell = self.find_nearby_ready_farm_cell(char)
             if new_cell:
                 char['theft_target'] = new_cell
-                char['theft_waiting'] = False
                 self.state.log_action(f"{name} heading toward farm at {new_cell}")
-            else:
-                # No ready cells - wait at farm
-                if not char.get('theft_waiting'):
-                    char['theft_waiting'] = True
-                    self.state.log_action(f"{name} waiting at farm for crops to grow")
-            return True
+                return True
+            # No ready cells - give up for now
+            return False
         
         # If standing on the cell (character's cell position matches), steal immediately
         # Convert float position to cell coordinates
@@ -3960,25 +3922,23 @@ class GameLogic:
             # Check if has inventory space
             if not char.can_add_item('wheat', FARM_CELL_YIELD):
                 char['theft_target'] = None
-                char['theft_waiting'] = False
                 char['theft_start_tick'] = None
                 return False
-            
+
             # Execute the theft - THE CRIMINAL ACT
             char.add_item('wheat', FARM_CELL_YIELD)
             # Leave cell in replanting state (brown) - only farmers can turn it yellow
             data['state'] = 'replanting'
             data['timer'] = FARM_REPLANT_TIME
-            
+
             # Clear theft state
             char['theft_target'] = None
-            char['theft_waiting'] = False
             char['theft_start_tick'] = None
-            
+
             self.state.log_action(f"{name} STOLE {FARM_CELL_YIELD} wheat from farm!")
             self.witness_theft(char, cell)  # Records crime in memory system
             return True
-        
+
         # Still in transit - movement handled by _get_goal
         return True
     
@@ -5807,23 +5767,28 @@ class GameLogic:
         return char.hunger <= HUNGER_CHANCE_THRESHOLD and char.get_item('bread') >= BREAD_PER_BITE
     
     def check_cook(self, char):
-        """Should cook bread?"""
+        """Should cook bread? Returns True if has wheat and needs bread (will seek stove)."""
         if char.hunger > HUNGER_CHANCE_THRESHOLD:
             return False
         if char.get_item('bread') >= BREAD_PER_BITE:
             return False
         if char.get_item('wheat') < WHEAT_TO_BREAD_RATIO:
             return False
-        return self.can_bake_bread(char)
+        return True
     
     def check_sleep(self, char):
         """Should sleep?"""
+        if char.get('is_sleeping'):
+            return False
         return self.state.is_sleep_time()
     
     def check_forage(self, char):
         """Should forage/steal for food?"""
         # Don't forage if we have bread
         if char.get_item('bread') >= BREAD_PER_BITE:
+            return False
+        # Don't forage if we have enough wheat to cook
+        if char.get_item('wheat') >= WHEAT_TO_BREAD_RATIO * BREAD_BUFFER_TARGET:
             return False
         # Don't forage if not hungry enough
         if char.hunger > HUNGER_CRITICAL:
@@ -6561,21 +6526,29 @@ class GameLogic:
             amount = min(char.get_item('wheat') // WHEAT_TO_BREAD_RATIO, BREAD_BUFFER_TARGET)
             self.bake_bread(char, amount)
             return True
-        
+
         # Go to cooking spot (cross-zone capable)
         cooking_spot, cooking_pos = self.get_nearest_cooking_spot(char)
         if cooking_spot:
-            # cooking_spot is a dict with 'source' key being the actual object
-            stove_obj = cooking_spot.get('source')
-            if stove_obj:
+            if cooking_spot.get('type') == 'stove':
+                # Stove object - use set_goal_to_object for cross-zone navigation
+                stove_obj = cooking_spot.get('source')
                 self.set_goal_to_object(char, stove_obj)
             elif cooking_pos:
-                # Fallback if no object (campfire case)
+                # Campfire - use position directly (exterior only)
                 self.set_goal_same_zone(char, cooking_pos[0], cooking_pos[1])
-        elif char.zone is None and self.can_make_camp_at(char.x, char.y):
-            # Can't camp indoors
-            self.make_camp(char)
             return True
+        elif char.zone is None:
+            # No cooking spot available - need to make a camp
+            if self.can_make_camp_at(char.x, char.y):
+                self.make_camp(char)
+                return True
+            else:
+                # Can't camp here (e.g. on farm) - find a valid camp spot
+                camp_spot = self._find_camp_spot(char)
+                if camp_spot:
+                    self.set_goal_same_zone(char, camp_spot[0], camp_spot[1])
+                    return True
         return False
     
     def do_sleep(self, char):
@@ -6599,12 +6572,31 @@ class GameLogic:
                 self.set_goal_to_object(char, bed)
                 return False
         else:
-            # No bed - make camp (exterior only)
-            if char.zone is None and self.can_make_camp_at(char.x, char.y):
+            # No bed - use existing camp or make a new one (exterior only)
+            camp_pos = char.get('camp_position')
+            if camp_pos:
+                # Has a camp - go there and sleep
+                camp_center = (camp_pos[0] + 0.5, camp_pos[1] + 0.5)
+                dist = math.sqrt((char.x - camp_center[0])**2 + (char.y - camp_center[1])**2)
+                if char.zone is None and dist < 0.5:
+                    # At camp - sleep
+                    if not char.get('is_sleeping'):
+                        char.is_sleeping = True
+                        self.state.log_action(f"{char.get_display_name()} went to sleep at camp")
+                    char.goal = None
+                    return True
+                else:
+                    # Navigate to camp
+                    self.set_goal_same_zone(char, camp_center[0], camp_center[1])
+                    return False
+            elif char.zone is None and self.can_make_camp_at(char.x, char.y):
+                # No camp yet - make one here
                 self.make_camp(char)
                 char.is_sleeping = True
+                self.state.log_action(f"{char.get_display_name()} went to sleep at camp")
                 return True
             elif char.zone is None:
+                # Can't camp here - find a valid spot
                 camp_spot = self._find_camp_spot(char)
                 if camp_spot:
                     self.set_goal_same_zone(char, camp_spot[0], camp_spot[1])
@@ -6645,15 +6637,7 @@ class GameLogic:
                 return self.continue_theft(char)
             else:
                 char.theft_target = None
-        
-        # Waiting at farm for crops to grow
-        if char.get('theft_waiting'):
-            farm_pos = self.get_farm_waiting_position(char)
-            if farm_pos:
-                char.goal = farm_pos
-                char.goal_zone = None  # Farms are always exterior
-            return self.continue_theft(char)
-        
+
         # Critical hunger - start looking for food to steal
         if char.hunger <= HUNGER_CRITICAL:
             # Find nearest ready farm cell
@@ -6663,15 +6647,8 @@ class GameLogic:
                 char.goal = (ready_cell[0] + 0.5, ready_cell[1] + 0.5)
                 char.goal_zone = None  # Farms are always exterior
                 return self.continue_theft(char)
-            else:
-                # No ready crops - wait near farm
-                char.theft_waiting = True
-                farm_pos = self.get_farm_waiting_position(char)
-                if farm_pos:
-                    char.goal = farm_pos
-                    char.goal_zone = None  # Farms are always exterior
-                return False
-        
+            # No ready crops - return False to fall through to wandering
+
         return False
     
     # =========================================================================
